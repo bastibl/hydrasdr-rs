@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use hydrasdr_rs::commands::{ReceiverMode, VendorRequest};
-use hydrasdr_rs::constants::DEFAULT_BUFFER_SIZE;
+use hydrasdr_rs::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use hydrasdr_rs::device::HydraSdr;
 use hydrasdr_rs::errors::StatusCode;
 use hydrasdr_rs::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
@@ -184,8 +184,42 @@ fn callback_can_stop_streaming_before_more_completions_are_processed() {
 
     assert_eq!(seen, vec![0x01]);
     assert_eq!(stats.buffers_received, 1);
+    assert_eq!(
+        state.borrow().submitted_count,
+        RFONE_TRANSFER_COUNT as usize
+    );
     assert_eq!(state.borrow().completions.len(), 2);
     assert!(!dev.is_streaming());
+}
+
+#[test]
+fn packed_streaming_uses_c_buffer_size_and_sample_count() {
+    let backend = FakeDevice::with_completions([vec![0x5a; PACKED_BUFFER_SIZE]]);
+    let state = backend.state.clone();
+    let mut dev = HydraSdr::from_control(backend);
+    dev.set_packing(1).unwrap();
+
+    let mut observed_sample_count = 0;
+    let stats = dev
+        .start_rx(|transfer: &Transfer<'_>| {
+            observed_sample_count = transfer.sample_count;
+            assert_eq!(transfer.samples.len(), PACKED_BUFFER_SIZE);
+            1
+        })
+        .unwrap();
+
+    assert_eq!(
+        observed_sample_count,
+        (((PACKED_BUFFER_SIZE / 2) * 4) / 3) as i32
+    );
+    assert_eq!(stats.buffers_processed, 1);
+    assert!(
+        state
+            .borrow()
+            .allocated_sizes
+            .iter()
+            .all(|size| *size == PACKED_BUFFER_SIZE)
+    );
 }
 
 #[test]
@@ -213,6 +247,7 @@ fn transfer_error_stops_streaming_reports_libusb_and_cancels_pending() {
 #[test]
 fn stop_rx_is_idempotent_when_streaming_is_idle() {
     let backend = FakeDevice::default();
+    let state = backend.state.clone();
     let mut dev = HydraSdr::from_control(backend);
 
     dev.stop_rx().unwrap();
@@ -220,4 +255,15 @@ fn stop_rx_is_idempotent_when_streaming_is_idle() {
 
     assert!(!dev.is_streaming());
     assert_eq!(dev.streaming_stats(), Default::default());
+    let receiver_modes: Vec<_> = state
+        .borrow()
+        .control_requests
+        .iter()
+        .filter(|request| request.request == VendorRequest::ReceiverMode)
+        .map(|request| request.value)
+        .collect();
+    assert_eq!(
+        receiver_modes,
+        vec![ReceiverMode::Off as u16, ReceiverMode::Off as u16]
+    );
 }
