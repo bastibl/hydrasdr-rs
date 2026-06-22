@@ -1,5 +1,12 @@
-use crate::commands::VendorRequest;
+use std::time::Duration;
+
+use nusb::MaybeFuture;
+use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
+
+use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
+use crate::constants::{CTRL_TIMEOUT_CHIP_ERASE_MS, CTRL_TIMEOUT_MS};
 use crate::errors::{Error, Result, StatusCode};
+use crate::types::PartIdSerialNo;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlDirection {
@@ -15,10 +22,27 @@ pub struct VendorControlRequest {
     pub index: u16,
     pub length: usize,
     pub data: Vec<u8>,
+    pub timeout: Duration,
 }
 
 impl VendorControlRequest {
     pub fn in_request(request: VendorRequest, value: u16, index: u16, length: usize) -> Self {
+        Self::in_request_with_timeout(
+            request,
+            value,
+            index,
+            length,
+            Duration::from_millis(CTRL_TIMEOUT_MS),
+        )
+    }
+
+    pub fn in_request_with_timeout(
+        request: VendorRequest,
+        value: u16,
+        index: u16,
+        length: usize,
+        timeout: Duration,
+    ) -> Self {
         Self {
             direction: ControlDirection::In,
             request,
@@ -26,10 +50,27 @@ impl VendorControlRequest {
             index,
             length,
             data: Vec::new(),
+            timeout,
         }
     }
 
     pub fn out_request(request: VendorRequest, value: u16, index: u16, data: Vec<u8>) -> Self {
+        Self::out_request_with_timeout(
+            request,
+            value,
+            index,
+            data,
+            Duration::from_millis(CTRL_TIMEOUT_MS),
+        )
+    }
+
+    pub fn out_request_with_timeout(
+        request: VendorRequest,
+        value: u16,
+        index: u16,
+        data: Vec<u8>,
+        timeout: Duration,
+    ) -> Self {
         let length = data.len();
         Self {
             direction: ControlDirection::Out,
@@ -38,7 +79,40 @@ impl VendorControlRequest {
             index,
             length,
             data,
+            timeout,
         }
+    }
+
+    pub fn nusb_control_in(&self) -> Result<ControlIn> {
+        if self.direction != ControlDirection::In || self.length > u16::MAX as usize {
+            return Err(Error::Status(StatusCode::InvalidParam));
+        }
+        Ok(ControlIn {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: self.request as u8,
+            value: self.value,
+            index: self.index,
+            length: self.length as u16,
+        })
+    }
+
+    pub fn nusb_control_out(&self) -> Result<ControlOut<'_>> {
+        if self.direction != ControlDirection::Out {
+            return Err(Error::Status(StatusCode::InvalidParam));
+        }
+        Ok(ControlOut {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: self.request as u8,
+            value: self.value,
+            index: self.index,
+            data: &self.data,
+        })
+    }
+
+    pub fn receiver_mode(mode: ReceiverMode) -> Self {
+        Self::out_request(VendorRequest::ReceiverMode, mode as u16, 0, Vec::new())
     }
 
     pub fn set_frequency(freq_hz: u64) -> Self {
@@ -48,6 +122,223 @@ impl VendorControlRequest {
     pub fn get_samplerates_count(extended: bool) -> Self {
         Self::in_request(VendorRequest::GetSamplerates, u16::from(extended), 0, 4)
     }
+
+    pub fn get_samplerates(count: u32, extended: bool) -> Self {
+        Self::in_request(
+            VendorRequest::GetSamplerates,
+            u16::from(extended),
+            count as u16,
+            count as usize * 4,
+        )
+    }
+
+    pub fn set_samplerate(index_or_khz: u32, response_len: usize) -> Self {
+        Self::in_request(
+            VendorRequest::SetSamplerate,
+            0,
+            index_or_khz as u16,
+            response_len,
+        )
+    }
+
+    pub fn get_bandwidths_count() -> Self {
+        Self::in_request(VendorRequest::GetBandwidths, 0, 0, 4)
+    }
+
+    pub fn get_bandwidths(count: u32) -> Self {
+        Self::in_request(
+            VendorRequest::GetBandwidths,
+            0,
+            count as u16,
+            count as usize * 4,
+        )
+    }
+
+    pub fn set_bandwidth(index_or_khz: u32) -> Self {
+        Self::in_request(VendorRequest::SetBandwidth, 0, index_or_khz as u16, 1)
+    }
+
+    pub fn legacy_gain(request: VendorRequest, value: u8) -> Self {
+        Self::in_request(request, 0, value as u16, 1)
+    }
+
+    pub fn unified_gain(gain_type: GainType, value: u8) -> Self {
+        Self::in_request(VendorRequest::SetGain, gain_type as u16, value as u16, 1)
+    }
+
+    pub fn set_rf_bias(value: u8) -> Self {
+        Self::out_request(VendorRequest::SetRfBiasCmd, 0, value as u16, Vec::new())
+    }
+
+    pub fn set_packing(value: u8) -> Self {
+        Self::in_request(VendorRequest::SetPacking, 0, value as u16, 1)
+    }
+
+    pub fn set_rf_port(port: RfPort) -> Self {
+        Self::in_request(VendorRequest::SetRfPort, 0, port as u16, 1)
+    }
+
+    pub fn reset() -> Self {
+        Self::in_request(VendorRequest::Reset, 0, 0, 1)
+    }
+
+    pub fn board_id_read() -> Self {
+        Self::in_request(VendorRequest::BoardIdRead, 0, 0, 1)
+    }
+
+    pub fn version_string_read(length: usize) -> Self {
+        Self::in_request(VendorRequest::VersionStringRead, 0, 0, length)
+    }
+
+    pub fn board_partid_serialno_read() -> Self {
+        Self::in_request(VendorRequest::BoardPartIdSerialNoRead, 0, 0, 24)
+    }
+
+    pub fn get_capabilities(word: u16) -> Self {
+        Self::in_request(VendorRequest::GetCapabilities, 0, word, 4)
+    }
+
+    pub fn gpio_write(port: u8, pin: u8, value: u8) -> Result<Self> {
+        Ok(Self::out_request(
+            VendorRequest::GpioWrite,
+            value as u16,
+            gpio_port_pin(port, pin)?,
+            Vec::new(),
+        ))
+    }
+
+    pub fn gpio_read(port: u8, pin: u8) -> Result<Self> {
+        Ok(Self::in_request(
+            VendorRequest::GpioRead,
+            0,
+            gpio_port_pin(port, pin)?,
+            1,
+        ))
+    }
+
+    pub fn gpiodir_write(port: u8, pin: u8, value: u8) -> Result<Self> {
+        Ok(Self::out_request(
+            VendorRequest::GpioDirWrite,
+            value as u16,
+            gpio_port_pin(port, pin)?,
+            Vec::new(),
+        ))
+    }
+
+    pub fn gpiodir_read(port: u8, pin: u8) -> Result<Self> {
+        Ok(Self::in_request(
+            VendorRequest::GpioDirRead,
+            0,
+            gpio_port_pin(port, pin)?,
+            1,
+        ))
+    }
+
+    pub fn clockgen_write(reg: u8, value: u8) -> Self {
+        Self::out_request(
+            VendorRequest::ClockgenWrite,
+            value as u16,
+            reg as u16,
+            Vec::new(),
+        )
+    }
+
+    pub fn clockgen_read(reg: u8) -> Self {
+        Self::in_request(VendorRequest::ClockgenRead, 0, reg as u16, 1)
+    }
+
+    pub fn rf_frontend_write(reg: u16, value: u32) -> Self {
+        Self::out_request(
+            VendorRequest::RfFrontendWrite,
+            (value & 0xff) as u16,
+            reg & 0xff,
+            Vec::new(),
+        )
+    }
+
+    pub fn rf_frontend_read(reg: u16) -> Self {
+        Self::in_request(VendorRequest::RfFrontendRead, 0, reg & 0xff, 1)
+    }
+
+    pub fn spiflash_erase() -> Self {
+        Self::out_request_with_timeout(
+            VendorRequest::SpiFlashErase,
+            0,
+            0,
+            Vec::new(),
+            Duration::from_millis(CTRL_TIMEOUT_CHIP_ERASE_MS),
+        )
+    }
+
+    pub fn spiflash_erase_sector(sector: u16) -> Self {
+        Self::out_request_with_timeout(
+            VendorRequest::SpiFlashEraseSector,
+            sector,
+            0,
+            Vec::new(),
+            Duration::from_millis(CTRL_TIMEOUT_CHIP_ERASE_MS),
+        )
+    }
+
+    pub fn spiflash_write(addr: u32, data: &[u8]) -> Result<Self> {
+        validate_spiflash_addr(addr)?;
+        Ok(Self::out_request_with_timeout(
+            VendorRequest::SpiFlashWrite,
+            (addr >> 16) as u16,
+            (addr & 0xffff) as u16,
+            data.to_vec(),
+            Duration::from_millis(0),
+        ))
+    }
+
+    pub fn spiflash_read(addr: u32, len: u16) -> Result<Self> {
+        validate_spiflash_addr(addr)?;
+        Ok(Self::in_request_with_timeout(
+            VendorRequest::SpiFlashRead,
+            (addr >> 16) as u16,
+            (addr & 0xffff) as u16,
+            len as usize,
+            Duration::from_millis(0),
+        ))
+    }
+}
+
+pub trait ControlBackend: std::fmt::Debug {
+    fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>>;
+    fn control_out(&self, request: VendorControlRequest) -> Result<()>;
+}
+
+#[derive(Debug)]
+pub struct NusbControl {
+    _device: nusb::Device,
+    interface: nusb::Interface,
+}
+
+impl NusbControl {
+    pub fn new(device: nusb::Device, interface: nusb::Interface) -> Self {
+        Self {
+            _device: device,
+            interface,
+        }
+    }
+}
+
+impl ControlBackend for NusbControl {
+    fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
+        let control = request.nusb_control_in()?;
+        self.interface
+            .control_in(control, request.timeout)
+            .wait()
+            .map_err(Error::from)
+    }
+
+    fn control_out(&self, request: VendorControlRequest) -> Result<()> {
+        let control = request.nusb_control_out()?;
+        self.interface
+            .control_out(control, request.timeout)
+            .wait()
+            .map_err(Error::from)
+    }
 }
 
 pub fn gpio_port_pin(port: u8, pin: u8) -> Result<u16> {
@@ -55,4 +346,32 @@ pub fn gpio_port_pin(port: u8, pin: u8) -> Result<u16> {
         return Err(Error::Status(StatusCode::InvalidParam));
     }
     Ok(((port as u16) << 5) | pin as u16)
+}
+
+pub fn validate_spiflash_addr(addr: u32) -> Result<()> {
+    if addr > 0x0f_ffff {
+        return Err(Error::Status(StatusCode::InvalidParam));
+    }
+    Ok(())
+}
+
+pub fn decode_u32_le_words(bytes: &[u8]) -> Result<Vec<u32>> {
+    let chunks = bytes.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(Error::Status(StatusCode::LibUsb));
+    }
+    Ok(chunks
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk has four bytes")))
+        .collect())
+}
+
+pub fn decode_part_id_serial(bytes: &[u8]) -> Result<PartIdSerialNo> {
+    let words = decode_u32_le_words(bytes)?;
+    if words.len() < 6 {
+        return Err(Error::Status(StatusCode::LibUsb));
+    }
+    Ok(PartIdSerialNo {
+        part_id: [words[0], words[1]],
+        serial_no: [words[2], words[3], words[4], words[5]],
+    })
 }

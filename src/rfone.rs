@@ -1,6 +1,6 @@
-use crate::commands::Capability;
+use crate::commands::{Capability, GainType};
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
-use crate::types::{SampleType, sample_type_bit};
+use crate::types::{BiasTeeInfo, ComponentInfo, GainInfo, RfPortInfo, SampleType, sample_type_bit};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RfOneSpec {
@@ -46,6 +46,25 @@ pub const RFONE_GPIO_COUNT: u16 = 18;
 pub const RFONE_COMPONENT_COUNT: u8 = 2;
 pub const RFONE_RF_FRONTEND_REGS: u32 = 32;
 pub const RFONE_CLOCKGEN_REGS: u32 = 256;
+
+pub const RFONE_LINEARITY_VGA_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    13, 12, 11, 11, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 8, 7, 6, 5, 4,
+];
+pub const RFONE_LINEARITY_MIXER_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    12, 12, 11, 9, 8, 7, 6, 6, 5, 0, 0, 1, 0, 0, 2, 2, 1, 1, 1, 1, 0, 0,
+];
+pub const RFONE_LINEARITY_LNA_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    14, 14, 14, 13, 12, 10, 9, 9, 8, 9, 8, 6, 5, 3, 1, 0, 0, 0, 0, 0, 0, 0,
+];
+pub const RFONE_SENSITIVITY_VGA_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    13, 12, 11, 10, 9, 8, 7, 6, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+];
+pub const RFONE_SENSITIVITY_MIXER_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    12, 12, 12, 12, 11, 10, 10, 9, 9, 8, 7, 4, 4, 4, 3, 2, 2, 1, 0, 0, 0, 0,
+];
+pub const RFONE_SENSITIVITY_LNA_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 13, 12, 12, 9, 9, 8, 7, 6, 5, 3, 2, 1, 0,
+];
 
 pub const RFONE_SAMPLE_TYPES: u16 = sample_type_bit(SampleType::Float32Iq)
     | sample_type_bit(SampleType::Float32Real)
@@ -93,3 +112,76 @@ pub const RFONE_SPEC: RfOneSpec = RfOneSpec {
     rf_frontend_registers: RFONE_RF_FRONTEND_REGS,
     clockgen_registers: RFONE_CLOCKGEN_REGS,
 };
+
+pub fn default_gain_infos() -> Vec<GainInfo> {
+    [
+        (GainType::Lna, RFONE_LNA_MAX_GAIN, RFONE_LNA_MAX_GAIN),
+        (GainType::Mixer, RFONE_MIXER_MAX_GAIN, RFONE_MIXER_MAX_GAIN),
+        (GainType::Vga, RFONE_VGA_MAX_GAIN, RFONE_VGA_MAX_GAIN),
+        (
+            GainType::Linearity,
+            RFONE_GAIN_TABLE_SIZE as u8 - 1,
+            RFONE_DEFAULT_GAIN_INDEX,
+        ),
+        (
+            GainType::Sensitivity,
+            RFONE_GAIN_TABLE_SIZE as u8 - 1,
+            RFONE_DEFAULT_GAIN_INDEX,
+        ),
+        (GainType::LnaAgc, 1, 0),
+        (GainType::MixerAgc, 1, 0),
+    ]
+    .into_iter()
+    .map(|(gain_type, max_value, default_value)| GainInfo {
+        gain_type,
+        min_value: 0,
+        max_value,
+        step_value: 1,
+        default_value,
+        value: default_value,
+        flags: 0,
+    })
+    .collect()
+}
+
+pub fn rf_port_infos() -> Vec<RfPortInfo> {
+    vec![
+        RfPortInfo {
+            name: "ANT",
+            min_frequency: RFONE_MIN_FREQ_HZ,
+            max_frequency: RFONE_MAX_FREQ_HZ,
+            has_bias_tee: true,
+            bias_tee: Some(BiasTeeInfo {
+                voltage: RFONE_BIAS_TEE_VOLTAGE_V,
+                max_current_milliamp: RFONE_BIAS_TEE_MAX_MA,
+            }),
+        },
+        RfPortInfo {
+            name: "CABLE1",
+            min_frequency: RFONE_MIN_FREQ_HZ,
+            max_frequency: RFONE_MAX_FREQ_HZ,
+            has_bias_tee: false,
+            bias_tee: None,
+        },
+        RfPortInfo {
+            name: "CABLE2",
+            min_frequency: RFONE_MIN_FREQ_HZ,
+            max_frequency: RFONE_MAX_FREQ_HZ,
+            has_bias_tee: false,
+            bias_tee: None,
+        },
+    ]
+}
+
+pub fn component_infos() -> Vec<ComponentInfo> {
+    vec![
+        ComponentInfo {
+            name: "RafaelMicro R828D",
+            register_count: RFONE_RF_FRONTEND_REGS,
+        },
+        ComponentInfo {
+            name: "Skyworks SI5351C",
+            register_count: RFONE_CLOCKGEN_REGS,
+        },
+    ]
+}

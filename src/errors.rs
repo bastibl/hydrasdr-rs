@@ -85,6 +85,17 @@ pub fn error_name(code: StatusCode) -> &'static str {
 pub enum Error {
     Status(StatusCode),
     UnknownStatus(UnknownStatusCode),
+    Usb { status: StatusCode, message: String },
+}
+
+impl Error {
+    pub const fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Status(code) => *code,
+            Self::UnknownStatus(_) => StatusCode::Other,
+            Self::Usb { status, .. } => *status,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -92,10 +103,52 @@ impl fmt::Display for Error {
         match self {
             Self::Status(code) => f.write_str(code.name()),
             Self::UnknownStatus(code) => code.fmt(f),
+            Self::Usb { status, message } => write!(f, "{}: {message}", status.name()),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<StatusCode> for Error {
+    fn from(value: StatusCode) -> Self {
+        Self::Status(value)
+    }
+}
+
+impl From<nusb::Error> for Error {
+    fn from(value: nusb::Error) -> Self {
+        let status = match value.kind() {
+            nusb::ErrorKind::Busy => StatusCode::Busy,
+            nusb::ErrorKind::NotFound => StatusCode::NotFound,
+            nusb::ErrorKind::Unsupported => StatusCode::Unsupported,
+            nusb::ErrorKind::PermissionDenied
+            | nusb::ErrorKind::Disconnected
+            | nusb::ErrorKind::Other => StatusCode::LibUsb,
+            _ => StatusCode::LibUsb,
+        };
+        Self::Usb {
+            status,
+            message: value.to_string(),
+        }
+    }
+}
+
+impl From<nusb::transfer::TransferError> for Error {
+    fn from(value: nusb::transfer::TransferError) -> Self {
+        let status = match value {
+            nusb::transfer::TransferError::InvalidArgument => StatusCode::InvalidParam,
+            nusb::transfer::TransferError::Disconnected
+            | nusb::transfer::TransferError::Cancelled
+            | nusb::transfer::TransferError::Stall
+            | nusb::transfer::TransferError::Fault
+            | nusb::transfer::TransferError::Unknown(_) => StatusCode::LibUsb,
+        };
+        Self::Usb {
+            status,
+            message: value.to_string(),
+        }
+    }
+}
 
 pub type Result<T> = core::result::Result<T, Error>;

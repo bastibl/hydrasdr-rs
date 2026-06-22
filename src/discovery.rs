@@ -1,3 +1,6 @@
+use nusb::MaybeFuture;
+
+use crate::errors::{Error, Result, StatusCode};
 use crate::types::BoardId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +25,66 @@ pub const USB_DEVICE_IDS: &[UsbDeviceId] = &[
         board_id: BoardId::HydraSdrRfOneOfficial,
     },
 ];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HydraSdrDeviceInfo {
+    pub vid: u16,
+    pub pid: u16,
+    pub description: &'static str,
+    pub board_id: BoardId,
+    pub serial: Option<u64>,
+    pub product_string: Option<String>,
+}
+
+impl HydraSdrDeviceInfo {
+    pub fn from_nusb(info: &nusb::DeviceInfo) -> Option<Self> {
+        let device_id = find_usb_device_id(info.vendor_id(), info.product_id())?;
+        Some(Self {
+            vid: device_id.vid,
+            pid: device_id.pid,
+            description: device_id.description,
+            board_id: device_id.board_id,
+            serial: info.serial_number().and_then(parse_hydrasdr_serial),
+            product_string: info.product_string().map(str::to_owned),
+        })
+    }
+}
+
+pub fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
+    USB_DEVICE_IDS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.vid == vid && candidate.pid == pid)
+}
+
+pub fn list_devices() -> Result<Vec<HydraSdrDeviceInfo>> {
+    let devices = nusb::list_devices().wait().map_err(Error::from)?;
+    Ok(devices
+        .filter_map(|device| HydraSdrDeviceInfo::from_nusb(&device))
+        .collect())
+}
+
+pub fn list_device_serials() -> Result<Vec<u64>> {
+    Ok(list_devices()?
+        .into_iter()
+        .filter_map(|d| d.serial)
+        .collect())
+}
+
+pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
+    for device in nusb::list_devices().wait().map_err(Error::from)? {
+        if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
+            continue;
+        }
+        if let Some(wanted) = serial {
+            if device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted) {
+                continue;
+            }
+        }
+        return Ok(device);
+    }
+    Err(Error::Status(StatusCode::NotFound))
+}
 
 pub fn parse_hydrasdr_serial(serial: &str) -> Option<u64> {
     let hex = serial.strip_prefix("HYDRASDR SN:")?.trim();
