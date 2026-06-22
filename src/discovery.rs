@@ -64,6 +64,13 @@ pub fn list_devices() -> Result<Vec<HydraSdrDeviceInfo>> {
         .collect())
 }
 
+pub async fn list_devices_async() -> Result<Vec<HydraSdrDeviceInfo>> {
+    let devices = nusb::list_devices().await.map_err(Error::from)?;
+    Ok(devices
+        .filter_map(|device| HydraSdrDeviceInfo::from_nusb(&device))
+        .collect())
+}
+
 pub fn list_device_serials() -> Result<Vec<u64>> {
     Ok(list_devices()?
         .into_iter()
@@ -71,8 +78,31 @@ pub fn list_device_serials() -> Result<Vec<u64>> {
         .collect())
 }
 
+pub async fn list_device_serials_async() -> Result<Vec<u64>> {
+    Ok(list_devices_async()
+        .await?
+        .into_iter()
+        .filter_map(|d| d.serial)
+        .collect())
+}
+
 pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
     for device in nusb::list_devices().wait().map_err(Error::from)? {
+        if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
+            continue;
+        }
+        if let Some(wanted) = serial {
+            if device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted) {
+                continue;
+            }
+        }
+        return Ok(device);
+    }
+    Err(Error::Status(StatusCode::NotFound))
+}
+
+pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
+    for device in nusb::list_devices().await.map_err(Error::from)? {
         if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
             continue;
         }

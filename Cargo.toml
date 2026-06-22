@@ -3,5 +3,13 @@ name = "hydrasdr-rs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+tokio = ["nusb/tokio"]
+smol = ["nusb/smol"]
+
 [dependencies]
 nusb = "0.2.4"
+
+[dev-dependencies]
+futures-lite = "2"

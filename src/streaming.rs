@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::ops::Deref;
 use std::time::Duration;
 
@@ -45,6 +46,23 @@ pub trait StreamingBackend: std::fmt::Debug {
     type BulkIn: BulkInBackend;
 
     fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn>;
+}
+
+pub trait AsyncBulkInBackend: std::fmt::Debug {
+    type Buffer: Deref<Target = [u8]>;
+
+    fn clear_halt_async(&mut self) -> impl Future<Output = Result<()>> + '_;
+    fn allocate(&self, len: usize) -> Self::Buffer;
+    fn submit(&mut self, buffer: Self::Buffer);
+    fn pending(&self) -> usize;
+    fn next_complete_async(&mut self) -> impl Future<Output = BulkInCompletion<Self::Buffer>> + '_;
+    fn cancel_all(&mut self);
+}
+
+pub trait AsyncStreamingBackend: std::fmt::Debug {
+    type BulkIn: AsyncBulkInBackend;
+
+    fn bulk_in_async(&self, endpoint: u8) -> impl Future<Output = Result<Self::BulkIn>> + '_;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +153,34 @@ impl StreamingState {
         result.map(|()| self.stats)
     }
 
+    pub async fn run_async<B, F>(
+        &mut self,
+        mut bulk_in: B,
+        sample_type: SampleType,
+        mut callback: F,
+    ) -> Result<StreamingStats>
+    where
+        B: AsyncBulkInBackend,
+        F: FnMut(&Transfer<'_>) -> i32,
+    {
+        if self.streaming {
+            return Err(Error::Status(StatusCode::Busy));
+        }
+
+        self.stats = StreamingStats::default();
+        self.stop_requested = false;
+        self.streaming = true;
+
+        let result = self
+            .run_inner_async(&mut bulk_in, sample_type, &mut callback)
+            .await;
+        bulk_in.cancel_all();
+        self.streaming = false;
+        self.stop_requested = false;
+
+        result.map(|()| self.stats)
+    }
+
     fn run_inner<B, F>(
         &mut self,
         bulk_in: &mut B,
@@ -153,27 +199,7 @@ impl StreamingState {
                 continue;
             };
 
-            completion.status?;
-            let buffer = completion.buffer;
-            let actual_len = completion.actual_len;
-            if actual_len != self.current_buffer_size() || actual_len > buffer.len() {
-                self.stats.buffers_dropped += 1;
-                return Err(Error::Status(StatusCode::LibUsb));
-            }
-
-            self.stats.buffers_received += 1;
-            let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
-            let transfer = Transfer {
-                samples: &buffer[..actual_len],
-                sample_count,
-                dropped_samples: self.stats.buffers_dropped * sample_count as u64,
-                sample_type,
-            };
-            self.stats.buffers_processed += 1;
-
-            if callback(&transfer) != 0 {
-                self.stop_requested = true;
-            } else {
+            if let Some(buffer) = self.process_completion(completion, sample_type, callback)? {
                 bulk_in.submit(buffer);
             }
         }
@@ -181,7 +207,73 @@ impl StreamingState {
         Ok(())
     }
 
+    async fn run_inner_async<B, F>(
+        &mut self,
+        bulk_in: &mut B,
+        sample_type: SampleType,
+        callback: &mut F,
+    ) -> Result<()>
+    where
+        B: AsyncBulkInBackend,
+        F: FnMut(&Transfer<'_>) -> i32,
+    {
+        bulk_in.clear_halt_async().await?;
+        self.submit_initial_transfers_async(bulk_in);
+
+        while self.streaming && !self.stop_requested {
+            let completion = bulk_in.next_complete_async().await;
+            if let Some(buffer) = self.process_completion(completion, sample_type, callback)? {
+                bulk_in.submit(buffer);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_completion<B, F>(
+        &mut self,
+        completion: BulkInCompletion<B>,
+        sample_type: SampleType,
+        callback: &mut F,
+    ) -> Result<Option<B>>
+    where
+        B: Deref<Target = [u8]>,
+        F: FnMut(&Transfer<'_>) -> i32,
+    {
+        completion.status?;
+        let buffer = completion.buffer;
+        let actual_len = completion.actual_len;
+        if actual_len != self.current_buffer_size() || actual_len > buffer.len() {
+            self.stats.buffers_dropped += 1;
+            return Err(Error::Status(StatusCode::LibUsb));
+        }
+
+        self.stats.buffers_received += 1;
+        let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
+        let transfer = Transfer {
+            samples: &buffer[..actual_len],
+            sample_count,
+            dropped_samples: self.stats.buffers_dropped * sample_count as u64,
+            sample_type,
+        };
+        self.stats.buffers_processed += 1;
+
+        if callback(&transfer) != 0 {
+            self.stop_requested = true;
+            Ok(None)
+        } else {
+            Ok(Some(buffer))
+        }
+    }
+
     fn submit_initial_transfers<B: BulkInBackend>(&self, bulk_in: &mut B) {
+        while bulk_in.pending() < self.config.transfer_count {
+            let buffer = bulk_in.allocate(self.current_buffer_size());
+            bulk_in.submit(buffer);
+        }
+    }
+
+    fn submit_initial_transfers_async<B: AsyncBulkInBackend>(&self, bulk_in: &mut B) {
         while bulk_in.pending() < self.config.transfer_count {
             let buffer = bulk_in.allocate(self.current_buffer_size());
             bulk_in.submit(buffer);

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use nusb::Endpoint;
@@ -9,7 +10,9 @@ use nusb::transfer::{
 use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
 use crate::constants::{CTRL_TIMEOUT_CHIP_ERASE_MS, CTRL_TIMEOUT_MS};
 use crate::errors::{Error, Result, StatusCode};
-use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend};
+use crate::streaming::{
+    AsyncBulkInBackend, AsyncStreamingBackend, BulkInBackend, BulkInCompletion, StreamingBackend,
+};
 use crate::types::PartIdSerialNo;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,6 +315,18 @@ pub trait ControlBackend: std::fmt::Debug {
     fn control_out(&self, request: VendorControlRequest) -> Result<()>;
 }
 
+pub trait AsyncControlBackend: std::fmt::Debug {
+    fn control_in_async(
+        &self,
+        request: VendorControlRequest,
+    ) -> impl Future<Output = Result<Vec<u8>>> + '_;
+
+    fn control_out_async(
+        &self,
+        request: VendorControlRequest,
+    ) -> impl Future<Output = Result<()>> + '_;
+}
+
 #[derive(Debug)]
 pub struct NusbControl {
     _device: nusb::Device,
@@ -350,10 +365,41 @@ impl ControlBackend for NusbControl {
     }
 }
 
+impl AsyncControlBackend for NusbControl {
+    async fn control_in_async(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
+        let control = request.nusb_control_in()?;
+        self.interface
+            .control_in(control, request.timeout)
+            .await
+            .map_err(Error::from)
+    }
+
+    async fn control_out_async(&self, request: VendorControlRequest) -> Result<()> {
+        let control = request.nusb_control_out()?;
+        self.interface
+            .control_out(control, request.timeout)
+            .await
+            .map_err(Error::from)
+    }
+}
+
 impl StreamingBackend for NusbControl {
     type BulkIn = NusbBulkIn;
 
     fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn> {
+        Ok(NusbBulkIn {
+            endpoint: self
+                .interface
+                .endpoint::<Bulk, In>(endpoint)
+                .map_err(Error::from)?,
+        })
+    }
+}
+
+impl AsyncStreamingBackend for NusbControl {
+    type BulkIn = NusbBulkIn;
+
+    async fn bulk_in_async(&self, endpoint: u8) -> Result<Self::BulkIn> {
         Ok(NusbBulkIn {
             endpoint: self
                 .interface
@@ -390,6 +436,39 @@ impl BulkInBackend for NusbBulkIn {
                 actual_len: completion.actual_len,
                 status: completion.status.map_err(Error::from),
             })
+    }
+
+    fn cancel_all(&mut self) {
+        self.endpoint.cancel_all();
+    }
+}
+
+impl AsyncBulkInBackend for NusbBulkIn {
+    type Buffer = NusbBuffer;
+
+    async fn clear_halt_async(&mut self) -> Result<()> {
+        self.endpoint.clear_halt().await.map_err(Error::from)
+    }
+
+    fn allocate(&self, len: usize) -> Self::Buffer {
+        self.endpoint.allocate(len)
+    }
+
+    fn submit(&mut self, buffer: Self::Buffer) {
+        self.endpoint.submit(buffer);
+    }
+
+    fn pending(&self) -> usize {
+        self.endpoint.pending()
+    }
+
+    async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
+        let completion = self.endpoint.next_complete().await;
+        BulkInCompletion {
+            buffer: completion.buffer,
+            actual_len: completion.actual_len,
+            status: completion.status.map_err(Error::from),
+        }
     }
 
     fn cancel_all(&mut self) {
