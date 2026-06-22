@@ -1,11 +1,15 @@
 use std::time::Duration;
 
+use nusb::Endpoint;
 use nusb::MaybeFuture;
-use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
+use nusb::transfer::{
+    Buffer as NusbBuffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient,
+};
 
 use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
 use crate::constants::{CTRL_TIMEOUT_CHIP_ERASE_MS, CTRL_TIMEOUT_MS};
 use crate::errors::{Error, Result, StatusCode};
+use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend};
 use crate::types::PartIdSerialNo;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -314,6 +318,11 @@ pub struct NusbControl {
     interface: nusb::Interface,
 }
 
+#[derive(Debug)]
+pub struct NusbBulkIn {
+    endpoint: Endpoint<Bulk, In>,
+}
+
 impl NusbControl {
     pub fn new(device: nusb::Device, interface: nusb::Interface) -> Self {
         Self {
@@ -338,6 +347,53 @@ impl ControlBackend for NusbControl {
             .control_out(control, request.timeout)
             .wait()
             .map_err(Error::from)
+    }
+}
+
+impl StreamingBackend for NusbControl {
+    type BulkIn = NusbBulkIn;
+
+    fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn> {
+        Ok(NusbBulkIn {
+            endpoint: self
+                .interface
+                .endpoint::<Bulk, In>(endpoint)
+                .map_err(Error::from)?,
+        })
+    }
+}
+
+impl BulkInBackend for NusbBulkIn {
+    type Buffer = NusbBuffer;
+
+    fn clear_halt(&mut self) -> Result<()> {
+        self.endpoint.clear_halt().wait().map_err(Error::from)
+    }
+
+    fn allocate(&self, len: usize) -> Self::Buffer {
+        self.endpoint.allocate(len)
+    }
+
+    fn submit(&mut self, buffer: Self::Buffer) {
+        self.endpoint.submit(buffer);
+    }
+
+    fn pending(&self) -> usize {
+        self.endpoint.pending()
+    }
+
+    fn wait_next_complete(&mut self, timeout: Duration) -> Option<BulkInCompletion<Self::Buffer>> {
+        self.endpoint
+            .wait_next_complete(timeout)
+            .map(|completion| BulkInCompletion {
+                buffer: completion.buffer,
+                actual_len: completion.actual_len,
+                status: completion.status.map_err(Error::from),
+            })
+    }
+
+    fn cancel_all(&mut self) {
+        self.endpoint.cancel_all();
     }
 }
 

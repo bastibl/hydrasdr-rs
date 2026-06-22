@@ -6,10 +6,11 @@ use crate::errors::{Error, Result, StatusCode};
 use crate::rfone::{
     RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
     RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
-    RFONE_MIXER_MAX_GAIN, RFONE_SAMPLE_TYPES, RFONE_SENSITIVITY_LNA_GAINS,
+    RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT, RFONE_SAMPLE_TYPES, RFONE_SENSITIVITY_LNA_GAINS,
     RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_TYPICAL_POWER_MW,
     RFONE_VGA_MAX_GAIN, component_infos, default_gain_infos, rf_port_infos,
 };
+use crate::streaming::{StreamingBackend, StreamingState, StreamingStats, Transfer};
 use crate::types::{BoardId, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature};
 use crate::usb::control::{
     ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial, decode_u32_le_words,
@@ -33,6 +34,7 @@ pub struct HydraSdr<C = NusbControl> {
     current_bandwidth: u32,
     packing_enabled: bool,
     reset_command: bool,
+    streaming: StreamingState,
 }
 
 impl<C: ControlBackend> HydraSdr<C> {
@@ -48,6 +50,7 @@ impl<C: ControlBackend> HydraSdr<C> {
             current_bandwidth: 0,
             packing_enabled: false,
             reset_command: false,
+            streaming: StreamingState::new(),
         }
     }
 
@@ -261,6 +264,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     pub fn set_packing(&mut self, value: u8) -> Result<()> {
         self.control_in_min(VendorControlRequest::set_packing(value), 1)?;
         self.packing_enabled = value == 1;
+        self.streaming.set_packing(self.packing_enabled)?;
         Ok(())
     }
 
@@ -351,6 +355,22 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     pub fn receiver_mode(&self, mode: ReceiverMode) -> Result<()> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
+    }
+
+    pub fn stop_rx(&mut self) -> Result<()> {
+        self.streaming.request_stop();
+        if !self.reset_command {
+            self.receiver_mode(ReceiverMode::Off)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.streaming.is_streaming()
+    }
+
+    pub fn streaming_stats(&self) -> StreamingStats {
+        self.streaming.stats()
     }
 
     fn sample_rate_param(&mut self, samplerate: u32) -> Result<u32> {
@@ -453,6 +473,29 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     fn control_out(&self, request: VendorControlRequest) -> Result<()> {
         self.control.control_out(request)
+    }
+}
+
+impl<C> HydraSdr<C>
+where
+    C: ControlBackend + StreamingBackend,
+{
+    pub fn start_rx<F>(&mut self, callback: F) -> Result<StreamingStats>
+    where
+        F: FnMut(&Transfer<'_>) -> i32,
+    {
+        self.receiver_mode(ReceiverMode::Off)?;
+        self.receiver_mode(ReceiverMode::Rx)?;
+
+        let bulk_in = self.control.bulk_in(RFONE_RX_ENDPOINT)?;
+        let stream_result = self.streaming.run(bulk_in, self.sample_type, callback);
+        let stop_result = self.stop_rx();
+
+        match (stream_result, stop_result) {
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+            (Ok(stats), Ok(())) => Ok(stats),
+        }
     }
 }
 
