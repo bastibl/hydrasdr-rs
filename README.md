@@ -6,7 +6,7 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 ## Status
 
-Implemented in this branch:
+Implemented:
 
 - Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and `SampleBlock` receive callbacks.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
@@ -17,10 +17,10 @@ Implemented in this branch:
 - Hardware-gated smoke tests and sync/async examples for real devices.
 - Design notes for the public API in `docs/ergonomic-api-design.md`.
 
-Not yet polished:
+TODO:
 
-- Packed-sample conversion and converted sample formats beyond pull-style `Float32Iq` are still phase boundaries; callback streaming intentionally exposes raw USB bytes.
-- Async open/discovery and endpoint `clear_halt` follow what `nusb` exposes; this crate does not force a runtime by default.
+- Packed-sample conversion.
+- Converted sample formats beyond pull-style `Float32Iq`; callback streaming intentionally exposes raw USB bytes.
 
 ## USB dependency and execution model
 
@@ -28,14 +28,16 @@ Not yet polished:
 
 The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open, interface claim, control transfers, endpoint halt clearing, and bulk streaming completions while keeping the USB backend in Rust.
 
-The async API uses `nusb` futures for control and bulk transfers where available. Enable at most one async integration feature when the application needs a runtime-backed `nusb` IO thread:
+The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
+
+For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `receive_blocks_async`:
 
 ```sh
 cargo check --features tokio
 cargo check --features smol
 ```
 
-The default feature set stays runtime-free.
+Use `tokio` if the application already runs on Tokio; use `smol` for smaller examples or applications using the smol/async-io ecosystem. Do not enable both.
 
 ## Synchronous API
 
