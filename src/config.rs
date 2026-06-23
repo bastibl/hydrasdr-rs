@@ -32,6 +32,14 @@ pub enum Bandwidth {
 }
 
 /// High-level sample format names mapped to direct C sample types.
+///
+/// ```
+/// use hydrasdr_rs::types::SampleType;
+/// use hydrasdr_rs::SampleFormat;
+///
+/// assert_eq!(SampleFormat::RawU8Iq.sample_type(), SampleType::Uint8Iq);
+/// assert_eq!(SampleFormat::Raw.sample_type(), SampleType::Raw);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
     /// Raw unsigned 8-bit IQ bytes.
@@ -89,6 +97,25 @@ impl From<GainPreset> for GainConfig {
 }
 
 /// Reusable high-level receiver configuration.
+///
+/// Building a config validates ranges without opening USB hardware, so this is
+/// safe in doctests and CI:
+///
+/// ```
+/// use hydrasdr_rs::{Bandwidth, Config, GainPreset, SampleFormat};
+///
+/// let config = Config::builder()
+///     .frequency_hz(144_500_000)
+///     .sample_rate_hz(10_000_000)
+///     .bandwidth(Bandwidth::Auto)
+///     .sample_format(SampleFormat::RawU8Iq)
+///     .gain(GainPreset::Linearity(10))
+///     .build()?;
+///
+/// assert_eq!(config.frequency_hz(), 144_500_000);
+/// assert_eq!(config.sample_format(), SampleFormat::RawU8Iq);
+/// # Ok::<(), hydrasdr_rs::Error>(())
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     frequency_hz: u64,
@@ -118,6 +145,19 @@ impl Default for Config {
 
 impl Config {
     /// Start building a high-level receiver configuration.
+    ///
+    /// ```
+    /// use hydrasdr_rs::{Config, GainPreset};
+    ///
+    /// let config = Config::builder()
+    ///     .frequency_hz(100_000_000)
+    ///     .sample_rate_hz(10_000_000)
+    ///     .gain(GainPreset::Sensitivity(6))
+    ///     .build()?;
+    ///
+    /// assert_eq!(config.sample_rate_hz(), 10_000_000);
+    /// # Ok::<(), hydrasdr_rs::Error>(())
+    /// ```
     pub fn builder() -> ConfigBuilder {
         ConfigBuilder::default()
     }
@@ -219,6 +259,22 @@ impl Config {
 }
 
 /// Builder for [`Config`].
+///
+/// ```
+/// use hydrasdr_rs::{Config, SampleFormat};
+///
+/// let config = Config::builder()
+///     .frequency_hz(915_000_000)
+///     .sample_rate_hz(2_000_000)
+///     .bandwidth_hz(1_750_000)
+///     .sample_format(SampleFormat::I16Iq)
+///     .packing(true)
+///     .build()?;
+///
+/// assert_eq!(config.bandwidth(), hydrasdr_rs::Bandwidth::ManualHz(1_750_000));
+/// assert!(config.packing());
+/// # Ok::<(), hydrasdr_rs::Error>(())
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct ConfigBuilder {
     config: Config,

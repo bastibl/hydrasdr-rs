@@ -1,27 +1,25 @@
 # hydrasdr-rs
 
-Direct Rust translation of the HydraSDR RFOne host driver, currently focused on C API parity and traceability. The proposed idiomatic high-level Rust API is documented in `docs/ergonomic-api-design.md`.
+Rust HydraSDR RFOne access built on [`nusb`](https://crates.io/crates/nusb). The crate now leads with an ergonomic Rust API for normal receive workflows while keeping the direct C-style translation available for parity checks, debugging, and porting code from `hydrasdr-host`.
 
-This crate is in the direct C-to-Rust translation phase. Public names intentionally stay close to the C driver (`hydrasdr_open`, `hydrasdr_set_freq`, `hydrasdr_start_rx`, and friends) so behavior can be compared against `/home/basti/src/hydrasdr-host`. The ergonomic API design keeps this direct layer available while adding builder/config types, `Device`, and `RxStream` wrappers on top.
+Use the high-level [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) API for new Rust applications. Drop down to [`HydraSdr`](src/device.rs) or the explicit `hydrasdr_rs::direct` namespace when you need one-to-one access to the C-driver-shaped functions such as `set_freq`, `set_samplerate`, `start_rx`, or low-level GPIO/SPI/clockgen controls.
 
 ## Status
 
 Implemented in this branch:
 
+- Ergonomic sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, direct escape hatches, and `SampleBlock` receive callbacks.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
 - Synchronous control API for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, GPIO, clockgen, RF frontend, SPI flash, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async counterparts for the direct API.
-- No-hardware parity tests for constants, control-transfer packing, state handling, error mapping, and streaming loop behavior.
-- Hardware-gated smoke tests and examples for real devices.
-- A documented high-level Rust API plan for the next implementation stage.
+- No-hardware parity and ergonomic tests for constants, control-transfer packing, state handling, error mapping, configuration ordering, and streaming loop behavior.
+- Hardware-gated smoke tests and sync/async examples for real devices.
+- Design notes for the high-level API in `docs/ergonomic-api-design.md`.
 
 Not yet polished:
 
-- This is not the final ergonomic Rust API.
-- DSP/DDC conversion and a higher-level safe streaming abstraction are phase boundaries, not part of the current direct translation.
+- DSP/DDC conversion and typed IQ sample conversion are phase boundaries; `SampleBlock` intentionally exposes the raw USB bytes plus format/count metadata for now.
 - Async open/discovery and endpoint `clear_halt` follow what `nusb` exposes; this crate does not force a runtime by default.
-
-See `docs/ergonomic-api-design.md` for the proposed builder/config, `Device`, and sync/async streaming API shape that should be layered over this direct API.
 
 ## USB dependency and execution model
 
@@ -37,6 +35,90 @@ cargo check --features smol
 ```
 
 The default feature set stays runtime-free.
+
+## Ergonomic synchronous usage
+
+The high-level builder opens the selected RFOne, applies the receiver configuration through the direct API, and caches device metadata:
+
+```rust,no_run
+use hydrasdr_rs::commands::RfPort;
+use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+
+fn main() -> hydrasdr_rs::Result<()> {
+    let mut dev = Device::builder()
+        .frequency_hz(100_000_000)
+        .sample_rate_hz(10_000_000)
+        .sample_format(SampleFormat::RawU8Iq)
+        .rf_port(RfPort::Rx0)
+        .gain(GainPreset::Linearity(12))
+        .bias_tee(false)
+        .open()?;
+
+    println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
+
+    let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+        println!(
+            "{} bytes, {} samples, dropped={}",
+            block.raw_bytes().len(),
+            block.sample_count(),
+            block.dropped_samples()
+        );
+        true // stop after one callback
+    })?;
+    println!("{stats:?}");
+
+    dev.into_direct().close()
+}
+```
+
+For reusable validation without touching USB, build a `Config` first and pass it to an already-open device:
+
+```rust
+use hydrasdr_rs::{Config, GainPreset, SampleFormat};
+
+let config = Config::builder()
+    .frequency_hz(100_000_000)
+    .sample_rate_hz(10_000_000)
+    .sample_format(SampleFormat::RawU8Iq)
+    .gain(GainPreset::Sensitivity(8))
+    .build()?;
+
+assert_eq!(config.frequency_hz(), 100_000_000);
+# Ok::<(), hydrasdr_rs::Error>(())
+```
+
+## Ergonomic async usage
+
+The async high-level API mirrors the sync shape and awaits the direct async control/streaming path. Enable exactly one runtime integration feature if your application needs `nusb`'s runtime-backed IO thread:
+
+```rust,no_run
+use futures_lite::future::block_on;
+use hydrasdr_rs::commands::RfPort;
+use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+
+fn main() -> hydrasdr_rs::Result<()> {
+    block_on(async {
+        let mut dev = Device::builder()
+            .frequency_hz(144_500_000)
+            .sample_rate_hz(10_000_000)
+            .sample_format(SampleFormat::RawU8Iq)
+            .rf_port(RfPort::Rx0)
+            .gain(GainPreset::Linearity(10))
+            .open_async()
+            .await?;
+
+        let stats = dev.receive_blocks_async(|block: SampleBlock<'_>| {
+            println!("async block: {} bytes", block.raw_bytes().len());
+            true
+        }).await?;
+        println!("{stats:?}");
+
+        dev.into_direct().close()
+    })
+}
+```
+
+See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated ergonomic examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 
 ## Linux permissions and hardware safety
 
@@ -56,11 +138,13 @@ Reload udev rules and replug the device before running hardware examples/tests. 
 
 Some API calls can change receiver state, RF bias, GPIO direction, or SPI flash contents. The examples and hardware tests are gated so normal `cargo test`/`cargo run --example ...` invocations do not accidentally touch hardware.
 
-## Basic direct synchronous usage
+## Lower-level direct API
+
+The direct API remains available for C-parity work and advanced controls that are not wrapped ergonomically yet. Use the top-level `HydraSdr` type or the explicit `hydrasdr_rs::direct` namespace:
 
 ```rust,no_run
-use hydrasdr_rs::HydraSdr;
-use hydrasdr_rs::types::SampleType;
+use hydrasdr_rs::direct::HydraSdr;
+use hydrasdr_rs::direct::types::SampleType;
 
 fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = HydraSdr::open()?;
@@ -91,9 +175,9 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-The callback receives raw USB bytes plus C-parity sample-count metadata. It is intentionally not a final typed IQ sample abstraction yet.
+The callback receives raw USB bytes plus C-parity sample-count metadata. It intentionally mirrors the C driver rather than providing the higher-level `SampleBlock` wrapper.
 
-## Async direct usage
+Async direct usage is also available:
 
 ```rust,no_run
 use futures_lite::future::block_on;
@@ -110,7 +194,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-See `examples/direct_sync.rs` and `examples/direct_async.rs` for longer real-device flows.
+See `examples/direct_sync.rs` and `examples/direct_async.rs` for longer real-device flows and for controls that intentionally stay close to the C API.
 
 ## Checks and tests
 
@@ -122,6 +206,8 @@ cargo test
 cargo fmt --check
 cargo doc --no-deps
 cargo check --examples
+cargo run --example rx_sync --
+cargo run --example rx_async --
 cargo run --example direct_sync --
 cargo run --example direct_async --
 cargo check --examples --features tokio
@@ -132,6 +218,10 @@ Hardware-gated commands, run only with an RFOne connected and USB permissions in
 
 ```sh
 cargo test --test hardware -- --ignored --nocapture
+cargo run --example rx_sync -- --run
+cargo run --example rx_sync -- --run --rx
+cargo run --example rx_async -- --run
+cargo run --example rx_async -- --run --rx
 cargo run --example direct_sync -- --run
 cargo run --example direct_sync -- --run --rx
 cargo run --example direct_async -- --run

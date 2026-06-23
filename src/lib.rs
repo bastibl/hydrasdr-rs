@@ -18,6 +18,67 @@
 //! and examples are gated with `#[ignore]` or an explicit `--run` flag because
 //! they open USB devices, change receiver state, and may touch RF bias/GPIO/SPI
 //! flash paths just like the C driver.
+//!
+//! # Ergonomic API
+//!
+//! Build reusable receiver configurations without touching USB:
+//!
+//! ```
+//! use hydrasdr_rs::{Config, GainPreset, SampleFormat};
+//!
+//! let config = Config::builder()
+//!     .frequency_hz(100_000_000)
+//!     .sample_rate_hz(10_000_000)
+//!     .sample_format(SampleFormat::RawU8Iq)
+//!     .gain(GainPreset::Sensitivity(8))
+//!     .build()?;
+//!
+//! assert_eq!(config.frequency_hz(), 100_000_000);
+//! # Ok::<(), hydrasdr_rs::Error>(())
+//! ```
+//!
+//! Open and configure real hardware with the high-level [`Device`] builder:
+//!
+//! ```no_run
+//! use hydrasdr_rs::commands::RfPort;
+//! use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+//!
+//! fn main() -> hydrasdr_rs::Result<()> {
+//!     let mut dev = Device::builder()
+//!         .frequency_hz(100_000_000)
+//!         .sample_rate_hz(10_000_000)
+//!         .sample_format(SampleFormat::RawU8Iq)
+//!         .rf_port(RfPort::Rx0)
+//!         .gain(GainPreset::Linearity(12))
+//!         .open()?;
+//!
+//!     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+//!         println!("{} bytes", block.raw_bytes().len());
+//!         true
+//!     })?;
+//!     println!("{stats:?}");
+//!
+//!     dev.into_direct().close()
+//! }
+//! ```
+//!
+//! # Direct API
+//!
+//! The low-level C-style API is still available when you need one-to-one control
+//! requests or parity with `hydrasdr-host`:
+//!
+//! ```no_run
+//! use hydrasdr_rs::direct::HydraSdr;
+//! use hydrasdr_rs::direct::types::SampleType;
+//!
+//! fn main() -> hydrasdr_rs::Result<()> {
+//!     let mut dev = HydraSdr::open()?;
+//!     dev.set_sample_type(SampleType::Raw)?;
+//!     dev.set_freq(100_000_000)?;
+//!     dev.set_samplerate(10_000_000)?;
+//!     dev.close()
+//! }
+//! ```
 
 pub mod commands;
 pub mod config;

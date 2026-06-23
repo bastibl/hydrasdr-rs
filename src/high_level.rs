@@ -8,6 +8,32 @@ use crate::types::DeviceInfo;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 
 /// High-level owned HydraSDR RFOne device handle.
+///
+/// Hardware-opening examples are marked `no_run`; compile-only configuration
+/// examples live on [`crate::Config`] and [`crate::ConfigBuilder`].
+///
+/// ```no_run
+/// use hydrasdr_rs::commands::RfPort;
+/// use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+///
+/// fn main() -> hydrasdr_rs::Result<()> {
+///     let mut dev = Device::builder()
+///         .frequency_hz(100_000_000)
+///         .sample_rate_hz(10_000_000)
+///         .sample_format(SampleFormat::RawU8Iq)
+///         .rf_port(RfPort::Rx0)
+///         .gain(GainPreset::Linearity(12))
+///         .open()?;
+///
+///     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+///         println!("{} raw bytes", block.raw_bytes().len());
+///         true
+///     })?;
+///     println!("{stats:?}");
+///
+///     dev.into_direct().close()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Device<C = NusbControl> {
     direct: HydraSdr<C>,
@@ -101,6 +127,20 @@ where
     /// Receive sample blocks through the direct callback streaming loop.
     ///
     /// The callback returns `true` to stop the stream and `false` to continue.
+    ///
+    /// ```no_run
+    /// use hydrasdr_rs::{Device, SampleBlock};
+    ///
+    /// fn main() -> hydrasdr_rs::Result<()> {
+    ///     let mut dev = Device::open()?;
+    ///     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+    ///         println!("{} samples", block.sample_count());
+    ///         true
+    ///     })?;
+    ///     println!("{stats:?}");
+    ///     dev.into_direct().close()
+    /// }
+    /// ```
     pub fn receive_blocks<F>(&mut self, mut callback: F) -> Result<StreamingStats>
     where
         F: FnMut(SampleBlock<'_>) -> bool,
@@ -190,6 +230,24 @@ impl Device<NusbControl> {
 }
 
 /// Builder that selects, opens, and initially configures a high-level `nusb` device.
+///
+/// Use [`DeviceBuilder::config`] to validate the same high-level settings without
+/// opening hardware, or [`DeviceBuilder::open`] / [`DeviceBuilder::open_async`]
+/// to apply them to a selected RFOne.
+///
+/// ```
+/// use hydrasdr_rs::{Device, GainPreset, SampleFormat};
+///
+/// let config = Device::builder()
+///     .frequency_hz(433_920_000)
+///     .sample_rate_hz(2_000_000)
+///     .sample_format(SampleFormat::RawU8Iq)
+///     .gain(GainPreset::Sensitivity(8))
+///     .config()?;
+///
+/// assert_eq!(config.frequency_hz(), 433_920_000);
+/// # Ok::<(), hydrasdr_rs::Error>(())
+/// ```
 #[derive(Clone, Debug)]
 pub struct DeviceBuilder {
     selector: DeviceSelector,
@@ -295,6 +353,21 @@ impl DeviceBuilder {
 }
 
 /// Borrowed high-level view of one receive callback block.
+///
+/// `SampleBlock::new` is available for tests and adapters that already have raw
+/// bytes and direct streaming metadata:
+///
+/// ```
+/// use hydrasdr_rs::{SampleBlock, SampleFormat};
+///
+/// let raw = [0_u8, 127, 255, 128];
+/// let block = SampleBlock::new(&raw, SampleFormat::RawU8Iq, 2, 0);
+///
+/// assert_eq!(block.raw_bytes(), &raw);
+/// assert_eq!(block.sample_format(), SampleFormat::RawU8Iq);
+/// assert_eq!(block.sample_count(), 2);
+/// assert_eq!(block.dropped_samples(), 0);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleBlock<'a> {
     raw: &'a [u8],

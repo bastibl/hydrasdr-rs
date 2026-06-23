@@ -1,3 +1,8 @@
+//! Ergonomic synchronous HydraSDR receive example.
+//!
+//! The default invocation prints usage and exits without touching USB. Pass
+//! `--run` only when an RFOne is connected and USB permissions are configured.
+
 use std::env;
 
 use hydrasdr_rs::commands::RfPort;
@@ -14,6 +19,8 @@ fn main() -> hydrasdr_rs::Result<()> {
     }
 
     let run_rx = args.iter().any(|arg| arg == "--rx");
+    // DeviceBuilder validates the high-level receiver configuration before it
+    // opens and applies it through the direct C-parity API.
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
@@ -43,7 +50,7 @@ fn main() -> hydrasdr_rs::Result<()> {
                 block.sample_count(),
                 block.dropped_samples()
             );
-            true
+            true // stop after the first callback for a short smoke stream
         })?;
         println!("short RX complete after {callbacks} callback(s): {stats:?}");
     } else {
