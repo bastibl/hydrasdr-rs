@@ -201,6 +201,7 @@ impl Config {
         validate_bandwidth(self.bandwidth)?;
         validate_gain(self.gain)?;
         validate_format_decimation(self.sample_format, self.decimation_mode)?;
+        validate_format_packing(self.sample_format, self.packing)?;
         Ok(())
     }
 
@@ -262,11 +263,12 @@ impl Config {
 ///     .frequency_hz(915_000_000)
 ///     .sample_rate_hz(2_000_000)
 ///     .bandwidth_hz(1_750_000)
-///     .sample_format(SampleFormat::F32Iq)
+///     .sample_format(SampleFormat::RawAdc)
 ///     .packing(true)
 ///     .build()?;
 ///
 /// assert_eq!(config.bandwidth(), hydrasdr_rs::Bandwidth::ManualHz(1_750_000));
+/// assert_eq!(config.sample_format(), SampleFormat::RawAdc);
 /// assert!(config.packing());
 /// # Ok::<(), hydrasdr_rs::Error>(())
 /// ```
@@ -437,6 +439,16 @@ fn validate_format_decimation(
         return Err(Error::invalid_config(
             "decimation_mode",
             "HighDefinition is only valid for converted F32Iq streams",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_format_packing(sample_format: SampleFormat, packing: bool) -> Result<()> {
+    if sample_format == SampleFormat::F32Iq && packing {
+        return Err(Error::invalid_config(
+            "packing",
+            "packed samples are only valid for raw ADC streams",
         ));
     }
     Ok(())

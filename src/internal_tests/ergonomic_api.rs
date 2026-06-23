@@ -195,6 +195,14 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
     assert_eq!(err.status_code(), StatusCode::InvalidParam);
     assert!(err.to_string().contains("decimation_mode"));
 
+    let err = Config::builder()
+        .sample_format(SampleFormat::F32Iq)
+        .packing(true)
+        .build()
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidParam);
+    assert!(err.to_string().contains("packing"));
+
     let config = Config::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
@@ -204,7 +212,6 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
         .rf_port(RfPort::Rx1)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
-        .packing(true)
         .build()
         .unwrap();
 
@@ -212,6 +219,14 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
     assert_eq!(config.sample_rate_hz(), 10_000_000);
     assert_eq!(config.sample_format().sample_type(), SampleType::Float32Iq);
     assert_eq!(config.decimation_mode(), DecimationMode::HighDefinition);
+
+    let raw_packed = Config::builder()
+        .sample_format(SampleFormat::RawAdc)
+        .packing(true)
+        .build()
+        .unwrap();
+    assert_eq!(raw_packed.sample_format(), SampleFormat::RawAdc);
+    assert!(raw_packed.packing());
 }
 
 #[test]
