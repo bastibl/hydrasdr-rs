@@ -51,6 +51,16 @@ pub struct Device {
 }
 
 impl Device {
+    /// List visible HydraSDR RFOne USB devices without opening them.
+    pub fn list() -> Result<Vec<crate::HydraSdrDeviceInfo>> {
+        crate::discovery::list_devices()
+    }
+
+    /// Async counterpart to [`Device::list`].
+    pub async fn list_async() -> Result<Vec<crate::HydraSdrDeviceInfo>> {
+        crate::discovery::list_devices_async().await
+    }
+
     /// Start building and opening a high-level USB device.
     pub fn builder() -> DeviceBuilder {
         DeviceBuilder::default()
@@ -86,6 +96,16 @@ impl Device {
         self.inner.refresh_info()
     }
 
+    /// Query supported sample rates.
+    pub fn sample_rates(&mut self) -> Result<Vec<u32>> {
+        self.inner.direct.get_samplerates()
+    }
+
+    /// Query supported analog bandwidths.
+    pub fn bandwidths(&mut self) -> Result<Vec<u32>> {
+        self.inner.direct.get_bandwidths()
+    }
+
     /// Apply a high-level receiver configuration.
     pub fn configure(&mut self, config: &Config) -> Result<()> {
         self.inner.configure(config)
@@ -101,10 +121,44 @@ impl Device {
         self.inner.refresh_info_async().await
     }
 
+    /// Query supported sample rates through async control requests.
+    pub async fn sample_rates_async(&mut self) -> Result<Vec<u32>> {
+        self.inner.direct.get_samplerates_async().await
+    }
+
+    /// Query supported analog bandwidths through async control requests.
+    pub async fn bandwidths_async(&mut self) -> Result<Vec<u32>> {
+        self.inner.direct.get_bandwidths_async().await
+    }
+
     /// Start a synchronous receive stream.
     pub fn rx_stream(&mut self) -> Result<RxStream<'_>> {
         Ok(RxStream {
             inner: self.inner.rx_stream()?,
+        })
+    }
+
+    /// Consume this device and start an owned synchronous receive stream.
+    ///
+    /// This shape is useful for frameworks that store streamers independently
+    /// from their device handle. Call [`OwnedRxStream::finish`] to recover the
+    /// device after streaming.
+    pub fn into_rx_stream(self) -> std::result::Result<OwnedRxStream, IntoRxStreamError> {
+        let mut inner = self.inner;
+        let stream = match inner.direct.start_raw_rx_stream() {
+            Ok(stream) => stream,
+            Err(error) => {
+                return Err(IntoRxStreamError {
+                    device: Box::new(Device { inner }),
+                    error,
+                });
+            }
+        };
+        Ok(OwnedRxStream {
+            device: Some(inner),
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
         })
     }
 
@@ -504,6 +558,88 @@ impl RxStream<'_> {
     /// Finish this stream guard and return current streaming counters.
     pub fn finish(self) -> Result<StreamingStats> {
         self.inner.finish()
+    }
+}
+
+/// Owned synchronous receive stream.
+pub struct OwnedRxStream {
+    device: Option<DeviceInner<NusbControl>>,
+    stream: Option<RawRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
+    stats: StreamingStats,
+    stopped: bool,
+}
+
+impl OwnedRxStream {
+    /// Read the next sample block.
+    pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        let device = self
+            .device
+            .as_ref()
+            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+        let sample_format = device.sample_format;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+        Ok(stream
+            .next_transfer()?
+            .map(|transfer| SampleBlock::from_transfer(&transfer, sample_format)))
+    }
+
+    /// Finish streaming and return the device plus accumulated counters.
+    pub fn finish(mut self) -> Result<(Device, StreamingStats)> {
+        let stats = self.stop_inner()?;
+        let inner = self
+            .device
+            .take()
+            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+        Ok((Device { inner }, stats))
+    }
+
+    fn stop_inner(&mut self) -> Result<StreamingStats> {
+        if !self.stopped {
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+            let device = self
+                .device
+                .as_mut()
+                .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+            self.stats = device.direct.stop_raw_rx_stream(stream)?;
+            self.stopped = true;
+        }
+        Ok(self.stats)
+    }
+}
+
+impl Drop for OwnedRxStream {
+    fn drop(&mut self) {
+        let _ = self.stop_inner();
+    }
+}
+
+/// Error returned when consuming a device to start an owned RX stream fails.
+#[derive(Debug)]
+pub struct IntoRxStreamError {
+    device: Box<Device>,
+    error: Error,
+}
+
+impl IntoRxStreamError {
+    /// Return the device and the start-stream error.
+    pub fn into_parts(self) -> (Device, Error) {
+        (*self.device, self.error)
+    }
+
+    /// Borrow the preserved device handle.
+    pub const fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Borrow the underlying start-stream error.
+    pub const fn error(&self) -> &Error {
+        &self.error
     }
 }
 

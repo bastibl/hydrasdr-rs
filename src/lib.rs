@@ -65,8 +65,9 @@ pub use commands::{GainType, RfPort};
 pub use config::{
     Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, SampleFormat,
 };
+pub use discovery::HydraSdrDeviceInfo;
 pub use errors::{Error, Result, StatusCode};
-pub use high_level::{AsyncRxStream, Device, DeviceBuilder, RxStream, SampleBlock};
+pub use high_level::{AsyncRxStream, Device, DeviceBuilder, OwnedRxStream, RxStream, SampleBlock};
 pub use streaming::StreamingStats;
 pub use types::{
     BiasTeeInfo, BoardId, ComponentInfo, DeviceInfo, GainInfo, PartIdSerialNo, RfPortInfo,
