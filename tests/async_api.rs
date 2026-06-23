@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::future::Future;
 use std::rc::Rc;
 
 use futures_lite::future::block_on;
@@ -52,18 +51,15 @@ impl ControlBackend for FakeAsyncControl {
 }
 
 impl AsyncControlBackend for FakeAsyncControl {
-    fn control_in_async(
+    async fn control_in_async(
         &self,
         request: VendorControlRequest,
-    ) -> impl Future<Output = hydrasdr_rs::Result<Vec<u8>>> + '_ {
-        async move { self.record_control_in(request) }
+    ) -> hydrasdr_rs::Result<Vec<u8>> {
+        self.record_control_in(request)
     }
 
-    fn control_out_async(
-        &self,
-        request: VendorControlRequest,
-    ) -> impl Future<Output = hydrasdr_rs::Result<()>> + '_ {
-        async move { self.record_control_out(request) }
+    async fn control_out_async(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+        self.record_control_out(request)
     }
 }
 
@@ -147,41 +143,29 @@ impl ControlBackend for FakeAsyncDevice {
 }
 
 impl AsyncControlBackend for FakeAsyncDevice {
-    fn control_in_async(
+    async fn control_in_async(
         &self,
         request: VendorControlRequest,
-    ) -> impl Future<Output = hydrasdr_rs::Result<Vec<u8>>> + '_ {
-        async move {
-            self.state.borrow_mut().control_requests.push(request);
-            Ok(vec![1])
-        }
+    ) -> hydrasdr_rs::Result<Vec<u8>> {
+        self.state.borrow_mut().control_requests.push(request);
+        Ok(vec![1])
     }
 
-    fn control_out_async(
-        &self,
-        request: VendorControlRequest,
-    ) -> impl Future<Output = hydrasdr_rs::Result<()>> + '_ {
-        async move {
-            self.state.borrow_mut().control_requests.push(request);
-            Ok(())
-        }
+    async fn control_out_async(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+        self.state.borrow_mut().control_requests.push(request);
+        Ok(())
     }
 }
 
 impl AsyncStreamingBackend for FakeAsyncDevice {
     type BulkIn = FakeAsyncBulkIn;
 
-    fn bulk_in_async(
-        &self,
-        endpoint: u8,
-    ) -> impl Future<Output = hydrasdr_rs::Result<Self::BulkIn>> + '_ {
-        async move {
-            self.state.borrow_mut().opened_endpoints.push(endpoint);
-            Ok(FakeAsyncBulkIn {
-                endpoint,
-                state: self.state.clone(),
-            })
-        }
+    async fn bulk_in_async(&self, endpoint: u8) -> hydrasdr_rs::Result<Self::BulkIn> {
+        self.state.borrow_mut().opened_endpoints.push(endpoint);
+        Ok(FakeAsyncBulkIn {
+            endpoint,
+            state: self.state.clone(),
+        })
     }
 }
 
@@ -194,14 +178,12 @@ struct FakeAsyncBulkIn {
 impl AsyncBulkInBackend for FakeAsyncBulkIn {
     type Buffer = Vec<u8>;
 
-    fn clear_halt_async(&mut self) -> impl Future<Output = hydrasdr_rs::Result<()>> + '_ {
-        async move {
-            self.state
-                .borrow_mut()
-                .async_cleared_halts
-                .push(self.endpoint);
-            Ok(())
-        }
+    async fn clear_halt_async(&mut self) -> hydrasdr_rs::Result<()> {
+        self.state
+            .borrow_mut()
+            .async_cleared_halts
+            .push(self.endpoint);
+        Ok(())
     }
 
     fn allocate(&self, len: usize) -> Self::Buffer {
@@ -220,17 +202,15 @@ impl AsyncBulkInBackend for FakeAsyncBulkIn {
         self.state.borrow().pending_count
     }
 
-    fn next_complete_async(&mut self) -> impl Future<Output = BulkInCompletion<Self::Buffer>> + '_ {
-        async move {
-            let mut state = self.state.borrow_mut();
-            state.async_next_count += 1;
-            let completion = state
-                .completions
-                .pop_front()
-                .expect("test queued enough completions");
-            state.pending_count -= 1;
-            completion
-        }
+    async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
+        let mut state = self.state.borrow_mut();
+        state.async_next_count += 1;
+        let completion = state
+            .completions
+            .pop_front()
+            .expect("test queued enough completions");
+        state.pending_count -= 1;
+        completion
     }
 
     fn cancel_all(&mut self) {

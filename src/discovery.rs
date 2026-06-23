@@ -102,10 +102,10 @@ pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo
         if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
             continue;
         }
-        if let Some(wanted) = serial {
-            if device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted) {
-                continue;
-            }
+        if let Some(wanted) = serial
+            && device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted)
+        {
+            continue;
         }
         return Ok(device);
     }
@@ -117,10 +117,10 @@ pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb
         if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
             continue;
         }
-        if let Some(wanted) = serial {
-            if device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted) {
-                continue;
-            }
+        if let Some(wanted) = serial
+            && device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted)
+        {
+            continue;
         }
         return Ok(device);
     }
