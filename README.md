@@ -15,7 +15,6 @@ Implemented:
 - No-hardware public and internal parity tests for constants, control-transfer packing, state handling, error mapping, configuration ordering, and streaming loop behavior.
 - Internal pull RX stream for unpacked `HYDRASDR_SAMPLE_FLOAT32_IQ`, including C-style virtual sample rates and DDC decimation.
 - Hardware-gated smoke tests and sync/async examples for real devices.
-- Design notes for the public API in `docs/ergonomic-api-design.md`.
 
 TODO:
 
@@ -148,5 +147,3 @@ cargo run --example rx_sync -- --run --rx
 cargo run --features smol --example rx_async -- --run
 cargo run --features smol --example rx_async -- --run --rx
 ```
-
-The parity coverage matrix is tracked in `docs/c-parity-test-matrix.md`.
