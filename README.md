@@ -1,6 +1,6 @@
 # hydrasdr-rs
 
-Rust HydraSDR RFOne access built on [`nusb`](https://crates.io/crates/nusb). The public API now uses ergonomic Rust device, configuration, and sample-block types. The C-port remains inside the crate as the implementation and parity test bed.
+Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and sample-block types. The C-port remains inside the crate as the implementation and parity test bed.
 
 Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
 
@@ -8,14 +8,14 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 Implemented in this branch:
 
-- Ergonomic sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and `SampleBlock` receive callbacks.
+- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and `SampleBlock` receive callbacks.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
 - Internal synchronous control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
-- Executor-agnostic async counterparts behind the ergonomic API.
+- Executor-agnostic async API counterparts.
 - No-hardware public and internal parity tests for constants, control-transfer packing, state handling, error mapping, configuration ordering, and streaming loop behavior.
 - Internal pull RX stream for unpacked `HYDRASDR_SAMPLE_FLOAT32_IQ`, including C-style virtual sample rates and DDC decimation.
 - Hardware-gated smoke tests and sync/async examples for real devices.
-- Design notes for the high-level API in `docs/ergonomic-api-design.md`.
+- Design notes for the public API in `docs/ergonomic-api-design.md`.
 
 Not yet polished:
 
@@ -37,7 +37,7 @@ cargo check --features smol
 
 The default feature set stays runtime-free.
 
-## Ergonomic synchronous usage
+## Synchronous API
 
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
 
@@ -71,23 +71,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-For reusable validation without touching USB, build a `Config` first and pass it to an already-open device:
-
-```rust
-use hydrasdr_rs::{Config, GainPreset, SampleFormat};
-
-let config = Config::builder()
-    .frequency_hz(100_000_000)
-    .sample_rate_hz(10_000_000)
-    .sample_format(SampleFormat::RawU8Iq)
-    .gain(GainPreset::Sensitivity(8))
-    .build()?;
-
-assert_eq!(config.frequency_hz(), 100_000_000);
-# Ok::<(), hydrasdr_rs::Error>(())
-```
-
-## Ergonomic async usage
+## Asynchronous API
 
 The async API mirrors the sync shape. Enable exactly one runtime integration feature if your application needs `nusb`'s runtime-backed IO thread:
 
@@ -117,7 +101,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated ergonomic examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
+See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 
 ## Linux permissions and hardware safety
 
