@@ -1,3 +1,5 @@
+//! USB control-transfer encoding and the `nusb` backend implementation.
+
 use std::future::Future;
 use std::time::Duration;
 
@@ -15,12 +17,16 @@ use crate::streaming::{
 };
 use crate::types::PartIdSerialNo;
 
+/// Direction of a C-style vendor control transfer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlDirection {
     In,
     Out,
 }
 
+/// Encoded vendor control request before conversion into `nusb` transfer structs.
+///
+/// Keeping this public helps parity tests compare the Rust request packing with the C driver.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VendorControlRequest {
     pub direction: ControlDirection,
@@ -33,6 +39,7 @@ pub struct VendorControlRequest {
 }
 
 impl VendorControlRequest {
+    /// Build a vendor/device IN request with the default C control timeout.
     pub fn in_request(request: VendorRequest, value: u16, index: u16, length: usize) -> Self {
         Self::in_request_with_timeout(
             request,
@@ -43,6 +50,7 @@ impl VendorControlRequest {
         )
     }
 
+    /// Build a vendor/device IN request with an explicit timeout.
     pub fn in_request_with_timeout(
         request: VendorRequest,
         value: u16,
@@ -61,6 +69,7 @@ impl VendorControlRequest {
         }
     }
 
+    /// Build a vendor/device OUT request with the default C control timeout.
     pub fn out_request(request: VendorRequest, value: u16, index: u16, data: Vec<u8>) -> Self {
         Self::out_request_with_timeout(
             request,
@@ -71,6 +80,7 @@ impl VendorControlRequest {
         )
     }
 
+    /// Build a vendor/device OUT request with an explicit timeout.
     pub fn out_request_with_timeout(
         request: VendorRequest,
         value: u16,
@@ -90,6 +100,7 @@ impl VendorControlRequest {
         }
     }
 
+    /// Convert this direct request into a `nusb` IN control transfer.
     pub fn nusb_control_in(&self) -> Result<ControlIn> {
         if self.direction != ControlDirection::In || self.length > u16::MAX as usize {
             return Err(Error::Status(StatusCode::InvalidParam));
@@ -104,6 +115,7 @@ impl VendorControlRequest {
         })
     }
 
+    /// Convert this direct request into a `nusb` OUT control transfer.
     pub fn nusb_control_out(&self) -> Result<ControlOut<'_>> {
         if self.direction != ControlDirection::Out {
             return Err(Error::Status(StatusCode::InvalidParam));
@@ -118,18 +130,22 @@ impl VendorControlRequest {
         })
     }
 
+    /// Encode receiver mode selection.
     pub fn receiver_mode(mode: ReceiverMode) -> Self {
         Self::out_request(VendorRequest::ReceiverMode, mode as u16, 0, Vec::new())
     }
 
+    /// Encode frequency setting as an 8-byte little-endian OUT payload.
     pub fn set_frequency(freq_hz: u64) -> Self {
         Self::out_request(VendorRequest::SetFreq, 0, 0, freq_hz.to_le_bytes().to_vec())
     }
 
+    /// Encode the C samplerate count query.
     pub fn get_samplerates_count(extended: bool) -> Self {
         Self::in_request(VendorRequest::GetSamplerates, u16::from(extended), 0, 4)
     }
 
+    /// Encode the C samplerate list query.
     pub fn get_samplerates(count: u32, extended: bool) -> Self {
         Self::in_request(
             VendorRequest::GetSamplerates,
@@ -139,6 +155,7 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode samplerate selection by index or kHz-derived value.
     pub fn set_samplerate(index_or_khz: u32, response_len: usize) -> Self {
         Self::in_request(
             VendorRequest::SetSamplerate,
@@ -148,10 +165,12 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode the C bandwidth count query.
     pub fn get_bandwidths_count() -> Self {
         Self::in_request(VendorRequest::GetBandwidths, 0, 0, 4)
     }
 
+    /// Encode the C bandwidth list query.
     pub fn get_bandwidths(count: u32) -> Self {
         Self::in_request(
             VendorRequest::GetBandwidths,
@@ -161,50 +180,62 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode bandwidth selection by index or kHz-derived value.
     pub fn set_bandwidth(index_or_khz: u32) -> Self {
         Self::in_request(VendorRequest::SetBandwidth, 0, index_or_khz as u16, 1)
     }
 
+    /// Encode one of the legacy gain requests.
     pub fn legacy_gain(request: VendorRequest, value: u8) -> Self {
         Self::in_request(request, 0, value as u16, 1)
     }
 
+    /// Encode the extended gain request.
     pub fn unified_gain(gain_type: GainType, value: u8) -> Self {
         Self::in_request(VendorRequest::SetGain, gain_type as u16, value as u16, 1)
     }
 
+    /// Encode RF bias tee control.
     pub fn set_rf_bias(value: u8) -> Self {
         Self::out_request(VendorRequest::SetRfBiasCmd, 0, value as u16, Vec::new())
     }
 
+    /// Encode packed-sample mode control.
     pub fn set_packing(value: u8) -> Self {
         Self::in_request(VendorRequest::SetPacking, 0, value as u16, 1)
     }
 
+    /// Encode RF input port selection.
     pub fn set_rf_port(port: RfPort) -> Self {
         Self::in_request(VendorRequest::SetRfPort, 0, port as u16, 1)
     }
 
+    /// Encode device reset.
     pub fn reset() -> Self {
         Self::in_request(VendorRequest::Reset, 0, 0, 1)
     }
 
+    /// Encode board ID read.
     pub fn board_id_read() -> Self {
         Self::in_request(VendorRequest::BoardIdRead, 0, 0, 1)
     }
 
+    /// Encode firmware version string read.
     pub fn version_string_read(length: usize) -> Self {
         Self::in_request(VendorRequest::VersionStringRead, 0, 0, length)
     }
 
+    /// Encode board part/serial read.
     pub fn board_partid_serialno_read() -> Self {
         Self::in_request(VendorRequest::BoardPartIdSerialNoRead, 0, 0, 24)
     }
 
+    /// Encode capability-word read.
     pub fn get_capabilities(word: u16) -> Self {
         Self::in_request(VendorRequest::GetCapabilities, 0, word, 4)
     }
 
+    /// Encode GPIO write using C port/pin packing.
     pub fn gpio_write(port: u8, pin: u8, value: u8) -> Result<Self> {
         Ok(Self::out_request(
             VendorRequest::GpioWrite,
@@ -214,6 +245,7 @@ impl VendorControlRequest {
         ))
     }
 
+    /// Encode GPIO read using C port/pin packing.
     pub fn gpio_read(port: u8, pin: u8) -> Result<Self> {
         Ok(Self::in_request(
             VendorRequest::GpioRead,
@@ -223,6 +255,7 @@ impl VendorControlRequest {
         ))
     }
 
+    /// Encode GPIO direction write using C port/pin packing.
     pub fn gpiodir_write(port: u8, pin: u8, value: u8) -> Result<Self> {
         Ok(Self::out_request(
             VendorRequest::GpioDirWrite,
@@ -232,6 +265,7 @@ impl VendorControlRequest {
         ))
     }
 
+    /// Encode GPIO direction read using C port/pin packing.
     pub fn gpiodir_read(port: u8, pin: u8) -> Result<Self> {
         Ok(Self::in_request(
             VendorRequest::GpioDirRead,
@@ -241,6 +275,7 @@ impl VendorControlRequest {
         ))
     }
 
+    /// Encode clock-generator register write.
     pub fn clockgen_write(reg: u8, value: u8) -> Self {
         Self::out_request(
             VendorRequest::ClockgenWrite,
@@ -250,10 +285,12 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode clock-generator register read.
     pub fn clockgen_read(reg: u8) -> Self {
         Self::in_request(VendorRequest::ClockgenRead, 0, reg as u16, 1)
     }
 
+    /// Encode RF frontend register write.
     pub fn rf_frontend_write(reg: u16, value: u32) -> Self {
         Self::out_request(
             VendorRequest::RfFrontendWrite,
@@ -263,10 +300,12 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode RF frontend register read.
     pub fn rf_frontend_read(reg: u16) -> Self {
         Self::in_request(VendorRequest::RfFrontendRead, 0, reg & 0xff, 1)
     }
 
+    /// Encode whole-chip SPI flash erase with the C long timeout.
     pub fn spiflash_erase() -> Self {
         Self::out_request_with_timeout(
             VendorRequest::SpiFlashErase,
@@ -277,6 +316,7 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode SPI flash sector erase with the C long timeout.
     pub fn spiflash_erase_sector(sector: u16) -> Self {
         Self::out_request_with_timeout(
             VendorRequest::SpiFlashEraseSector,
@@ -287,6 +327,7 @@ impl VendorControlRequest {
         )
     }
 
+    /// Encode SPI flash write after validating the C-supported address range.
     pub fn spiflash_write(addr: u32, data: &[u8]) -> Result<Self> {
         validate_spiflash_addr(addr)?;
         Ok(Self::out_request_with_timeout(
@@ -298,6 +339,7 @@ impl VendorControlRequest {
         ))
     }
 
+    /// Encode SPI flash read after validating the C-supported address range.
     pub fn spiflash_read(addr: u32, len: u16) -> Result<Self> {
         validate_spiflash_addr(addr)?;
         Ok(Self::in_request_with_timeout(
@@ -310,11 +352,13 @@ impl VendorControlRequest {
     }
 }
 
+/// Synchronous control-transfer backend for the direct API.
 pub trait ControlBackend: std::fmt::Debug {
     fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>>;
     fn control_out(&self, request: VendorControlRequest) -> Result<()>;
 }
 
+/// Async control-transfer backend for the direct API.
 pub trait AsyncControlBackend: std::fmt::Debug {
     fn control_in_async(
         &self,
@@ -327,18 +371,21 @@ pub trait AsyncControlBackend: std::fmt::Debug {
     ) -> impl Future<Output = Result<()>> + '_;
 }
 
+/// `nusb` implementation of direct control and streaming backends.
 #[derive(Debug)]
 pub struct NusbControl {
     _device: nusb::Device,
     interface: nusb::Interface,
 }
 
+/// `nusb` bulk-IN endpoint wrapper used by direct streaming.
 #[derive(Debug)]
 pub struct NusbBulkIn {
     endpoint: Endpoint<Bulk, In>,
 }
 
 impl NusbControl {
+    /// Build a backend from an opened `nusb` device and claimed interface.
     pub fn new(device: nusb::Device, interface: nusb::Interface) -> Self {
         Self {
             _device: device,

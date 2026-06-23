@@ -1,5 +1,10 @@
+//! Error/status mapping for the direct HydraSDR API.
+
 use core::fmt;
 
+/// Status codes mirrored from the C driver.
+///
+/// Negative values intentionally match `hydrasdr_error` constants where present.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
 pub enum StatusCode {
@@ -18,10 +23,12 @@ pub enum StatusCode {
 }
 
 impl StatusCode {
+    /// Return the numeric C-compatible status code.
     pub const fn code(self) -> i32 {
         self as i32
     }
 
+    /// Return the C status/error macro name for this code.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Success => "HYDRASDR_SUCCESS",
@@ -39,11 +46,13 @@ impl StatusCode {
         }
     }
 
+    /// Return a C-style name for a raw status code, or the C fallback string for unknown values.
     pub fn name_for_code(code: i32) -> &'static str {
         Self::try_from(code).map_or("hydrasdr unknown error", Self::name)
     }
 }
 
+/// Raw status code that does not map to a known direct translation value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnknownStatusCode(pub i32);
 
@@ -77,10 +86,14 @@ impl TryFrom<i32> for StatusCode {
     }
 }
 
+/// Return the C status/error macro name for a known status code.
 pub fn error_name(code: StatusCode) -> &'static str {
     code.name()
 }
 
+/// Error type used by the direct API.
+///
+/// `nusb` errors are mapped to the closest C-style status code while preserving the USB message.
 #[derive(Debug)]
 pub enum Error {
     Status(StatusCode),
@@ -89,6 +102,7 @@ pub enum Error {
 }
 
 impl Error {
+    /// Return the C-style status code represented by this error.
     pub const fn status_code(&self) -> StatusCode {
         match self {
             Self::Status(code) => *code,
@@ -151,4 +165,5 @@ impl From<nusb::transfer::TransferError> for Error {
     }
 }
 
+/// Crate result alias using the direct API [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;

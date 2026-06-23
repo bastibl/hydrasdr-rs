@@ -1,3 +1,6 @@
+//! C command IDs and bit assignments for HydraSDR RFOne vendor requests.
+
+/// Receiver state values sent with the C `HYDRASDR_VENDOR_REQUEST_RECEIVER_MODE` request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ReceiverMode {
@@ -5,6 +8,7 @@ pub enum ReceiverMode {
     Rx = 1,
 }
 
+/// USB vendor request numbers copied from `hydrasdr_commands.h`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum VendorRequest {
@@ -45,6 +49,7 @@ pub enum VendorRequest {
     VendorRequestCount = 34,
 }
 
+/// RF input port selector values used by `hydrasdr_set_rf_port`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum RfPort {
@@ -54,10 +59,12 @@ pub enum RfPort {
     Max = 31,
 }
 
+/// Build the C-style bit mask for the first `n` RF ports.
 pub const fn rf_ports_mask(n: u32) -> u32 {
     (1u32 << n) - 1
 }
 
+/// Capability bit positions reported by the firmware.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Capability {
@@ -87,11 +94,13 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Return the single-bit capability mask for this capability.
     pub const fn bits(self) -> u32 {
         1u32 << (self as u8)
     }
 }
 
+/// Gain selector values used by the legacy and extended gain APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum GainType {
@@ -109,5 +118,7 @@ pub enum GainType {
     Count = 11,
 }
 
+/// Gain flag matching the C `HYDRASDR_GAIN_FLAG_IS_AGC` bit.
 pub const GAIN_FLAG_IS_AGC: u8 = 1 << 0;
+/// Gain flag matching the C `HYDRASDR_GAIN_FLAG_IS_PRESET` bit.
 pub const GAIN_FLAG_IS_PRESET: u8 = 1 << 1;

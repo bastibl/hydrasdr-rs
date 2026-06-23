@@ -1,3 +1,5 @@
+//! Direct C-style streaming state machine and backend traits.
+
 use std::future::Future;
 use std::ops::Deref;
 use std::time::Duration;
@@ -7,6 +9,10 @@ use crate::errors::{Error, Result, StatusCode};
 use crate::rfone::RFONE_TRANSFER_COUNT;
 use crate::types::SampleType;
 
+/// Transfer view passed to a receive callback.
+///
+/// The buffer contains raw USB bytes. `sample_count` follows the C driver's byte-count formula,
+/// not a final typed IQ sample abstraction.
 #[derive(Debug)]
 pub struct Transfer<'a> {
     pub samples: &'a [u8],
@@ -15,8 +21,10 @@ pub struct Transfer<'a> {
     pub sample_type: SampleType,
 }
 
+/// C-style sample-block callback. Returning non-zero requests stream stop.
 pub type SampleBlockCallback = dyn FnMut(&Transfer<'_>) -> i32 + Send;
 
+/// Counters collected during a direct streaming run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StreamingStats {
     pub buffers_received: u64,
@@ -24,6 +32,7 @@ pub struct StreamingStats {
     pub buffers_dropped: u64,
 }
 
+/// Completed bulk-IN transfer from a backend.
 #[derive(Debug)]
 pub struct BulkInCompletion<B> {
     pub buffer: B,
@@ -31,6 +40,7 @@ pub struct BulkInCompletion<B> {
     pub status: Result<()>,
 }
 
+/// Minimal synchronous bulk-IN backend used by direct streaming tests and `nusb`.
 pub trait BulkInBackend: std::fmt::Debug {
     type Buffer: Deref<Target = [u8]>;
 
@@ -42,12 +52,14 @@ pub trait BulkInBackend: std::fmt::Debug {
     fn cancel_all(&mut self);
 }
 
+/// Provider of synchronous bulk-IN endpoints.
 pub trait StreamingBackend: std::fmt::Debug {
     type BulkIn: BulkInBackend;
 
     fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn>;
 }
 
+/// Minimal async bulk-IN backend used by direct async streaming.
 pub trait AsyncBulkInBackend: std::fmt::Debug {
     type Buffer: Deref<Target = [u8]>;
 
@@ -59,12 +71,14 @@ pub trait AsyncBulkInBackend: std::fmt::Debug {
     fn cancel_all(&mut self);
 }
 
+/// Provider of async bulk-IN endpoints.
 pub trait AsyncStreamingBackend: std::fmt::Debug {
     type BulkIn: AsyncBulkInBackend;
 
     fn bulk_in_async(&self, endpoint: u8) -> impl Future<Output = Result<Self::BulkIn>> + '_;
 }
 
+/// C-parity streaming buffer configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamingConfig {
     pub transfer_count: usize,
@@ -86,6 +100,7 @@ impl Default for StreamingConfig {
     }
 }
 
+/// Mutable state for one direct RX streaming loop.
 #[derive(Debug, Default)]
 pub struct StreamingState {
     config: StreamingConfig,
@@ -95,22 +110,27 @@ pub struct StreamingState {
 }
 
 impl StreamingState {
+    /// Create an idle streaming state with C RFOne defaults.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Return counters from the last/current run.
     pub fn stats(&self) -> StreamingStats {
         self.stats
     }
 
+    /// Report whether the direct streaming loop is active.
     pub fn is_streaming(&self) -> bool {
         self.streaming
     }
 
+    /// Request that the current streaming loop stop at the next safe point.
     pub fn request_stop(&mut self) {
         self.stop_requested = true;
     }
 
+    /// Enable or disable packed samples before streaming starts.
     pub fn set_packing(&mut self, enabled: bool) -> Result<()> {
         if self.streaming {
             return Err(Error::Status(StatusCode::Busy));
@@ -119,6 +139,7 @@ impl StreamingState {
         Ok(())
     }
 
+    /// Current USB buffer size, accounting for packed mode.
     pub fn current_buffer_size(&self) -> usize {
         if self.config.packing_enabled {
             self.config.packed_buffer_size
@@ -127,6 +148,7 @@ impl StreamingState {
         }
     }
 
+    /// Run the synchronous C-style receive loop on an already-open bulk endpoint.
     pub fn run<B, F>(
         &mut self,
         mut bulk_in: B,
@@ -153,6 +175,7 @@ impl StreamingState {
         result.map(|()| self.stats)
     }
 
+    /// Run the async C-style receive loop on an already-open bulk endpoint.
     pub async fn run_async<B, F>(
         &mut self,
         mut bulk_in: B,

@@ -1,3 +1,6 @@
+//! Public data structures returned by the direct HydraSDR API.
+
+/// HydraSDR board identifier values mirrored from the C driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BoardId {
@@ -6,6 +9,7 @@ pub enum BoardId {
     Invalid = 0xff,
 }
 
+/// Raw board ID value that is not known to this direct translation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnknownBoardId(pub u8);
 
@@ -22,6 +26,7 @@ impl TryFrom<u8> for BoardId {
     }
 }
 
+/// Return the C-style human-readable board name for a raw board ID byte.
 pub fn board_id_name_raw(board_id: u8) -> &'static str {
     match BoardId::try_from(board_id) {
         Ok(BoardId::Invalid) => "Invalid Board ID",
@@ -31,6 +36,7 @@ pub fn board_id_name_raw(board_id: u8) -> &'static str {
     }
 }
 
+/// Sample type values accepted by the direct API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SampleType {
@@ -47,10 +53,12 @@ pub enum SampleType {
     End = 10,
 }
 
+/// Return the C capability bit for a sample type.
 pub const fn sample_type_bit(sample_type: SampleType) -> u16 {
     1u16 << (sample_type as u8)
 }
 
+/// Decimation modes from the C API; not all are wired into the RFOne phase yet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum DecimationMode {
@@ -58,6 +66,7 @@ pub enum DecimationMode {
     HighDefinition = 1,
 }
 
+/// Library version tuple mirroring the C struct layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LibVersion {
     pub major_version: u32,
@@ -65,12 +74,14 @@ pub struct LibVersion {
     pub revision: u32,
 }
 
+/// Part ID and serial-number words returned by the firmware.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PartIdSerialNo {
     pub part_id: [u32; 2],
     pub serial_no: [u32; 4],
 }
 
+/// Gain descriptor equivalent to the C `hydrasdr_gain_info_t` shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GainInfo {
     pub gain_type: crate::commands::GainType,
@@ -82,12 +93,14 @@ pub struct GainInfo {
     pub flags: u8,
 }
 
+/// Bias tee electrical limits for an RF port.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BiasTeeInfo {
     pub voltage: f32,
     pub max_current_milliamp: f32,
 }
 
+/// RF port metadata returned in [`DeviceInfo`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RfPortInfo {
     pub name: &'static str,
@@ -97,12 +110,14 @@ pub struct RfPortInfo {
     pub bias_tee: Option<BiasTeeInfo>,
 }
 
+/// Hardware component metadata returned in [`DeviceInfo`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComponentInfo {
     pub name: &'static str,
     pub register_count: u32,
 }
 
+/// Direct device-info aggregate built from C-parity firmware queries and RFOne constants.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
     pub board_id: BoardId,
@@ -127,6 +142,9 @@ pub struct DeviceInfo {
     pub current_packing: bool,
 }
 
+/// Temperature reading shape retained for C API parity.
+///
+/// RFOne temperature querying is currently reported as unsupported by the direct API.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Temperature {
     pub valid: bool,

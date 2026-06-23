@@ -1,7 +1,10 @@
+//! RFOne constants and descriptor helpers copied from the C reference driver.
+
 use crate::commands::{Capability, GainType};
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::types::{BiasTeeInfo, ComponentInfo, GainInfo, RfPortInfo, SampleType, sample_type_bit};
 
+/// Static RFOne hardware facts used by parity tests and direct device info.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RfOneSpec {
     pub transfer_count: u32,
@@ -27,7 +30,9 @@ pub struct RfOneSpec {
     pub clockgen_registers: u32,
 }
 
+/// Number of queued streaming transfers used by the C RFOne path.
 pub const RFONE_TRANSFER_COUNT: u32 = 16;
+/// Bulk-IN endpoint used for RX samples.
 pub const RFONE_RX_ENDPOINT: u8 = 0x81;
 pub const RFONE_LNA_MAX_GAIN: u8 = 14;
 pub const RFONE_MIXER_MAX_GAIN: u8 = 15;
@@ -89,6 +94,7 @@ pub const RFONE_HARDCODED_CAPS: u32 = Capability::Rx.bits()
     | Capability::Clockgen.bits()
     | Capability::RfFrontend.bits();
 
+/// Complete RFOne static specification aggregate.
 pub const RFONE_SPEC: RfOneSpec = RfOneSpec {
     transfer_count: RFONE_TRANSFER_COUNT,
     default_buffer_size: DEFAULT_BUFFER_SIZE,
@@ -113,6 +119,7 @@ pub const RFONE_SPEC: RfOneSpec = RfOneSpec {
     clockgen_registers: RFONE_CLOCKGEN_REGS,
 };
 
+/// Return default gain descriptors for the RFOne direct API.
 pub fn default_gain_infos() -> Vec<GainInfo> {
     [
         (GainType::Lna, RFONE_LNA_MAX_GAIN, RFONE_LNA_MAX_GAIN),
@@ -144,6 +151,7 @@ pub fn default_gain_infos() -> Vec<GainInfo> {
     .collect()
 }
 
+/// Return C-parity RF port metadata for RFOne.
 pub fn rf_port_infos() -> Vec<RfPortInfo> {
     vec![
         RfPortInfo {
@@ -173,6 +181,7 @@ pub fn rf_port_infos() -> Vec<RfPortInfo> {
     ]
 }
 
+/// Return C-parity component metadata for RFOne.
 pub fn component_infos() -> Vec<ComponentInfo> {
     vec![
         ComponentInfo {
