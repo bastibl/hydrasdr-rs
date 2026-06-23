@@ -9,10 +9,10 @@ The current branch has a direct API that mirrors the C driver:
 - `HydraSdr` is the direct device handle with sync and async control methods.
 - `discovery::{list_devices, list_devices_async}` expose visible RFOne descriptors.
 - `types::{DeviceInfo, SampleType, GainInfo, ...}` and `commands::{GainType, RfPort, ...}` mirror C enums/structs.
-- `streaming::{Transfer, StreamingStats}` expose the C callback contract: raw USB bytes, C-parity sample counts, and non-zero callback return for stop.
+- `streaming::{Transfer, StreamingStats}` expose the C callback contract: raw USB bytes, C-parity sample counts, and non-zero callback return for stop. `DirectRxStream` provides pull-style unpacked `Float32Iq` conversion with C-style DDC decimation.
 - Default tests and examples are no-hardware safe; real-device flows are explicit/ignored.
 
-The parent integration gate passed with the direct API committed on `port/direct-c-translation`. Known phase boundaries are: Android `open_fd`, decimation getter/setter wiring, and the C DSP/DDC conversion API.
+The parent integration gate passed with the direct API committed on `port/direct-c-translation`. Known phase boundaries are: Android `open_fd`, explicit public decimation mode controls, async pull streaming, packed conversion, and converted sample formats beyond unpacked `Float32Iq`.
 
 ## Public module shape
 
@@ -86,7 +86,7 @@ impl Device {
 }
 ```
 
-`Device` should apply the C-documented pre-streaming order internally: query capabilities/device info, set frequency, apply decimation once wired, apply manual bandwidth before sample rate, set sample rate, set sample format, then gains/RF port/bias/packing.
+`Device` should apply the C-documented pre-streaming order internally: query capabilities/device info, set frequency, apply manual bandwidth before sample rate, set sample rate with automatic virtual-rate decimation selection, set sample format, then gains/RF port/bias/packing.
 
 ## Streaming ergonomics
 

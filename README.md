@@ -13,12 +13,13 @@ Implemented in this branch:
 - Synchronous control API for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, GPIO, clockgen, RF frontend, SPI flash, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async counterparts for the direct API.
 - No-hardware parity and ergonomic tests for constants, control-transfer packing, state handling, error mapping, configuration ordering, and streaming loop behavior.
+- Persistent direct pull RX stream for unpacked `HYDRASDR_SAMPLE_FLOAT32_IQ`, including C-style virtual sample rates and DDC decimation.
 - Hardware-gated smoke tests and sync/async examples for real devices.
 - Design notes for the high-level API in `docs/ergonomic-api-design.md`.
 
 Not yet polished:
 
-- DSP/DDC conversion and typed IQ sample conversion are phase boundaries; `SampleBlock` intentionally exposes the raw USB bytes plus format/count metadata for now.
+- Packed-sample conversion and converted sample formats beyond pull-style `Float32Iq` are still phase boundaries; callback streaming intentionally exposes raw USB bytes.
 - Async open/discovery and endpoint `clear_halt` follow what `nusb` exposes; this crate does not force a runtime by default.
 
 ## USB dependency and execution model
@@ -175,7 +176,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-The callback receives raw USB bytes plus C-parity sample-count metadata. It intentionally mirrors the C driver rather than providing the higher-level `SampleBlock` wrapper.
+The callback receives raw USB bytes plus C-parity sample-count metadata. It intentionally mirrors the C driver rather than providing the higher-level pull-stream conversion.
 
 Async direct usage is also available:
 

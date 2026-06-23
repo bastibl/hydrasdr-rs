@@ -12,6 +12,7 @@ This matrix tracks the no-hardware safety net for the direct C-to-Rust translati
 | USB control request packing for frequency, samplerate, bandwidth, GPIO, SPI flash, receiver mode, RF port, packing, gain | `tests/foundation.rs::no_hardware_helpers_pack_usb_fields_like_c_driver`, `tests/direct_api.rs::direct_helpers_send_c_style_control_requests`, `tests/no_hardware_parity.rs::control_request_builders_encode_vendor_device_packets_like_c` | no | Checks vendor/device recipient shape through `nusb` control packet conversion and C wValue/wIndex/data layout. |
 | Board ID, version string, part/serial, capability word decoding | `tests/direct_api.rs::query_helpers_decode_board_version_serial_and_capabilities`, `tests/no_hardware_parity.rs::short_control_reads_are_libusb_errors` | no | Short reads map to `HYDRASDR_ERROR_LIBUSB`. |
 | Samplerate/bandwidth count-then-list protocol and index selection | `tests/direct_api.rs::sample_rate_and_bandwidth_helpers_use_count_then_list_protocol` | no | Covers C `GET_*` count/list request sequence. |
+| IQ virtual sample-rate table and low-bandwidth decimation selection | `tests/direct_api.rs::sample_rate_and_bandwidth_helpers_use_count_then_list_protocol` | no | Covers `2_500_000` mapping to the lowest matching hardware rate and 4x DDC decimation. |
 | Legacy gain clamping and unsupported/invalid gain paths | `tests/direct_api.rs::direct_helpers_send_c_style_control_requests`, `tests/no_hardware_parity.rs::invalid_parameters_are_rejected_without_usb_side_effects` | no | LNA clamps to RFOne max; invalid `GainType::Count` is rejected locally. |
 | RF port firmware status byte handling | `tests/no_hardware_parity.rs::rf_port_firmware_rejection_maps_to_invalid_param` | no | C treats return byte != 1 as invalid parameter. |
 | Invalid parameter handling for frequency, sample type, GPIO, SPI flash | `tests/direct_api.rs::direct_helpers_send_c_style_control_requests`, `tests/no_hardware_parity.rs::invalid_parameters_are_rejected_without_usb_side_effects` | no | Ensures deterministic host-side errors where the C driver validates before USB. |
@@ -20,6 +21,9 @@ This matrix tracks the no-hardware safety net for the direct C-to-Rust translati
 | USB transfer error path: libusb-status propagation, cancellation, streaming flag reset | `tests/streaming.rs::transfer_error_stops_streaming_reports_libusb_and_cancels_pending` | no | Deterministic fake transfer error. |
 | Stop-before-start idempotence and receiver OFF command | `tests/streaming.rs::stop_rx_is_idempotent_when_streaming_is_idle` | no | Mirrors C stop path being safe when no threads/transfers are active. |
 | Packed streaming buffer size and sample count formula | `tests/streaming.rs::packed_streaming_uses_c_buffer_size_and_sample_count` | no | Mirrors `PACKED_BUFFER_SIZE` and `(((buffer_size / 2) * 4) / 3)`. |
+| Callback `HYDRASDR_SAMPLE_FLOAT32_IQ` keeps raw USB transfer contract | `tests/streaming.rs::callback_float32_iq_streaming_keeps_raw_usb_transfer_contract` | no | Preserves C-parity callback behavior while the pull stream handles conversion. |
+| Persistent pull RX stream lifecycle, leftovers, timeout, and continuous DDC conversion | `converter::tests::*`, `tests/streaming.rs::direct_rx_stream_*` | no | Ports the C `float32_opt` LUT/DC-removal/Fs/4 DDC path for unpacked direct pull reads. |
+| Packed pull-style `HYDRASDR_SAMPLE_FLOAT32_IQ` conversion not implemented | `tests/streaming.rs::packed_float32_iq_direct_rx_stream_start_is_explicitly_unsupported` | no | Avoids silently treating packed ADC bytes as float IQ. |
 | Real device open/query/configure/short stream smoke | `tests/hardware.rs` | ignored by default | Run explicitly with `cargo test --test hardware -- --ignored --nocapture` on a machine with a HydraSDR RFOne and permissions/udev access. |
 
 ## Default determinism
@@ -28,4 +32,4 @@ This matrix tracks the no-hardware safety net for the direct C-to-Rust translati
 
 ## Known phase boundary
 
-The current Rust direct-port stream callback receives raw USB bytes plus C-parity sample-count metadata. The later C DSP/DDC conversion pipeline is intentionally out of scope for this safety-net card and should get its own parity matrix/tests when ported.
+The callback stream keeps raw USB transfer behavior. The synchronous pull stream converts unpacked RFOne ADC input for `SampleType::Float32Iq`. Packed conversion, direct-IQ firmware formats, and the remaining converted sample types are still phase boundaries.

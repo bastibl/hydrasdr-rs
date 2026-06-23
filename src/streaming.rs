@@ -5,6 +5,7 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
+use crate::converter::Float32IqConverter;
 use crate::errors::{Error, Result, StatusCode};
 use crate::rfone::RFONE_TRANSFER_COUNT;
 use crate::types::SampleType;
@@ -85,6 +86,7 @@ pub struct StreamingConfig {
     pub buffer_size: usize,
     pub packed_buffer_size: usize,
     pub packing_enabled: bool,
+    pub decimation_factor: usize,
     pub transfer_timeout: Duration,
 }
 
@@ -95,6 +97,7 @@ impl Default for StreamingConfig {
             buffer_size: DEFAULT_BUFFER_SIZE,
             packed_buffer_size: PACKED_BUFFER_SIZE,
             packing_enabled: false,
+            decimation_factor: 1,
             transfer_timeout: Duration::MAX,
         }
     }
@@ -120,6 +123,11 @@ impl StreamingState {
         self.stats
     }
 
+    /// Return the current streaming configuration.
+    pub fn config(&self) -> StreamingConfig {
+        self.config
+    }
+
     /// Report whether the direct streaming loop is active.
     pub fn is_streaming(&self) -> bool {
         self.streaming
@@ -136,6 +144,18 @@ impl StreamingState {
             return Err(Error::Status(StatusCode::Busy));
         }
         self.config.packing_enabled = enabled;
+        Ok(())
+    }
+
+    /// Set the DDC decimation factor before streaming starts.
+    pub fn set_decimation(&mut self, factor: usize) -> Result<()> {
+        if self.streaming {
+            return Err(Error::Status(StatusCode::Busy));
+        }
+        if !matches!(factor, 1 | 2 | 4 | 8 | 16 | 32 | 64) {
+            return Err(Error::Status(StatusCode::InvalidParam));
+        }
+        self.config.decimation_factor = factor;
         Ok(())
     }
 
@@ -304,10 +324,155 @@ impl StreamingState {
     }
 }
 
+/// Persistent synchronous pull stream for unpacked [`SampleType::Float32Iq`] RX.
+#[derive(Debug)]
+pub struct DirectRxStream<B: BulkInBackend> {
+    bulk_in: Option<B>,
+    config: StreamingConfig,
+    converter: Float32IqConverter,
+    pending: Vec<(f32, f32)>,
+    stats: StreamingStats,
+    closed: bool,
+}
+
+impl<B: BulkInBackend> DirectRxStream<B> {
+    pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
+        bulk_in.clear_halt()?;
+        while bulk_in.pending() < config.transfer_count {
+            let buffer = bulk_in.allocate(config_current_buffer_size(config));
+            bulk_in.submit(buffer);
+        }
+
+        Ok(Self {
+            bulk_in: Some(bulk_in),
+            config,
+            converter: Float32IqConverter::default(),
+            pending: Vec::new(),
+            stats: StreamingStats::default(),
+            closed: false,
+        })
+    }
+
+    /// Return counters accumulated by this pull stream.
+    pub fn stats(&self) -> StreamingStats {
+        self.stats
+    }
+
+    /// Close the USB queue by cancelling pending transfers.
+    pub fn close(&mut self) -> StreamingStats {
+        if !self.closed {
+            if let Some(bulk_in) = self.bulk_in.as_mut() {
+                bulk_in.cancel_all();
+            }
+            self.bulk_in = None;
+            self.pending.clear();
+            self.closed = true;
+        }
+        self.stats
+    }
+
+    /// Read converted `(I, Q)` float samples into `out`.
+    ///
+    /// Returns `Ok(0)` when the backend times out before any sample is available.
+    pub fn read_float32_iq(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        if self.closed {
+            return Err(Error::stream_closed("direct RX stream is closed"));
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        self.copy_pending(out, &mut written);
+        if written == out.len() {
+            return Ok(written);
+        }
+
+        loop {
+            let bulk_in = self
+                .bulk_in
+                .as_mut()
+                .ok_or(Error::stream_closed("direct RX stream is closed"))?;
+            let Some(completion) = bulk_in.wait_next_complete(timeout) else {
+                return Ok(written);
+            };
+
+            completion.status?;
+            let buffer = completion.buffer;
+            let actual_len = completion.actual_len;
+            if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
+                self.stats.buffers_dropped += 1;
+                return Err(Error::Status(StatusCode::LibUsb));
+            }
+
+            self.stats.buffers_received += 1;
+            let mut converted = Vec::new();
+            self.converter.process_u16le_to_f32iq(
+                &buffer[..actual_len],
+                self.config.decimation_factor,
+                &mut converted,
+            );
+            self.stats.buffers_processed += 1;
+
+            let bulk_in = self
+                .bulk_in
+                .as_mut()
+                .ok_or(Error::stream_closed("direct RX stream is closed"))?;
+            bulk_in.submit(buffer);
+
+            self.copy_samples(&converted, out, &mut written);
+            if written == out.len() {
+                return Ok(written);
+            }
+        }
+    }
+
+    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let take = (out.len() - *written).min(self.pending.len());
+        if take == 0 {
+            return;
+        }
+
+        out[*written..*written + take].copy_from_slice(&self.pending[..take]);
+        self.pending.drain(..take);
+        *written += take;
+    }
+
+    fn copy_samples(
+        &mut self,
+        samples: &[(f32, f32)],
+        out: &mut [(f32, f32)],
+        written: &mut usize,
+    ) {
+        let take = (out.len() - *written).min(samples.len());
+        if take > 0 {
+            out[*written..*written + take].copy_from_slice(&samples[..take]);
+            *written += take;
+        }
+        if take < samples.len() {
+            self.pending.extend_from_slice(&samples[take..]);
+        }
+    }
+}
+
+impl<B: BulkInBackend> Drop for DirectRxStream<B> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
 fn sample_count_for_buffer(buffer_len: usize, packing_enabled: bool) -> i32 {
     if packing_enabled {
         (((buffer_len / 2) * 4) / 3) as i32
     } else {
         (buffer_len / 2) as i32
+    }
+}
+
+fn config_current_buffer_size(config: StreamingConfig) -> usize {
+    if config.packing_enabled {
+        config.packed_buffer_size
+    } else {
+        config.buffer_size
     }
 }

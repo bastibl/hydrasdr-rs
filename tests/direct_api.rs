@@ -131,14 +131,21 @@ fn sample_rate_and_bandwidth_helpers_use_count_then_list_protocol() {
         2u32.to_le_bytes().to_vec(),
         [10_000_000u32.to_le_bytes(), 20_000_000u32.to_le_bytes()].concat(),
         vec![1],
+        vec![1],
         2u32.to_le_bytes().to_vec(),
         [1_750_000u32.to_le_bytes(), 2_500_000u32.to_le_bytes()].concat(),
         vec![1],
     ]);
     let mut dev = HydraSdr::from_control(control);
 
-    assert_eq!(dev.get_samplerates().unwrap(), vec![10_000_000, 20_000_000]);
+    assert_eq!(
+        dev.get_samplerates().unwrap(),
+        vec![
+            20_000_000, 10_000_000, 5_000_000, 2_500_000, 1_250_000, 625_000, 312_500, 156_250,
+        ]
+    );
     dev.set_samplerate(20_000_000).unwrap();
+    dev.set_samplerate(2_500_000).unwrap();
     assert_eq!(dev.get_bandwidths().unwrap(), vec![1_750_000, 2_500_000]);
     dev.set_bandwidth(2_500_000).unwrap();
 
@@ -149,9 +156,10 @@ fn sample_rate_and_bandwidth_helpers_use_count_then_list_protocol() {
     );
     assert_eq!(requests[1], VendorControlRequest::get_samplerates(2, false));
     assert_eq!(requests[2], VendorControlRequest::set_samplerate(1, 1));
-    assert_eq!(requests[3], VendorControlRequest::get_bandwidths_count());
-    assert_eq!(requests[4], VendorControlRequest::get_bandwidths(2));
-    assert_eq!(requests[5], VendorControlRequest::set_bandwidth(1));
+    assert_eq!(requests[3], VendorControlRequest::set_samplerate(0, 1));
+    assert_eq!(requests[4], VendorControlRequest::get_bandwidths_count());
+    assert_eq!(requests[5], VendorControlRequest::get_bandwidths(2));
+    assert_eq!(requests[6], VendorControlRequest::set_bandwidth(1));
 }
 
 #[test]

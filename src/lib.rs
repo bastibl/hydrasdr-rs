@@ -83,6 +83,7 @@
 pub mod commands;
 pub mod config;
 pub mod constants;
+mod converter;
 pub mod device;
 pub mod direct;
 pub mod discovery;

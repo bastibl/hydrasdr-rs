@@ -11,7 +11,8 @@ use crate::rfone::{
     RFONE_VGA_MAX_GAIN, component_infos, default_gain_infos, rf_port_infos,
 };
 use crate::streaming::{
-    AsyncStreamingBackend, StreamingBackend, StreamingState, StreamingStats, Transfer,
+    AsyncStreamingBackend, DirectRxStream, StreamingBackend, StreamingState, StreamingStats,
+    Transfer,
 };
 use crate::types::{BoardId, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature};
 use crate::usb::control::{
@@ -24,6 +25,8 @@ const VERSION_STRING_SIZE: usize = 255;
 const MIN_SAMPLERATE_BY_VALUE: u32 = 10_000;
 const MIN_BANDWIDTH_BY_VALUE: u32 = 1_000;
 const MAX_FREQ_HZ: u64 = 10_000_000_000;
+const DECIMATION_FACTORS_ASC: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
+const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 
 /// Direct HydraSDR device handle.
 ///
@@ -38,6 +41,8 @@ pub struct HydraSdr<C = NusbControl> {
     features: Option<u32>,
     gains: Vec<GainInfo>,
     current_samplerate: u32,
+    hardware_samplerate: u32,
+    decimation_factor: u32,
     current_bandwidth: u32,
     packing_enabled: bool,
     reset_command: bool,
@@ -55,6 +60,8 @@ impl<C: ControlBackend> HydraSdr<C> {
             features: None,
             gains: default_gain_infos(),
             current_samplerate: 0,
+            hardware_samplerate: 0,
+            decimation_factor: 1,
             current_bandwidth: 0,
             packing_enabled: false,
             reset_command: false,
@@ -153,19 +160,26 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Read supported sample rates with the C count-then-list protocol.
+    ///
+    /// IQ sample modes return the C-style virtual rate table built from hardware rates and
+    /// supported DDC decimation factors.
     pub fn get_samplerates(&mut self) -> Result<Vec<u32>> {
         let count = self.read_count(VendorControlRequest::get_samplerates_count(false))?;
         let rates =
             self.read_u32_list(VendorControlRequest::get_samplerates(count, false), count)?;
-        self.sample_rates = rates.clone();
-        Ok(rates)
+        self.sample_rates = rates;
+        Ok(self.visible_sample_rates())
     }
 
     /// Set sample rate by C-compatible index or kHz fallback calculation.
     pub fn set_samplerate(&mut self, samplerate: u32) -> Result<()> {
-        let rate_param = self.sample_rate_param(samplerate)?;
+        let (rate_param, hardware_samplerate, decimation_factor) =
+            self.sample_rate_config(samplerate)?;
         self.control_in_min(VendorControlRequest::set_samplerate(rate_param, 1), 1)?;
+        self.streaming.set_decimation(decimation_factor as usize)?;
         self.current_samplerate = samplerate;
+        self.hardware_samplerate = hardware_samplerate;
+        self.decimation_factor = decimation_factor;
         Ok(())
     }
 
@@ -432,28 +446,15 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.streaming.stats()
     }
 
-    fn sample_rate_param(&mut self, samplerate: u32) -> Result<u32> {
+    fn sample_rate_config(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
         if self.sample_rates.is_empty() {
             let _ = self.get_samplerates();
         }
-        if let Some(index) = self
-            .sample_rates
-            .iter()
-            .position(|rate| *rate == samplerate)
-        {
-            return Ok(index as u32);
-        }
-        if samplerate < MIN_SAMPLERATE_BY_VALUE {
-            return Err(Error::Status(StatusCode::InvalidParam));
-        }
-        let mut rate_param = samplerate;
-        if matches!(
-            self.sample_type,
-            SampleType::Float32Iq | SampleType::Int16Iq | SampleType::Int8Iq | SampleType::Uint8Iq
-        ) {
-            rate_param = rate_param.saturating_mul(2);
-        }
-        Ok(rate_param / 1000)
+        let (hardware_samplerate, decimation_factor) = self
+            .sample_rate_hardware_config(samplerate)
+            .unwrap_or((samplerate, 1));
+        let rate_param = self.sample_rate_param_for_hardware_rate(hardware_samplerate)?;
+        Ok((rate_param, hardware_samplerate, decimation_factor))
     }
 
     fn bandwidth_param(&mut self, bandwidth: u32) -> Result<u32> {
@@ -532,6 +533,73 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     fn control_out(&self, request: VendorControlRequest) -> Result<()> {
         self.control.control_out(request)
+    }
+}
+
+impl<C> HydraSdr<C> {
+    fn visible_sample_rates(&self) -> Vec<u32> {
+        if !self.sample_type_is_iq() {
+            return self.sample_rates.clone();
+        }
+        build_virtual_samplerates(&self.sample_rates)
+    }
+
+    fn sample_type_is_iq(&self) -> bool {
+        matches!(
+            self.sample_type,
+            SampleType::Float32Iq | SampleType::Int16Iq | SampleType::Int8Iq | SampleType::Uint8Iq
+        )
+    }
+
+    fn sample_rate_hardware_config(&self, samplerate: u32) -> Option<(u32, u32)> {
+        if let Some(index) = self
+            .sample_rates
+            .iter()
+            .position(|rate| *rate == samplerate)
+        {
+            return Some((self.sample_rates[index], 1));
+        }
+
+        if !self.sample_type_is_iq() {
+            return None;
+        }
+
+        let mut best = None;
+        for hardware_rate in &self.sample_rates {
+            for decimation in DECIMATION_FACTORS_DESC {
+                if hardware_rate / decimation == samplerate {
+                    best = match best {
+                        None => Some((*hardware_rate, decimation)),
+                        Some((best_hw, best_decimation))
+                            if *hardware_rate < best_hw
+                                || (*hardware_rate == best_hw && decimation > best_decimation) =>
+                        {
+                            Some((*hardware_rate, decimation))
+                        }
+                        Some(existing) => Some(existing),
+                    };
+                }
+            }
+        }
+        best
+    }
+
+    fn sample_rate_param_for_hardware_rate(&self, hardware_samplerate: u32) -> Result<u32> {
+        if let Some(index) = self
+            .sample_rates
+            .iter()
+            .position(|rate| *rate == hardware_samplerate)
+        {
+            return Ok(index as u32);
+        }
+        if hardware_samplerate < MIN_SAMPLERATE_BY_VALUE {
+            return Err(Error::Status(StatusCode::InvalidParam));
+        }
+        let mut rate_param = hardware_samplerate;
+        if self.sample_type_is_iq() {
+            rate_param = rate_param.saturating_mul(2);
+        }
+        Ok(rate_param / 1000)
     }
 }
 
@@ -629,16 +697,20 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         let rates = self
             .read_u32_list_async(VendorControlRequest::get_samplerates(count, false), count)
             .await?;
-        self.sample_rates = rates.clone();
-        Ok(rates)
+        self.sample_rates = rates;
+        Ok(self.visible_sample_rates())
     }
 
     /// Async counterpart to [`HydraSdr::set_samplerate`].
     pub async fn set_samplerate_async(&mut self, samplerate: u32) -> Result<()> {
-        let rate_param = self.sample_rate_param_async(samplerate).await?;
+        let (rate_param, hardware_samplerate, decimation_factor) =
+            self.sample_rate_config_async(samplerate).await?;
         self.control_in_min_async(VendorControlRequest::set_samplerate(rate_param, 1), 1)
             .await?;
+        self.streaming.set_decimation(decimation_factor as usize)?;
         self.current_samplerate = samplerate;
+        self.hardware_samplerate = hardware_samplerate;
+        self.decimation_factor = decimation_factor;
         Ok(())
     }
 
@@ -811,28 +883,15 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         Ok(())
     }
 
-    async fn sample_rate_param_async(&mut self, samplerate: u32) -> Result<u32> {
+    async fn sample_rate_config_async(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
         if self.sample_rates.is_empty() {
             let _ = self.get_samplerates_async().await;
         }
-        if let Some(index) = self
-            .sample_rates
-            .iter()
-            .position(|rate| *rate == samplerate)
-        {
-            return Ok(index as u32);
-        }
-        if samplerate < MIN_SAMPLERATE_BY_VALUE {
-            return Err(Error::Status(StatusCode::InvalidParam));
-        }
-        let mut rate_param = samplerate;
-        if matches!(
-            self.sample_type,
-            SampleType::Float32Iq | SampleType::Int16Iq | SampleType::Int8Iq | SampleType::Uint8Iq
-        ) {
-            rate_param = rate_param.saturating_mul(2);
-        }
-        Ok(rate_param / 1000)
+        let (hardware_samplerate, decimation_factor) = self
+            .sample_rate_hardware_config(samplerate)
+            .unwrap_or((samplerate, 1));
+        let rate_param = self.sample_rate_param_for_hardware_rate(hardware_samplerate)?;
+        Ok((rate_param, hardware_samplerate, decimation_factor))
     }
 
     async fn bandwidth_param_async(&mut self, bandwidth: u32) -> Result<u32> {
@@ -933,11 +992,49 @@ impl<C> HydraSdr<C>
 where
     C: ControlBackend + StreamingBackend,
 {
+    /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
+    pub fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
+        if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
+            return Err(Error::Status(StatusCode::Unsupported));
+        }
+
+        self.receiver_mode(ReceiverMode::Off)?;
+        self.receiver_mode(ReceiverMode::Rx)?;
+
+        let bulk_in = match self.control.bulk_in(RFONE_RX_ENDPOINT) {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode(ReceiverMode::Off);
+                return Err(err);
+            }
+        };
+
+        match DirectRxStream::start(bulk_in, self.streaming.config()) {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                let _ = self.receiver_mode(ReceiverMode::Off);
+                Err(err)
+            }
+        }
+    }
+
+    /// Stop a persistent synchronous pull RX stream and return its accumulated counters.
+    pub fn stop_rx_stream(
+        &mut self,
+        mut stream: DirectRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
+        let stats = stream.close();
+        if !self.reset_command {
+            self.receiver_mode(ReceiverMode::Off)?;
+        }
+        Ok(stats)
+    }
+
     /// Start direct synchronous RX streaming.
     ///
-    /// The callback contract mirrors C: each callback receives raw bytes and returning non-zero
-    /// stops the stream. The method forces receiver OFF -> RX before streaming and runs stop cleanup
-    /// afterwards.
+    /// The callback contract mirrors C: each callback receives raw USB bytes and returning
+    /// non-zero stops the stream. The method forces receiver OFF -> RX before streaming and runs
+    /// stop cleanup afterwards.
     pub fn start_rx<F>(&mut self, callback: F) -> Result<StreamingStats>
     where
         F: FnMut(&Transfer<'_>) -> i32,
@@ -1056,4 +1153,19 @@ fn decode_c_string(bytes: &[u8]) -> String {
 
 fn reverse_gain_table_index(value: u8) -> usize {
     21usize.saturating_sub(value.min(21) as usize)
+}
+
+fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {
+    let mut rates = Vec::with_capacity(hardware_rates.len() * DECIMATION_FACTORS_ASC.len());
+    for hardware_rate in hardware_rates {
+        for decimation in DECIMATION_FACTORS_ASC {
+            let effective = hardware_rate / decimation;
+            if effective >= MIN_SAMPLERATE_BY_VALUE {
+                rates.push(effective);
+            }
+        }
+    }
+    rates.sort_unstable_by(|a, b| b.cmp(a));
+    rates.dedup();
+    rates
 }

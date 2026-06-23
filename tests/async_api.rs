@@ -10,6 +10,7 @@ use hydrasdr_rs::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use hydrasdr_rs::streaming::{
     AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer,
 };
+use hydrasdr_rs::types::SampleType;
 use hydrasdr_rs::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
 
 #[derive(Debug, Default)]
@@ -76,7 +77,9 @@ fn async_control_helpers_share_sync_request_encoding_and_update_state() {
 
         assert_eq!(
             dev.get_samplerates_async().await.unwrap(),
-            vec![10_000_000, 20_000_000]
+            vec![
+                20_000_000, 10_000_000, 5_000_000, 2_500_000, 1_250_000, 625_000, 312_500, 156_250,
+            ]
         );
         dev.set_samplerate_async(20_000_000).await.unwrap();
         dev.set_freq_async(915_000_000).await.unwrap();
@@ -227,6 +230,7 @@ fn async_streaming_awaits_completions_without_using_sync_wait_path() {
         ]);
         let state = backend.state.clone();
         let mut dev = HydraSdr::from_control(backend);
+        dev.set_sample_type(SampleType::Raw).unwrap();
 
         let mut callback_count = 0;
         let stats = dev
