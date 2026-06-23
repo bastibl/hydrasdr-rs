@@ -3,7 +3,7 @@
 use crate::commands::{GainType, RfPort};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
-use crate::types::SampleType;
+use crate::types::{DecimationMode, SampleType};
 use crate::usb::control::{AsyncControlBackend, ControlBackend};
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
@@ -113,6 +113,7 @@ pub struct Config {
     sample_rate_hz: u32,
     bandwidth: Bandwidth,
     sample_format: SampleFormat,
+    decimation_mode: DecimationMode,
     rf_port: Option<RfPort>,
     gain: GainConfig,
     bias_tee: Option<bool>,
@@ -126,6 +127,7 @@ impl Default for Config {
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
             bandwidth: Bandwidth::Auto,
             sample_format: SampleFormat::RawU8Iq,
+            decimation_mode: DecimationMode::LowBandwidth,
             rf_port: None,
             gain: GainConfig::Unchanged,
             bias_tee: None,
@@ -173,6 +175,11 @@ impl Config {
         self.sample_format
     }
 
+    /// Virtual IQ-rate hardware/host decimation policy.
+    pub const fn decimation_mode(&self) -> DecimationMode {
+        self.decimation_mode
+    }
+
     /// Configured RF port, if explicitly selected.
     pub const fn rf_port(&self) -> Option<crate::RfPort> {
         self.rf_port
@@ -209,6 +216,7 @@ impl Config {
         self.validate()?;
         direct.set_freq(self.frequency_hz)?;
         direct.set_sample_type(self.sample_format.sample_type())?;
+        direct.set_decimation_mode(self.decimation_mode)?;
         if let Bandwidth::ManualHz(bandwidth_hz) = self.bandwidth {
             direct.set_bandwidth(bandwidth_hz)?;
         }
@@ -231,6 +239,9 @@ impl Config {
         self.validate()?;
         direct.set_freq_async(self.frequency_hz).await?;
         direct.set_sample_type(self.sample_format.sample_type())?;
+        direct
+            .set_decimation_mode_async(self.decimation_mode)
+            .await?;
         if let Bandwidth::ManualHz(bandwidth_hz) = self.bandwidth {
             direct.set_bandwidth_async(bandwidth_hz).await?;
         }
@@ -291,6 +302,11 @@ impl ConfigBuilder {
 
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config.sample_format = value;
+        self
+    }
+
+    pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
+        self.config.decimation_mode = value;
         self
     }
 

@@ -3,9 +3,11 @@
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
+use std::time::Duration;
+
 use crate::streaming::{
-    AsyncRawRxStream, AsyncStreamingBackend, RawRxStream, StreamingBackend, StreamingStats,
-    Transfer,
+    AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
+    StreamingStats, Transfer,
 };
 use crate::types::DeviceInfo;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
@@ -155,6 +157,29 @@ impl Device {
             }
         };
         Ok(OwnedRxStream {
+            device: Some(inner),
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+        })
+    }
+
+    /// Consume this device and start an owned converted `F32Iq` receive stream.
+    ///
+    /// This stream applies the same host-side conversion and decimation as the
+    /// direct `Float32Iq` path.
+    pub fn into_f32_rx_stream(self) -> std::result::Result<OwnedF32RxStream, IntoRxStreamError> {
+        let mut inner = self.inner;
+        let stream = match inner.direct.start_rx_stream() {
+            Ok(stream) => stream,
+            Err(error) => {
+                return Err(IntoRxStreamError {
+                    device: Box::new(Device { inner }),
+                    error,
+                });
+            }
+        };
+        Ok(OwnedF32RxStream {
             device: Some(inner),
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -353,6 +378,11 @@ impl DeviceBuilder {
 
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config = self.config.sample_format(value);
+        self
+    }
+
+    pub fn decimation_mode(mut self, value: crate::DecimationMode) -> Self {
+        self.config = self.config.decimation_mode(value);
         self
     }
 
@@ -614,6 +644,56 @@ impl OwnedRxStream {
 }
 
 impl Drop for OwnedRxStream {
+    fn drop(&mut self) {
+        let _ = self.stop_inner();
+    }
+}
+
+/// Owned synchronous converted `F32Iq` receive stream.
+pub struct OwnedF32RxStream {
+    device: Option<DeviceInner<NusbControl>>,
+    stream: Option<DirectRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
+    stats: StreamingStats,
+    stopped: bool,
+}
+
+impl OwnedF32RxStream {
+    /// Read converted `(I, Q)` samples into `out`.
+    pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        self.stream
+            .as_mut()
+            .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?
+            .read_float32_iq(out, timeout)
+    }
+
+    /// Finish streaming and return the device plus accumulated counters.
+    pub fn finish(mut self) -> Result<(Device, StreamingStats)> {
+        let stats = self.stop_inner()?;
+        let inner = self
+            .device
+            .take()
+            .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
+        Ok((Device { inner }, stats))
+    }
+
+    fn stop_inner(&mut self) -> Result<StreamingStats> {
+        if !self.stopped {
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
+            let device = self
+                .device
+                .as_mut()
+                .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
+            self.stats = device.direct.stop_rx_stream(stream)?;
+            self.stopped = true;
+        }
+        Ok(self.stats)
+    }
+}
+
+impl Drop for OwnedF32RxStream {
     fn drop(&mut self) {
         let _ = self.stop_inner();
     }

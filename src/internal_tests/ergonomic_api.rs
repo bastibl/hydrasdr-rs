@@ -10,7 +10,7 @@ use crate::errors::StatusCode;
 use crate::high_level::DeviceInner as Device;
 use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, StreamingStats};
-use crate::types::{BoardId, SampleType};
+use crate::types::{BoardId, DecimationMode, SampleType};
 use crate::usb::control::{ControlBackend, VendorControlRequest};
 use crate::{Bandwidth, Config, DeviceSelector, GainConfig, GainPreset, SampleBlock, SampleFormat};
 
@@ -167,6 +167,7 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
         .sample_rate_hz(10_000_000)
         .bandwidth(Bandwidth::Auto)
         .sample_format(SampleFormat::RawU8Iq)
+        .decimation_mode(DecimationMode::HighDefinition)
         .rf_port(RfPort::Rx1)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -177,6 +178,7 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
     assert_eq!(config.frequency_hz(), 100_000_000);
     assert_eq!(config.sample_rate_hz(), 10_000_000);
     assert_eq!(config.sample_format().sample_type(), SampleType::Uint8Iq);
+    assert_eq!(config.decimation_mode(), DecimationMode::HighDefinition);
 }
 
 #[test]

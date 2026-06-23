@@ -67,11 +67,13 @@ pub use config::{
 };
 pub use discovery::HydraSdrDeviceInfo;
 pub use errors::{Error, Result, StatusCode};
-pub use high_level::{AsyncRxStream, Device, DeviceBuilder, OwnedRxStream, RxStream, SampleBlock};
+pub use high_level::{
+    AsyncRxStream, Device, DeviceBuilder, OwnedF32RxStream, OwnedRxStream, RxStream, SampleBlock,
+};
 pub use streaming::StreamingStats;
 pub use types::{
-    BiasTeeInfo, BoardId, ComponentInfo, DeviceInfo, GainInfo, PartIdSerialNo, RfPortInfo,
-    SampleType,
+    BiasTeeInfo, BoardId, ComponentInfo, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo,
+    RfPortInfo, SampleType,
 };
 
 #[cfg(test)]
