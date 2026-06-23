@@ -1,9 +1,9 @@
-//! Direct HydraSDR RFOne API translation on top of `nusb`.
+//! HydraSDR RFOne API on top of `nusb`.
 //!
-//! This crate is in the direct C-to-Rust translation phase. Names and behavior
-//! intentionally stay close to the C host driver so parity tests can trace each
-//! Rust path back to the original `hydrasdr_*` API. A later phase should layer a
-//! smaller, more idiomatic Rust wrapper over these direct bindings.
+//! The crate exposes an ergonomic Rust layer for common receive workflows while
+//! keeping the direct C-to-Rust translation available for parity/debugging. The
+//! direct names remain available at their original top-level modules and under
+//! the explicit [`direct`] namespace.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] to mirror the blocking C
 //! driver. Async counterparts are executor-agnostic at this crate layer and
@@ -20,14 +20,21 @@
 //! flash paths just like the C driver.
 
 pub mod commands;
+pub mod config;
 pub mod constants;
 pub mod device;
+pub mod direct;
 pub mod discovery;
 pub mod errors;
+pub mod high_level;
 pub mod rfone;
 pub mod streaming;
 pub mod types;
 pub mod usb;
 
+pub use config::{
+    Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, SampleFormat,
+};
 pub use device::HydraSdr;
 pub use errors::{Error, Result, StatusCode};
+pub use high_level::{AsyncRxStream, Device, DeviceBuilder, RxStream, SampleBlock};

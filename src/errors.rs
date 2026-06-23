@@ -98,16 +98,36 @@ pub fn error_name(code: StatusCode) -> &'static str {
 pub enum Error {
     Status(StatusCode),
     UnknownStatus(UnknownStatusCode),
-    Usb { status: StatusCode, message: String },
+    Usb {
+        status: StatusCode,
+        message: String,
+    },
+    InvalidConfig {
+        field: &'static str,
+        reason: &'static str,
+    },
+    StreamClosed(&'static str),
 }
 
 impl Error {
+    /// Build a high-level configuration validation error.
+    pub const fn invalid_config(field: &'static str, reason: &'static str) -> Self {
+        Self::InvalidConfig { field, reason }
+    }
+
+    /// Build a high-level stream lifecycle error.
+    pub const fn stream_closed(reason: &'static str) -> Self {
+        Self::StreamClosed(reason)
+    }
+
     /// Return the C-style status code represented by this error.
     pub const fn status_code(&self) -> StatusCode {
         match self {
             Self::Status(code) => *code,
             Self::UnknownStatus(_) => StatusCode::Other,
             Self::Usb { status, .. } => *status,
+            Self::InvalidConfig { .. } => StatusCode::InvalidParam,
+            Self::StreamClosed(_) => StatusCode::StreamingStopped,
         }
     }
 }
@@ -118,6 +138,10 @@ impl fmt::Display for Error {
             Self::Status(code) => f.write_str(code.name()),
             Self::UnknownStatus(code) => code.fmt(f),
             Self::Usb { status, message } => write!(f, "{}: {message}", status.name()),
+            Self::InvalidConfig { field, reason } => {
+                write!(f, "invalid configuration for {field}: {reason}")
+            }
+            Self::StreamClosed(reason) => write!(f, "stream closed: {reason}"),
         }
     }
 }
