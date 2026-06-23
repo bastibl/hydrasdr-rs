@@ -11,6 +11,7 @@ pub enum ReceiverMode {
 /// USB vendor request numbers copied from `hydrasdr_commands.h`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[allow(clippy::enum_variant_names)]
 pub enum VendorRequest {
     Reset = 0,
     ReceiverMode = 1,

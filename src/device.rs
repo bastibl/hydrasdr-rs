@@ -365,11 +365,11 @@ impl<C: ControlBackend> HydraSdr<C> {
 
         let previous = self.decimation_mode;
         self.decimation_mode = mode;
-        if self.current_samplerate != 0 {
-            if let Err(err) = self.set_samplerate(self.current_samplerate) {
-                self.decimation_mode = previous;
-                return Err(err);
-            }
+        if self.current_samplerate != 0
+            && let Err(err) = self.set_samplerate(self.current_samplerate)
+        {
+            self.decimation_mode = previous;
+            return Err(err);
         }
         Ok(())
     }
@@ -591,10 +591,10 @@ impl<C> HydraSdr<C> {
             return direct_rate.map(|rate| (rate, 1));
         }
 
-        if self.decimation_mode == DecimationMode::LowBandwidth {
-            if let Some(rate) = direct_rate {
-                return Some((rate, 1));
-            }
+        if self.decimation_mode == DecimationMode::LowBandwidth
+            && let Some(rate) = direct_rate
+        {
+            return Some((rate, 1));
         }
 
         let mut best = None;
@@ -765,11 +765,11 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
 
         let previous = self.decimation_mode;
         self.decimation_mode = mode;
-        if self.current_samplerate != 0 {
-            if let Err(err) = self.set_samplerate_async(self.current_samplerate).await {
-                self.decimation_mode = previous;
-                return Err(err);
-            }
+        if self.current_samplerate != 0
+            && let Err(err) = self.set_samplerate_async(self.current_samplerate).await
+        {
+            self.decimation_mode = previous;
+            return Err(err);
         }
         Ok(())
     }

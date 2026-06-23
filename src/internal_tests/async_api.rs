@@ -2,16 +2,14 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use crate::commands::{ReceiverMode, VendorRequest};
+use crate::constants::DEFAULT_BUFFER_SIZE;
+use crate::device::HydraSdr;
+use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
+use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer};
+use crate::types::SampleType;
+use crate::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
 use futures_lite::future::block_on;
-use hydrasdr_rs::commands::{ReceiverMode, VendorRequest};
-use hydrasdr_rs::constants::DEFAULT_BUFFER_SIZE;
-use hydrasdr_rs::device::HydraSdr;
-use hydrasdr_rs::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
-use hydrasdr_rs::streaming::{
-    AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer,
-};
-use hydrasdr_rs::types::SampleType;
-use hydrasdr_rs::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
 
 #[derive(Debug, Default)]
 struct FakeAsyncControl {
@@ -27,7 +25,7 @@ impl FakeAsyncControl {
         }
     }
 
-    fn record_control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn record_control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.requests.borrow_mut().push(request);
         if self.in_responses.borrow().is_empty() {
             return Ok(vec![1]);
@@ -35,31 +33,28 @@ impl FakeAsyncControl {
         Ok(self.in_responses.borrow_mut().remove(0))
     }
 
-    fn record_control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn record_control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.requests.borrow_mut().push(request);
         Ok(())
     }
 }
 
 impl ControlBackend for FakeAsyncControl {
-    fn control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.record_control_in(request)
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.record_control_out(request)
     }
 }
 
 impl AsyncControlBackend for FakeAsyncControl {
-    async fn control_in_async(
-        &self,
-        request: VendorControlRequest,
-    ) -> hydrasdr_rs::Result<Vec<u8>> {
+    async fn control_in_async(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.record_control_in(request)
     }
 
-    async fn control_out_async(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    async fn control_out_async(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.record_control_out(request)
     }
 }
@@ -134,27 +129,24 @@ impl FakeAsyncDevice {
 }
 
 impl ControlBackend for FakeAsyncDevice {
-    fn control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(vec![1])
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(())
     }
 }
 
 impl AsyncControlBackend for FakeAsyncDevice {
-    async fn control_in_async(
-        &self,
-        request: VendorControlRequest,
-    ) -> hydrasdr_rs::Result<Vec<u8>> {
+    async fn control_in_async(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(vec![1])
     }
 
-    async fn control_out_async(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    async fn control_out_async(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(())
     }
@@ -163,7 +155,7 @@ impl AsyncControlBackend for FakeAsyncDevice {
 impl AsyncStreamingBackend for FakeAsyncDevice {
     type BulkIn = FakeAsyncBulkIn;
 
-    async fn bulk_in_async(&self, endpoint: u8) -> hydrasdr_rs::Result<Self::BulkIn> {
+    async fn bulk_in_async(&self, endpoint: u8) -> crate::Result<Self::BulkIn> {
         self.state.borrow_mut().opened_endpoints.push(endpoint);
         Ok(FakeAsyncBulkIn {
             endpoint,
@@ -181,7 +173,7 @@ struct FakeAsyncBulkIn {
 impl AsyncBulkInBackend for FakeAsyncBulkIn {
     type Buffer = Vec<u8>;
 
-    async fn clear_halt_async(&mut self) -> hydrasdr_rs::Result<()> {
+    async fn clear_halt_async(&mut self) -> crate::Result<()> {
         self.state
             .borrow_mut()
             .async_cleared_halts

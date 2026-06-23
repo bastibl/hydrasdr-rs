@@ -1,12 +1,10 @@
 use std::cell::RefCell;
 
-use hydrasdr_rs::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
-use hydrasdr_rs::device::HydraSdr;
-use hydrasdr_rs::errors::StatusCode;
-use hydrasdr_rs::types::SampleType;
-use hydrasdr_rs::usb::control::{
-    ControlBackend, ControlDirection, VendorControlRequest, gpio_port_pin,
-};
+use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
+use crate::device::HydraSdr;
+use crate::errors::StatusCode;
+use crate::types::SampleType;
+use crate::usb::control::{ControlBackend, ControlDirection, VendorControlRequest, gpio_port_pin};
 use nusb::transfer::{ControlType, Recipient};
 
 #[derive(Debug, Default)]
@@ -25,7 +23,7 @@ impl FakeControl {
 }
 
 impl ControlBackend for FakeControl {
-    fn control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.requests.borrow_mut().push(request);
         if self.in_responses.borrow().is_empty() {
             return Ok(vec![1]);
@@ -33,7 +31,7 @@ impl ControlBackend for FakeControl {
         Ok(self.in_responses.borrow_mut().remove(0))
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.requests.borrow_mut().push(request);
         Ok(())
     }

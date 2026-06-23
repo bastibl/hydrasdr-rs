@@ -3,6 +3,8 @@
 //! This ports the unpacked 12-bit `float32_opt` path from `hydrasdr-host`:
 //! LUT scaling, DC removal, Fs/4 polyphase DDC, and Q delay compensation.
 
+#![allow(clippy::excessive_precision)]
+
 const ADC_BITS: u32 = 12;
 const ADC_MIDPOINT: f32 = (1_u32 << (ADC_BITS - 1)) as f32;
 const DC_REMOVAL_ALPHA: f32 = 0.01;
@@ -293,21 +295,18 @@ impl DecimationStage {
         let pairs = (src.len() / 2) & !3;
         let mut idx = self.fir_index;
         for i in (0..pairs).step_by(4) {
-            let idx0;
-            let idx1;
-
             self.store_iq(idx, src[i * 2], src[i * 2 + 1]);
             idx = (idx + 1) & 31;
 
             self.store_iq(idx, src[i * 2 + 2], src[i * 2 + 3]);
-            idx0 = idx;
+            let idx0 = idx;
             idx = (idx + 1) & 31;
 
             self.store_iq(idx, src[i * 2 + 4], src[i * 2 + 5]);
             idx = (idx + 1) & 31;
 
             self.store_iq(idx, src[i * 2 + 6], src[i * 2 + 7]);
-            idx1 = idx;
+            let idx1 = idx;
             idx = (idx + 1) & 31;
 
             let (i0, q0) = self.acc_hb33(idx0);
@@ -321,21 +320,18 @@ impl DecimationStage {
         let pairs = (src.len() / 2) & !3;
         let mut idx = self.fir_index;
         for i in (0..pairs).step_by(4) {
-            let idx0;
-            let idx1;
-
             self.store_iq(idx, src[i * 2], src[i * 2 + 1]);
             idx = (idx + 1) & 15;
 
             self.store_iq(idx, src[i * 2 + 2], src[i * 2 + 3]);
-            idx0 = idx;
+            let idx0 = idx;
             idx = (idx + 1) & 15;
 
             self.store_iq(idx, src[i * 2 + 4], src[i * 2 + 5]);
             idx = (idx + 1) & 15;
 
             self.store_iq(idx, src[i * 2 + 6], src[i * 2 + 7]);
-            idx1 = idx;
+            let idx1 = idx;
             idx = (idx + 1) & 15;
 
             let (i0, q0) = self.acc_hb17(idx0);

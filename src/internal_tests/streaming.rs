@@ -3,14 +3,14 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
-use hydrasdr_rs::commands::{ReceiverMode, VendorRequest};
-use hydrasdr_rs::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
-use hydrasdr_rs::device::HydraSdr;
-use hydrasdr_rs::errors::StatusCode;
-use hydrasdr_rs::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
-use hydrasdr_rs::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, Transfer};
-use hydrasdr_rs::types::SampleType;
-use hydrasdr_rs::usb::control::{ControlBackend, VendorControlRequest};
+use crate::commands::{ReceiverMode, VendorRequest};
+use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
+use crate::device::HydraSdr;
+use crate::errors::StatusCode;
+use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
+use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, Transfer};
+use crate::types::SampleType;
+use crate::usb::control::{ControlBackend, VendorControlRequest};
 
 #[derive(Debug, Default)]
 struct FakeState {
@@ -47,12 +47,12 @@ impl FakeDevice {
 }
 
 impl ControlBackend for FakeDevice {
-    fn control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(vec![1])
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(())
     }
@@ -61,7 +61,7 @@ impl ControlBackend for FakeDevice {
 impl StreamingBackend for FakeDevice {
     type BulkIn = FakeBulkIn;
 
-    fn bulk_in(&self, endpoint: u8) -> hydrasdr_rs::Result<Self::BulkIn> {
+    fn bulk_in(&self, endpoint: u8) -> crate::Result<Self::BulkIn> {
         self.state.borrow_mut().opened_endpoints.push(endpoint);
         Ok(FakeBulkIn {
             endpoint,
@@ -79,7 +79,7 @@ struct FakeBulkIn {
 impl BulkInBackend for FakeBulkIn {
     type Buffer = Vec<u8>;
 
-    fn clear_halt(&mut self) -> hydrasdr_rs::Result<()> {
+    fn clear_halt(&mut self) -> crate::Result<()> {
         self.state.borrow_mut().cleared_halts.push(self.endpoint);
         Ok(())
     }

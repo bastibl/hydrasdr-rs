@@ -3,17 +3,16 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
-use hydrasdr_rs::commands::{ReceiverMode, RfPort, VendorRequest};
-use hydrasdr_rs::constants::DEFAULT_BUFFER_SIZE;
-use hydrasdr_rs::device::HydraSdr;
-use hydrasdr_rs::errors::StatusCode;
-use hydrasdr_rs::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
-use hydrasdr_rs::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, StreamingStats};
-use hydrasdr_rs::types::{BoardId, SampleType};
-use hydrasdr_rs::usb::control::{ControlBackend, VendorControlRequest};
-use hydrasdr_rs::{
-    Bandwidth, Config, Device, DeviceSelector, GainConfig, GainPreset, SampleBlock, SampleFormat,
-};
+use crate::commands::{ReceiverMode, RfPort, VendorRequest};
+use crate::constants::DEFAULT_BUFFER_SIZE;
+use crate::device::HydraSdr;
+use crate::errors::StatusCode;
+use crate::high_level::DeviceInner as Device;
+use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
+use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, StreamingStats};
+use crate::types::{BoardId, SampleType};
+use crate::usb::control::{ControlBackend, VendorControlRequest};
+use crate::{Bandwidth, Config, DeviceSelector, GainConfig, GainPreset, SampleBlock, SampleFormat};
 
 #[derive(Debug, Default)]
 struct FakeState {
@@ -69,7 +68,7 @@ impl FakeDevice {
 }
 
 impl ControlBackend for FakeDevice {
-    fn control_in(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<Vec<u8>> {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
         self.state.borrow_mut().control_requests.push(request);
         if let Some(response) = self.state.borrow_mut().in_responses.pop_front() {
             Ok(response)
@@ -78,7 +77,7 @@ impl ControlBackend for FakeDevice {
         }
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> hydrasdr_rs::Result<()> {
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
         self.state.borrow_mut().control_requests.push(request);
         Ok(())
     }
@@ -87,7 +86,7 @@ impl ControlBackend for FakeDevice {
 impl StreamingBackend for FakeDevice {
     type BulkIn = FakeBulkIn;
 
-    fn bulk_in(&self, endpoint: u8) -> hydrasdr_rs::Result<Self::BulkIn> {
+    fn bulk_in(&self, endpoint: u8) -> crate::Result<Self::BulkIn> {
         self.state.borrow_mut().opened_endpoints.push(endpoint);
         Ok(FakeBulkIn {
             endpoint,
@@ -105,7 +104,7 @@ struct FakeBulkIn {
 impl BulkInBackend for FakeBulkIn {
     type Buffer = Vec<u8>;
 
-    fn clear_halt(&mut self) -> hydrasdr_rs::Result<()> {
+    fn clear_halt(&mut self) -> crate::Result<()> {
         self.state.borrow_mut().cleared_halts.push(self.endpoint);
         Ok(())
     }
@@ -140,9 +139,11 @@ impl BulkInBackend for FakeBulkIn {
 
 #[test]
 fn config_builder_validates_safe_ranges_before_usb_io() {
-    assert_eq!(Device::builder().selector(), DeviceSelector::First);
+    assert_eq!(crate::Device::builder().selector(), DeviceSelector::First);
     assert_eq!(
-        Device::builder().serial(0x0123_4567_89ab_cdef).selector(),
+        crate::Device::builder()
+            .serial(0x0123_4567_89ab_cdef)
+            .selector(),
         DeviceSelector::Serial(0x0123_4567_89ab_cdef)
     );
 
@@ -230,7 +231,7 @@ fn config_apply_uses_direct_api_in_c_documented_order() {
 }
 
 #[test]
-fn high_level_device_caches_info_and_preserves_direct_escape_hatches() {
+fn high_level_device_caches_info_and_applies_configuration() {
     let control = FakeDevice::with_info_responses();
     let state = control.state.clone();
     let direct = HydraSdr::from_control(control);
@@ -249,8 +250,6 @@ fn high_level_device_caches_info_and_preserves_direct_escape_hatches() {
     assert_eq!(device.direct().get_sample_type(), SampleType::Uint8Iq);
     assert!(!device.direct().is_streaming());
 
-    let direct = device.into_direct();
-    assert_eq!(direct.get_sample_type(), SampleType::Uint8Iq);
     assert!(state.borrow().control_requests.len() > 7);
 }
 
@@ -346,16 +345,6 @@ fn rx_stream_stop_and_finish_are_idempotent_when_idle() {
         .map(|request| request.value)
         .collect();
     assert_eq!(receiver_modes, vec![ReceiverMode::Off as u16]);
-}
-
-#[test]
-fn direct_namespace_keeps_low_level_api_available() {
-    let direct = hydrasdr_rs::direct::HydraSdr::from_control(FakeDevice::default());
-    assert_eq!(
-        hydrasdr_rs::direct::types::SampleType::Raw,
-        hydrasdr_rs::types::SampleType::Raw
-    );
-    assert_eq!(direct.get_sample_type(), SampleType::Float32Iq);
 }
 
 #[test]

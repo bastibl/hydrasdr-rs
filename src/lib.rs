@@ -1,9 +1,11 @@
+#![allow(dead_code)]
+
 //! HydraSDR RFOne API on top of `nusb`.
 //!
-//! The crate exposes an ergonomic Rust layer for common receive workflows while
-//! keeping the direct C-to-Rust translation available for parity/debugging. The
-//! direct names remain available at their original top-level modules and under
-//! the explicit [`direct`] namespace.
+//! The crate exposes an ergonomic Rust layer for common receive workflows. The
+//! low-level C-to-Rust port is kept inside the crate as the USB/control
+//! implementation, but the public API is centered on [`Device`], [`Config`], and
+//! typed configuration values.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] to mirror the blocking C
 //! driver. Async counterparts are executor-agnostic at this crate layer and
@@ -40,8 +42,7 @@
 //! Open and configure real hardware with the high-level [`Device`] builder:
 //!
 //! ```no_run
-//! use hydrasdr_rs::commands::RfPort;
-//! use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+//! use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
 //!     let mut dev = Device::builder()
@@ -58,45 +59,47 @@
 //!     })?;
 //!     println!("{stats:?}");
 //!
-//!     dev.into_direct().close()
-//! }
-//! ```
-//!
-//! # Direct API
-//!
-//! The low-level C-style API is still available when you need one-to-one control
-//! requests or parity with `hydrasdr-host`:
-//!
-//! ```no_run
-//! use hydrasdr_rs::direct::HydraSdr;
-//! use hydrasdr_rs::direct::types::SampleType;
-//!
-//! fn main() -> hydrasdr_rs::Result<()> {
-//!     let mut dev = HydraSdr::open()?;
-//!     dev.set_sample_type(SampleType::Raw)?;
-//!     dev.set_freq(100_000_000)?;
-//!     dev.set_samplerate(10_000_000)?;
-//!     dev.close()
+//!     Ok(())
 //! }
 //! ```
 
-pub mod commands;
-pub mod config;
-pub mod constants;
+mod commands;
+mod config;
+mod constants;
 mod converter;
-pub mod device;
-pub mod direct;
-pub mod discovery;
-pub mod errors;
-pub mod high_level;
-pub mod rfone;
-pub mod streaming;
-pub mod types;
-pub mod usb;
+mod device;
+mod discovery;
+mod errors;
+mod high_level;
+mod rfone;
+mod streaming;
+mod types;
+mod usb;
 
+pub use commands::{GainType, RfPort};
 pub use config::{
     Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, SampleFormat,
 };
-pub use device::HydraSdr;
 pub use errors::{Error, Result, StatusCode};
 pub use high_level::{AsyncRxStream, Device, DeviceBuilder, RxStream, SampleBlock};
+pub use streaming::StreamingStats;
+pub use types::{
+    BiasTeeInfo, BoardId, ComponentInfo, DeviceInfo, GainInfo, PartIdSerialNo, RfPortInfo,
+    SampleType,
+};
+
+#[cfg(test)]
+mod internal_tests {
+    #[path = "async_api.rs"]
+    mod async_api;
+    #[path = "direct_api.rs"]
+    mod direct_api;
+    #[path = "ergonomic_api.rs"]
+    mod ergonomic_api;
+    #[path = "foundation.rs"]
+    mod foundation;
+    #[path = "no_hardware_parity.rs"]
+    mod no_hardware_parity;
+    #[path = "streaming.rs"]
+    mod streaming;
+}

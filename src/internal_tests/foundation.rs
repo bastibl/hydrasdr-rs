@@ -1,13 +1,13 @@
-use hydrasdr_rs::commands::{Capability, GainType, ReceiverMode, RfPort, VendorRequest};
-use hydrasdr_rs::constants::{
+use crate::commands::{Capability, GainType, ReceiverMode, RfPort, VendorRequest};
+use crate::constants::{
     HYDRASDR_BANDWIDTH_AUTO, HYDRASDR_VER_MAJOR, HYDRASDR_VER_MINOR, HYDRASDR_VER_REVISION,
     HYDRASDR_VERSION, HYDRASDR_VERSION_NUM, make_version,
 };
-use hydrasdr_rs::discovery::{USB_DEVICE_IDS, parse_hydrasdr_serial};
-use hydrasdr_rs::errors::{StatusCode, error_name};
-use hydrasdr_rs::rfone::{RFONE_HARDCODED_CAPS, RFONE_SAMPLE_TYPES, RFONE_SPEC};
-use hydrasdr_rs::types::{BoardId, DecimationMode, SampleType, board_id_name_raw, sample_type_bit};
-use hydrasdr_rs::usb::control::{ControlDirection, VendorControlRequest, gpio_port_pin};
+use crate::discovery::{USB_DEVICE_IDS, parse_hydrasdr_serial};
+use crate::errors::{StatusCode, error_name};
+use crate::rfone::{RFONE_HARDCODED_CAPS, RFONE_SAMPLE_TYPES, RFONE_SPEC};
+use crate::types::{BoardId, DecimationMode, SampleType, board_id_name_raw, sample_type_bit};
+use crate::usb::control::{ControlDirection, VendorControlRequest, gpio_port_pin};
 
 #[test]
 fn version_constants_match_c_header() {

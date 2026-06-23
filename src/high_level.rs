@@ -1,4 +1,4 @@
-//! Ergonomic HydraSDR RFOne API built on top of the direct C-style layer.
+//! Ergonomic HydraSDR RFOne API.
 
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::device::HydraSdr;
@@ -13,8 +13,7 @@ use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 /// examples live on [`crate::Config`] and [`crate::ConfigBuilder`].
 ///
 /// ```no_run
-/// use hydrasdr_rs::commands::RfPort;
-/// use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+/// use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
 ///
 /// fn main() -> hydrasdr_rs::Result<()> {
 ///     let mut dev = Device::builder()
@@ -31,17 +30,107 @@ use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 ///     })?;
 ///     println!("{stats:?}");
 ///
-///     dev.into_direct().close()
+///     Ok(())
 /// }
 /// ```
 #[derive(Debug)]
-pub struct Device<C = NusbControl> {
+pub(crate) struct DeviceInner<C = NusbControl> {
     direct: HydraSdr<C>,
     info: Option<DeviceInfo>,
     sample_format: SampleFormat,
 }
 
-impl<C> Device<C>
+/// High-level owned HydraSDR RFOne device handle.
+#[derive(Debug)]
+pub struct Device {
+    inner: DeviceInner<NusbControl>,
+}
+
+impl Device {
+    /// Start building and opening a high-level USB device.
+    pub fn builder() -> DeviceBuilder {
+        DeviceBuilder::default()
+    }
+
+    /// Open the first visible HydraSDR RFOne with default high-level configuration.
+    pub fn open() -> Result<Self> {
+        Self::builder().open()
+    }
+
+    /// Open one visible HydraSDR RFOne by serial with default high-level configuration.
+    pub fn open_serial(serial: u64) -> Result<Self> {
+        Self::builder().serial(serial).open()
+    }
+
+    /// Async counterpart to [`Device::open`].
+    pub async fn open_async() -> Result<Self> {
+        Self::builder().open_async().await
+    }
+
+    /// Async counterpart to [`Device::open_serial`].
+    pub async fn open_serial_async(serial: u64) -> Result<Self> {
+        Self::builder().serial(serial).open_async().await
+    }
+
+    /// Return cached device metadata.
+    pub fn info(&self) -> &DeviceInfo {
+        self.inner.info()
+    }
+
+    /// Refresh and return device metadata.
+    pub fn refresh_info(&mut self) -> Result<&DeviceInfo> {
+        self.inner.refresh_info()
+    }
+
+    /// Apply a high-level receiver configuration.
+    pub fn configure(&mut self, config: &Config) -> Result<()> {
+        self.inner.configure(config)
+    }
+
+    /// Apply a high-level receiver configuration through async control requests.
+    pub async fn configure_async(&mut self, config: &Config) -> Result<()> {
+        self.inner.configure_async(config).await
+    }
+
+    /// Refresh and return device metadata through async control requests.
+    pub async fn refresh_info_async(&mut self) -> Result<&DeviceInfo> {
+        self.inner.refresh_info_async().await
+    }
+
+    /// Create an idle synchronous stream guard.
+    pub fn rx_stream(&mut self) -> Result<RxStream<'_>> {
+        Ok(RxStream {
+            inner: self.inner.rx_stream()?,
+        })
+    }
+
+    /// Create an idle async stream guard.
+    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStream<'_>> {
+        Ok(AsyncRxStream {
+            inner: self.inner.rx_stream_async().await?,
+        })
+    }
+
+    /// Receive sample blocks through the high-level callback streaming loop.
+    ///
+    /// The callback returns `true` to stop the stream and `false` to continue.
+    pub fn receive_blocks<F>(&mut self, callback: F) -> Result<StreamingStats>
+    where
+        F: FnMut(SampleBlock<'_>) -> bool,
+    {
+        self.inner.receive_blocks(callback)
+    }
+
+    /// Async counterpart to [`Device::receive_blocks`].
+    pub async fn receive_blocks_async<F>(&mut self, callback: F) -> Result<StreamingStats>
+    where
+        F: FnMut(SampleBlock<'_>) -> bool,
+    {
+        self.inner.receive_blocks_async(callback).await
+    }
+}
+
+impl<C> DeviceInner<C>
 where
     C: ControlBackend,
 {
@@ -70,8 +159,8 @@ where
     /// Return cached device metadata.
     ///
     /// Handles opened through [`Device::open`], [`Device::open_serial`], or
-    /// [`Device::from_direct`] always have this populated. Test/fake handles
-    /// created with [`Device::from_direct_without_info`] can call
+    /// [`DeviceInner::from_direct`] always have this populated. Test/fake handles
+    /// created with [`DeviceInner::from_direct_without_info`] can call
     /// [`Device::refresh_info`] first if metadata is needed.
     pub fn info(&self) -> &DeviceInfo {
         self.info
@@ -97,22 +186,12 @@ where
         &self.direct
     }
 
-    /// Mutably borrow the underlying direct C-style handle.
-    pub fn direct_mut(&mut self) -> &mut HydraSdr<C> {
-        &mut self.direct
-    }
-
-    /// Consume this high-level handle and return the direct handle.
-    pub fn into_direct(self) -> HydraSdr<C> {
-        self.direct
-    }
-
     /// Create an idle synchronous stream guard.
-    pub fn rx_stream(&mut self) -> Result<RxStream<'_, C>> {
+    pub fn rx_stream(&mut self) -> Result<RxStreamInner<'_, C>> {
         if self.direct.is_streaming() {
             return Err(Error::stream_closed("direct receiver is already streaming"));
         }
-        Ok(RxStream {
+        Ok(RxStreamInner {
             device: self,
             stopped: false,
             finished: false,
@@ -120,7 +199,7 @@ where
     }
 }
 
-impl<C> Device<C>
+impl<C> DeviceInner<C>
 where
     C: ControlBackend + StreamingBackend,
 {
@@ -138,7 +217,7 @@ where
     ///         true
     ///     })?;
     ///     println!("{stats:?}");
-    ///     dev.into_direct().close()
+    ///     Ok(())
     /// }
     /// ```
     pub fn receive_blocks<F>(&mut self, mut callback: F) -> Result<StreamingStats>
@@ -153,7 +232,7 @@ where
     }
 }
 
-impl<C> Device<C>
+impl<C> DeviceInner<C>
 where
     C: AsyncControlBackend + ControlBackend,
 {
@@ -171,11 +250,11 @@ where
     }
 
     /// Create an idle async stream guard.
-    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStream<'_, C>> {
+    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStreamInner<'_, C>> {
         if self.direct.is_streaming() {
             return Err(Error::stream_closed("direct receiver is already streaming"));
         }
-        Ok(AsyncRxStream {
+        Ok(AsyncRxStreamInner {
             device: self,
             stopped: false,
             finished: false,
@@ -183,7 +262,7 @@ where
     }
 }
 
-impl<C> Device<C>
+impl<C> DeviceInner<C>
 where
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 {
@@ -199,33 +278,6 @@ where
                 i32::from(callback(block))
             })
             .await
-    }
-}
-
-impl Device<NusbControl> {
-    /// Start building and opening a high-level `nusb` device.
-    pub fn builder() -> DeviceBuilder {
-        DeviceBuilder::default()
-    }
-
-    /// Open the first visible HydraSDR RFOne with default high-level configuration.
-    pub fn open() -> Result<Self> {
-        Self::builder().open()
-    }
-
-    /// Open one visible HydraSDR RFOne by serial with default high-level configuration.
-    pub fn open_serial(serial: u64) -> Result<Self> {
-        Self::builder().serial(serial).open()
-    }
-
-    /// Async counterpart to [`Device::open`].
-    pub async fn open_async() -> Result<Self> {
-        Self::builder().open_async().await
-    }
-
-    /// Async counterpart to [`Device::open_serial`].
-    pub async fn open_serial_async(serial: u64) -> Result<Self> {
-        Self::builder().serial(serial).open_async().await
     }
 }
 
@@ -300,7 +352,7 @@ impl DeviceBuilder {
         self
     }
 
-    pub fn rf_port(mut self, value: crate::commands::RfPort) -> Self {
+    pub fn rf_port(mut self, value: crate::RfPort) -> Self {
         self.config = self.config.rf_port(value);
         self
     }
@@ -326,29 +378,29 @@ impl DeviceBuilder {
     }
 
     /// Open and configure the selected device synchronously.
-    pub fn open(self) -> Result<Device<NusbControl>> {
+    pub fn open(self) -> Result<Device> {
         let selector = self.selector;
         let config = self.config.build()?;
         let direct = match selector {
             DeviceSelector::First => HydraSdr::open()?,
             DeviceSelector::Serial(serial) => HydraSdr::open_sn(serial)?,
         };
-        let mut device = Device::from_direct(direct)?;
-        device.configure(&config)?;
-        Ok(device)
+        let mut inner = DeviceInner::from_direct(direct)?;
+        inner.configure(&config)?;
+        Ok(Device { inner })
     }
 
     /// Open and configure the selected device asynchronously.
-    pub async fn open_async(self) -> Result<Device<NusbControl>> {
+    pub async fn open_async(self) -> Result<Device> {
         let selector = self.selector;
         let config = self.config.build()?;
         let direct = match selector {
             DeviceSelector::First => HydraSdr::open_async().await?,
             DeviceSelector::Serial(serial) => HydraSdr::open_sn_async(serial).await?,
         };
-        let mut device = Device::from_direct(direct)?;
-        device.configure_async(&config).await?;
-        Ok(device)
+        let mut inner = DeviceInner::from_direct(direct)?;
+        inner.configure_async(&config).await?;
+        Ok(Device { inner })
     }
 }
 
@@ -423,13 +475,13 @@ impl<'a> SampleBlock<'a> {
 }
 
 /// Idle synchronous stream guard for explicit stop/finish lifecycle control.
-pub struct RxStream<'dev, C: ControlBackend> {
-    device: &'dev mut Device<C>,
+pub(crate) struct RxStreamInner<'dev, C: ControlBackend> {
+    device: &'dev mut DeviceInner<C>,
     stopped: bool,
     finished: bool,
 }
 
-impl<C> RxStream<'_, C>
+impl<C> RxStreamInner<'_, C>
 where
     C: ControlBackend,
 {
@@ -452,7 +504,7 @@ where
     }
 }
 
-impl<C: ControlBackend> Drop for RxStream<'_, C> {
+impl<C: ControlBackend> Drop for RxStreamInner<'_, C> {
     fn drop(&mut self) {
         if !self.stopped && !self.finished {
             let _ = self.device.direct.stop_rx();
@@ -461,14 +513,31 @@ impl<C: ControlBackend> Drop for RxStream<'_, C> {
     }
 }
 
+/// Idle synchronous stream guard for explicit stop/finish lifecycle control.
+pub struct RxStream<'dev> {
+    inner: RxStreamInner<'dev, NusbControl>,
+}
+
+impl RxStream<'_> {
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub fn stop(&mut self) -> Result<()> {
+        self.inner.stop()
+    }
+
+    /// Finish this stream guard and return current streaming counters.
+    pub fn finish(self) -> Result<StreamingStats> {
+        self.inner.finish()
+    }
+}
+
 /// Idle async stream guard for explicit async stop/finish lifecycle control.
-pub struct AsyncRxStream<'dev, C: AsyncControlBackend + ControlBackend> {
-    device: &'dev mut Device<C>,
+pub(crate) struct AsyncRxStreamInner<'dev, C: AsyncControlBackend + ControlBackend> {
+    device: &'dev mut DeviceInner<C>,
     stopped: bool,
     finished: bool,
 }
 
-impl<C> AsyncRxStream<'_, C>
+impl<C> AsyncRxStreamInner<'_, C>
 where
     C: AsyncControlBackend + ControlBackend,
 {
@@ -488,5 +557,22 @@ where
         }
         self.finished = true;
         Ok(self.device.direct.streaming_stats())
+    }
+}
+
+/// Idle async stream guard for explicit async stop/finish lifecycle control.
+pub struct AsyncRxStream<'dev> {
+    inner: AsyncRxStreamInner<'dev, NusbControl>,
+}
+
+impl AsyncRxStream<'_> {
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub async fn stop(&mut self) -> Result<()> {
+        self.inner.stop().await
+    }
+
+    /// Finish this stream guard and return current streaming counters.
+    pub async fn finish(self) -> Result<StreamingStats> {
+        self.inner.finish().await
     }
 }

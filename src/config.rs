@@ -1,4 +1,4 @@
-//! Ergonomic receiver configuration layered over the direct HydraSDR API.
+//! Ergonomic receiver configuration.
 
 use crate::commands::{GainType, RfPort};
 use crate::device::HydraSdr;
@@ -31,15 +31,7 @@ pub enum Bandwidth {
     ManualHz(u32),
 }
 
-/// High-level sample format names mapped to direct C sample types.
-///
-/// ```
-/// use hydrasdr_rs::types::SampleType;
-/// use hydrasdr_rs::SampleFormat;
-///
-/// assert_eq!(SampleFormat::RawU8Iq.sample_type(), SampleType::Uint8Iq);
-/// assert_eq!(SampleFormat::Raw.sample_type(), SampleType::Raw);
-/// ```
+/// High-level sample format names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
     /// Raw unsigned 8-bit IQ bytes.
@@ -53,8 +45,7 @@ pub enum SampleFormat {
 }
 
 impl SampleFormat {
-    /// Return the direct C-style sample type used for this format.
-    pub const fn sample_type(self) -> SampleType {
+    pub(crate) const fn sample_type(self) -> SampleType {
         match self {
             Self::RawU8Iq => SampleType::Uint8Iq,
             Self::I16Iq => SampleType::Int16Iq,
@@ -183,7 +174,7 @@ impl Config {
     }
 
     /// Configured RF port, if explicitly selected.
-    pub const fn rf_port(&self) -> Option<RfPort> {
+    pub const fn rf_port(&self) -> Option<crate::RfPort> {
         self.rf_port
     }
 
@@ -211,8 +202,7 @@ impl Config {
         Ok(())
     }
 
-    /// Apply this configuration through the direct synchronous API.
-    pub fn apply_direct<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
+    pub(crate) fn apply_direct<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
     where
         C: ControlBackend,
     {
@@ -234,8 +224,7 @@ impl Config {
         Ok(())
     }
 
-    /// Apply this configuration through the direct async API.
-    pub async fn apply_direct_async<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
+    pub(crate) async fn apply_direct_async<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
     where
         C: AsyncControlBackend + ControlBackend,
     {
@@ -305,7 +294,7 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn rf_port(mut self, value: RfPort) -> Self {
+    pub fn rf_port(mut self, value: crate::RfPort) -> Self {
         self.config.rf_port = Some(value);
         self
     }

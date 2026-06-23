@@ -5,11 +5,14 @@
 
 use std::env;
 
+#[cfg(any(feature = "smol", feature = "tokio"))]
 use futures_lite::future::block_on;
-use hydrasdr_rs::commands::RfPort;
-use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+#[cfg(any(feature = "smol", feature = "tokio"))]
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
 
+#[cfg(any(feature = "smol", feature = "tokio"))]
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
+#[cfg(any(feature = "smol", feature = "tokio"))]
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
 
 fn main() -> hydrasdr_rs::Result<()> {
@@ -19,13 +22,25 @@ fn main() -> hydrasdr_rs::Result<()> {
         return Ok(());
     }
 
+    #[cfg(not(any(feature = "smol", feature = "tokio")))]
+    {
+        eprintln!(
+            "The async example needs nusb runtime integration.\n\
+             Run with one feature enabled, for example:\n\
+               cargo run --features smol --example rx_async -- --run --rx"
+        );
+        return Ok(());
+    }
+
+    #[cfg(any(feature = "smol", feature = "tokio"))]
     block_on(run(args))
 }
 
+#[cfg(any(feature = "smol", feature = "tokio"))]
 async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     let run_rx = args.iter().any(|arg| arg == "--rx");
-    // DeviceBuilder mirrors the synchronous API and awaits the direct async
-    // control path while staying executor-agnostic at this crate layer.
+    // DeviceBuilder mirrors the synchronous API while staying
+    // executor-agnostic at this crate layer.
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
@@ -65,7 +80,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
         println!("RX not started; pass --rx with --run for a one-buffer async smoke stream.");
     }
 
-    dev.into_direct().close()
+    Ok(())
 }
 
 fn print_usage() {
@@ -73,7 +88,7 @@ fn print_usage() {
         "This ergonomic example opens and configures real HydraSDR hardware through the async API.\n\
          It is gated to avoid accidental USB access during checks/tests.\n\n\
          Run:\n\
-           cargo run --example rx_async -- --run       # open/query/configure\n\
-           cargo run --example rx_async -- --run --rx  # additionally read one RX block"
+           cargo run --features smol --example rx_async -- --run       # open/query/configure\n\
+           cargo run --features smol --example rx_async -- --run --rx  # additionally read one RX block"
     );
 }

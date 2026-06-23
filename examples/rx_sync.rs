@@ -5,8 +5,7 @@
 
 use std::env;
 
-use hydrasdr_rs::commands::RfPort;
-use hydrasdr_rs::{Device, GainPreset, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
 
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -19,8 +18,8 @@ fn main() -> hydrasdr_rs::Result<()> {
     }
 
     let run_rx = args.iter().any(|arg| arg == "--rx");
-    // DeviceBuilder validates the high-level receiver configuration before it
-    // opens and applies it through the direct C-parity API.
+    // DeviceBuilder validates the receiver configuration before opening and
+    // applying it to the hardware.
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
@@ -57,7 +56,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         println!("RX not started; pass --rx with --run for a one-buffer smoke stream.");
     }
 
-    dev.into_direct().close()
+    Ok(())
 }
 
 fn print_usage() {
