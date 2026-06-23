@@ -69,11 +69,16 @@ impl FakeDevice {
 
 impl ControlBackend for FakeDevice {
     fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
+        let response_len = request.length;
         self.state.borrow_mut().control_requests.push(request);
         if let Some(response) = self.state.borrow_mut().in_responses.pop_front() {
             Ok(response)
         } else {
-            Ok(vec![1])
+            let mut response = vec![0; response_len];
+            if let Some(first) = response.first_mut() {
+                *first = 1;
+            }
+            Ok(response)
         }
     }
 
@@ -162,11 +167,19 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
     assert_eq!(err.status_code(), StatusCode::InvalidParam);
     assert!(err.to_string().contains("bandwidth_hz"));
 
+    let err = Config::builder()
+        .sample_format(SampleFormat::RawAdc)
+        .decimation_mode(DecimationMode::HighDefinition)
+        .build()
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidParam);
+    assert!(err.to_string().contains("decimation_mode"));
+
     let config = Config::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
         .bandwidth(Bandwidth::Auto)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::F32Iq)
         .decimation_mode(DecimationMode::HighDefinition)
         .rf_port(RfPort::Rx1)
         .gain(GainPreset::Linearity(12))
@@ -177,8 +190,14 @@ fn config_builder_validates_safe_ranges_before_usb_io() {
 
     assert_eq!(config.frequency_hz(), 100_000_000);
     assert_eq!(config.sample_rate_hz(), 10_000_000);
-    assert_eq!(config.sample_format().sample_type(), SampleType::Uint8Iq);
+    assert_eq!(config.sample_format().sample_type(), SampleType::Float32Iq);
     assert_eq!(config.decimation_mode(), DecimationMode::HighDefinition);
+}
+
+#[test]
+fn sample_formats_map_to_implemented_direct_sample_types() {
+    assert_eq!(SampleFormat::RawAdc.sample_type(), SampleType::Raw);
+    assert_eq!(SampleFormat::F32Iq.sample_type(), SampleType::Float32Iq);
 }
 
 #[test]
@@ -190,7 +209,7 @@ fn config_apply_uses_direct_api_in_c_documented_order() {
         .frequency_hz(144_500_000)
         .sample_rate_hz(10_000_000)
         .bandwidth(Bandwidth::ManualHz(5_000_000))
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .rf_port(RfPort::Rx2)
         .gain(GainConfig::Manual {
             lna: Some(8),
@@ -217,7 +236,9 @@ fn config_apply_uses_direct_api_in_c_documented_order() {
         vec![
             VendorRequest::SetFreq,
             VendorRequest::GetBandwidths,
+            VendorRequest::GetBandwidths,
             VendorRequest::SetBandwidth,
+            VendorRequest::GetSamplerates,
             VendorRequest::GetSamplerates,
             VendorRequest::SetSamplerate,
             VendorRequest::SetRfPort,
@@ -229,7 +250,7 @@ fn config_apply_uses_direct_api_in_c_documented_order() {
             VendorRequest::SetPacking,
         ]
     );
-    assert_eq!(direct.get_sample_type(), SampleType::Uint8Iq);
+    assert_eq!(direct.get_sample_type(), SampleType::Raw);
 }
 
 #[test]
@@ -245,18 +266,18 @@ fn high_level_device_caches_info_and_applies_configuration() {
     let config = Config::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .build()
         .unwrap();
     device.configure(&config).unwrap();
-    assert_eq!(device.direct().get_sample_type(), SampleType::Uint8Iq);
+    assert_eq!(device.direct().get_sample_type(), SampleType::Raw);
     assert!(!device.direct().is_streaming());
 
     assert!(state.borrow().control_requests.len() > 7);
 }
 
 #[test]
-fn rx_stream_reads_sample_blocks() {
+fn raw_rx_stream_reads_sample_blocks() {
     let first = vec![0x11; DEFAULT_BUFFER_SIZE];
     let second = vec![0x22; DEFAULT_BUFFER_SIZE];
     let control = FakeDevice::with_completions([first, second]);
@@ -268,13 +289,13 @@ fn rx_stream_reads_sample_blocks() {
             &Config::builder()
                 .frequency_hz(100_000_000)
                 .sample_rate_hz(10_000_000)
-                .sample_format(SampleFormat::RawU8Iq)
+                .sample_format(SampleFormat::RawAdc)
                 .build()
                 .unwrap(),
         )
         .unwrap();
 
-    let mut stream = device.rx_stream().unwrap();
+    let mut stream = device.raw_rx_stream().unwrap();
     let mut seen = Vec::new();
     {
         let block = stream.next_block().unwrap().unwrap();
@@ -297,16 +318,8 @@ fn rx_stream_reads_sample_blocks() {
     assert_eq!(
         seen,
         vec![
-            (
-                0x11,
-                (DEFAULT_BUFFER_SIZE / 2) as i32,
-                SampleFormat::RawU8Iq
-            ),
-            (
-                0x22,
-                (DEFAULT_BUFFER_SIZE / 2) as i32,
-                SampleFormat::RawU8Iq
-            ),
+            (0x11, (DEFAULT_BUFFER_SIZE / 2) as i32, SampleFormat::RawAdc),
+            (0x22, (DEFAULT_BUFFER_SIZE / 2) as i32, SampleFormat::RawAdc),
         ]
     );
     assert_eq!(stats.buffers_received, 2);
@@ -335,13 +348,37 @@ fn rx_stream_reads_sample_blocks() {
 }
 
 #[test]
-fn rx_stream_stop_and_finish_are_idempotent_when_idle() {
+fn raw_rx_stream_rejects_converted_configs() {
     let control = FakeDevice::default();
     let state = control.state.clone();
     let direct = HydraSdr::from_control(control);
     let mut device = Device::from_direct_without_info(direct);
 
-    let mut stream = device.rx_stream().unwrap();
+    let err = match device.raw_rx_stream() {
+        Ok(_) => panic!("raw stream should reject F32Iq configuration"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.status_code(), StatusCode::InvalidParam);
+    assert!(state.borrow().control_requests.is_empty());
+}
+
+#[test]
+fn raw_rx_stream_stop_and_finish_are_idempotent_when_idle() {
+    let control = FakeDevice::default();
+    let state = control.state.clone();
+    let direct = HydraSdr::from_control(control);
+    let mut device = Device::from_direct_without_info(direct);
+    device
+        .configure(
+            &Config::builder()
+                .sample_format(SampleFormat::RawAdc)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+
+    let mut stream = device.raw_rx_stream().unwrap();
     stream.stop().unwrap();
     stream.stop().unwrap();
     let stats: StreamingStats = stream.finish().unwrap();
@@ -367,10 +404,10 @@ fn rx_stream_stop_and_finish_are_idempotent_when_idle() {
 #[test]
 fn sample_block_reports_raw_view_format_and_drop_count() {
     let raw = [1, 2, 3, 4];
-    let block = SampleBlock::new(&raw, SampleFormat::RawU8Iq, 2, 9);
+    let block = SampleBlock::new(&raw, SampleFormat::RawAdc, 2, 9);
 
     assert_eq!(block.raw_bytes(), &raw);
-    assert_eq!(block.sample_format(), SampleFormat::RawU8Iq);
+    assert_eq!(block.sample_format(), SampleFormat::RawAdc);
     assert_eq!(block.sample_count(), 2);
     assert_eq!(block.dropped_samples(), 9);
 }

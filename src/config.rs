@@ -34,23 +34,17 @@ pub enum Bandwidth {
 /// High-level sample format names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
-    /// Raw unsigned 8-bit IQ bytes.
-    RawU8Iq,
-    /// Signed 16-bit IQ samples as delivered by firmware/direct streaming.
-    I16Iq,
-    /// 32-bit float IQ samples as delivered by firmware/direct streaming.
+    /// Raw ADC USB blocks at the selected firmware/hardware sample rate.
+    RawAdc,
+    /// Converted 32-bit float IQ samples with optional host-side decimation.
     F32Iq,
-    /// Direct raw sample type with no stronger interpretation.
-    Raw,
 }
 
 impl SampleFormat {
     pub(crate) const fn sample_type(self) -> SampleType {
         match self {
-            Self::RawU8Iq => SampleType::Uint8Iq,
-            Self::I16Iq => SampleType::Int16Iq,
+            Self::RawAdc => SampleType::Raw,
             Self::F32Iq => SampleType::Float32Iq,
-            Self::Raw => SampleType::Raw,
         }
     }
 }
@@ -99,12 +93,12 @@ impl From<GainPreset> for GainConfig {
 ///     .frequency_hz(144_500_000)
 ///     .sample_rate_hz(10_000_000)
 ///     .bandwidth(Bandwidth::Auto)
-///     .sample_format(SampleFormat::RawU8Iq)
+///     .sample_format(SampleFormat::RawAdc)
 ///     .gain(GainPreset::Linearity(10))
 ///     .build()?;
 ///
 /// assert_eq!(config.frequency_hz(), 144_500_000);
-/// assert_eq!(config.sample_format(), SampleFormat::RawU8Iq);
+/// assert_eq!(config.sample_format(), SampleFormat::RawAdc);
 /// # Ok::<(), hydrasdr_rs::Error>(())
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +120,7 @@ impl Default for Config {
             frequency_hz: DEFAULT_FREQUENCY_HZ,
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
             bandwidth: Bandwidth::Auto,
-            sample_format: SampleFormat::RawU8Iq,
+            sample_format: SampleFormat::RawAdc,
             decimation_mode: DecimationMode::LowBandwidth,
             rf_port: None,
             gain: GainConfig::Unchanged,
@@ -206,6 +200,7 @@ impl Config {
         validate_sample_rate(self.sample_rate_hz)?;
         validate_bandwidth(self.bandwidth)?;
         validate_gain(self.gain)?;
+        validate_format_decimation(self.sample_format, self.decimation_mode)?;
         Ok(())
     }
 
@@ -267,7 +262,7 @@ impl Config {
 ///     .frequency_hz(915_000_000)
 ///     .sample_rate_hz(2_000_000)
 ///     .bandwidth_hz(1_750_000)
-///     .sample_format(SampleFormat::I16Iq)
+///     .sample_format(SampleFormat::F32Iq)
 ///     .packing(true)
 ///     .build()?;
 ///
@@ -429,6 +424,19 @@ fn validate_sample_rate(value: u32) -> Result<()> {
         return Err(Error::invalid_config(
             "sample_rate_hz",
             "must be at least 10_000 Hz",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_format_decimation(
+    sample_format: SampleFormat,
+    decimation_mode: DecimationMode,
+) -> Result<()> {
+    if sample_format == SampleFormat::RawAdc && decimation_mode == DecimationMode::HighDefinition {
+        return Err(Error::invalid_config(
+            "decimation_mode",
+            "HighDefinition is only valid for converted F32Iq streams",
         ));
     }
     Ok(())

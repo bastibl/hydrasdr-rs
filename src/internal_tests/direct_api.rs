@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use crate::commands::{RfPort, VendorRequest};
 use crate::device::HydraSdr;
 use crate::errors::StatusCode;
-use crate::types::{BoardId, DecimationMode, PartIdSerialNo};
+use crate::types::{BoardId, DecimationMode, PartIdSerialNo, SampleType};
 use crate::usb::control::{
     ControlBackend, ControlDirection, VendorControlRequest, decode_part_id_serial,
 };
@@ -160,6 +160,18 @@ fn sample_rate_and_bandwidth_helpers_use_count_then_list_protocol() {
     assert_eq!(requests[4], VendorControlRequest::get_bandwidths_count());
     assert_eq!(requests[5], VendorControlRequest::get_bandwidths(2));
     assert_eq!(requests[6], VendorControlRequest::set_bandwidth(1));
+}
+
+#[test]
+fn raw_sample_type_exposes_hardware_sample_rates_only() {
+    let control = FakeControl::with_in_responses(vec![
+        2u32.to_le_bytes().to_vec(),
+        [10_000_000u32.to_le_bytes(), 20_000_000u32.to_le_bytes()].concat(),
+    ]);
+    let mut dev = HydraSdr::from_control(control);
+    dev.set_sample_type(SampleType::Raw).unwrap();
+
+    assert_eq!(dev.get_samplerates().unwrap(), vec![10_000_000, 20_000_000]);
 }
 
 #[test]

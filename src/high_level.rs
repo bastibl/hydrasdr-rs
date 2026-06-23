@@ -6,8 +6,8 @@ use crate::errors::{Error, Result};
 use std::time::Duration;
 
 use crate::streaming::{
-    AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
-    StreamingStats, Transfer,
+    AsyncRawRxStream as DirectAsyncRawRxStream, AsyncStreamingBackend, DirectRxStream,
+    RawRxStream as DirectRawRxStream, StreamingBackend, StreamingStats, Transfer,
 };
 use crate::types::DeviceInfo;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
@@ -24,12 +24,12 @@ use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 ///     let mut dev = Device::builder()
 ///         .frequency_hz(100_000_000)
 ///         .sample_rate_hz(10_000_000)
-///         .sample_format(SampleFormat::RawU8Iq)
+///         .sample_format(SampleFormat::RawAdc)
 ///         .rf_port(RfPort::Rx0)
 ///         .gain(GainPreset::Linearity(12))
 ///         .open()?;
 ///
-///     let mut rx = dev.rx_stream()?;
+///     let mut rx = dev.raw_rx_stream()?;
 ///     if let Some(block) = rx.next_block()? {
 ///         println!("{} raw bytes", block.raw_bytes().len());
 ///     }
@@ -133,20 +133,26 @@ impl Device {
         self.inner.direct.get_bandwidths_async().await
     }
 
-    /// Start a synchronous receive stream.
-    pub fn rx_stream(&mut self) -> Result<RxStream<'_>> {
-        Ok(RxStream {
-            inner: self.inner.rx_stream()?,
+    /// Start a synchronous receive stream for raw ADC USB blocks.
+    pub fn raw_rx_stream(&mut self) -> Result<RawRxStream<'_>> {
+        Ok(RawRxStream {
+            inner: self.inner.raw_rx_stream()?,
         })
     }
 
-    /// Consume this device and start an owned synchronous receive stream.
+    /// Consume this device and start an owned synchronous raw ADC block stream.
     ///
     /// This shape is useful for frameworks that store streamers independently
-    /// from their device handle. Call [`OwnedRxStream::finish`] to recover the
-    /// device after streaming.
-    pub fn into_rx_stream(self) -> std::result::Result<OwnedRxStream, IntoRxStreamError> {
+    /// from their device handle. Call [`OwnedRawRxStream::finish`] to recover
+    /// the device after streaming.
+    pub fn into_raw_rx_stream(self) -> std::result::Result<OwnedRawRxStream, IntoRxStreamError> {
         let mut inner = self.inner;
+        if let Err(error) = inner.ensure_raw_adc_stream_format() {
+            return Err(IntoRxStreamError {
+                device: Box::new(Device { inner }),
+                error,
+            });
+        }
         let stream = match inner.direct.start_raw_rx_stream() {
             Ok(stream) => stream,
             Err(error) => {
@@ -156,7 +162,7 @@ impl Device {
                 });
             }
         };
-        Ok(OwnedRxStream {
+        Ok(OwnedRawRxStream {
             device: Some(inner),
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -187,10 +193,10 @@ impl Device {
         })
     }
 
-    /// Start an async receive stream.
-    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStream<'_>> {
-        Ok(AsyncRxStream {
-            inner: self.inner.rx_stream_async().await?,
+    /// Start an async receive stream for raw ADC USB blocks.
+    pub async fn raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStream<'_>> {
+        Ok(AsyncRawRxStream {
+            inner: self.inner.raw_rx_stream_async().await?,
         })
     }
 }
@@ -250,19 +256,30 @@ where
     pub const fn direct(&self) -> &HydraSdr<C> {
         &self.direct
     }
+
+    fn ensure_raw_adc_stream_format(&self) -> Result<()> {
+        if self.sample_format != SampleFormat::RawAdc {
+            return Err(Error::invalid_config(
+                "sample_format",
+                "raw block streams require SampleFormat::RawAdc",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl<C> DeviceInner<C>
 where
     C: ControlBackend + StreamingBackend,
 {
-    /// Start a synchronous receive stream.
-    pub fn rx_stream(&mut self) -> Result<RxStreamInner<'_, C>> {
+    /// Start a synchronous receive stream for raw ADC USB blocks.
+    pub fn raw_rx_stream(&mut self) -> Result<RawRxStreamInner<'_, C>> {
+        self.ensure_raw_adc_stream_format()?;
         if self.direct.is_streaming() {
             return Err(Error::stream_closed("direct receiver is already streaming"));
         }
         let stream = self.direct.start_raw_rx_stream()?;
-        Ok(RxStreamInner {
+        Ok(RawRxStreamInner {
             device: self,
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -294,13 +311,14 @@ impl<C> DeviceInner<C>
 where
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 {
-    /// Start an async receive stream.
-    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStreamInner<'_, C>> {
+    /// Start an async receive stream for raw ADC USB blocks.
+    pub async fn raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStreamInner<'_, C>> {
+        self.ensure_raw_adc_stream_format()?;
         if self.direct.is_streaming() {
             return Err(Error::stream_closed("direct receiver is already streaming"));
         }
         let stream = self.direct.start_raw_rx_stream_async().await?;
-        Ok(AsyncRxStreamInner {
+        Ok(AsyncRawRxStreamInner {
             device: self,
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -322,7 +340,7 @@ where
 /// let config = Device::builder()
 ///     .frequency_hz(433_920_000)
 ///     .sample_rate_hz(2_000_000)
-///     .sample_format(SampleFormat::RawU8Iq)
+///     .sample_format(SampleFormat::RawAdc)
 ///     .gain(GainPreset::Sensitivity(8))
 ///     .config()?;
 ///
@@ -447,10 +465,10 @@ impl DeviceBuilder {
 /// use hydrasdr_rs::{SampleBlock, SampleFormat};
 ///
 /// let raw = [0_u8, 127, 255, 128];
-/// let block = SampleBlock::new(&raw, SampleFormat::RawU8Iq, 2, 0);
+/// let block = SampleBlock::new(&raw, SampleFormat::RawAdc, 2, 0);
 ///
 /// assert_eq!(block.raw_bytes(), &raw);
-/// assert_eq!(block.sample_format(), SampleFormat::RawU8Iq);
+/// assert_eq!(block.sample_format(), SampleFormat::RawAdc);
 /// assert_eq!(block.sample_count(), 2);
 /// assert_eq!(block.dropped_samples(), 0);
 /// ```
@@ -509,15 +527,15 @@ impl<'a> SampleBlock<'a> {
 }
 
 /// Idle synchronous stream guard for explicit stop/finish lifecycle control.
-pub(crate) struct RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
+pub(crate) struct RawRxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     device: &'dev mut DeviceInner<C>,
-    stream: Option<RawRxStream<C::BulkIn>>,
+    stream: Option<DirectRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
     finished: bool,
 }
 
-impl<C> RxStreamInner<'_, C>
+impl<C> RawRxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
 {
@@ -555,7 +573,7 @@ where
     }
 }
 
-impl<C> Drop for RxStreamInner<'_, C>
+impl<C> Drop for RawRxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
 {
@@ -569,12 +587,12 @@ where
     }
 }
 
-/// Idle synchronous stream guard for explicit stop/finish lifecycle control.
-pub struct RxStream<'dev> {
-    inner: RxStreamInner<'dev, NusbControl>,
+/// Raw ADC block stream guard for explicit stop/finish lifecycle control.
+pub struct RawRxStream<'dev> {
+    inner: RawRxStreamInner<'dev, NusbControl>,
 }
 
-impl RxStream<'_> {
+impl RawRxStream<'_> {
     /// Read the next sample block.
     pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         self.inner.next_block()
@@ -591,26 +609,26 @@ impl RxStream<'_> {
     }
 }
 
-/// Owned synchronous receive stream.
-pub struct OwnedRxStream {
+/// Owned synchronous raw ADC block stream.
+pub struct OwnedRawRxStream {
     device: Option<DeviceInner<NusbControl>>,
-    stream: Option<RawRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
+    stream: Option<DirectRawRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
 }
 
-impl OwnedRxStream {
+impl OwnedRawRxStream {
     /// Read the next sample block.
     pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         let device = self
             .device
             .as_ref()
-            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+            .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
         let sample_format = device.sample_format;
         let stream = self
             .stream
             .as_mut()
-            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+            .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
         Ok(stream
             .next_transfer()?
             .map(|transfer| SampleBlock::from_transfer(&transfer, sample_format)))
@@ -622,7 +640,7 @@ impl OwnedRxStream {
         let inner = self
             .device
             .take()
-            .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+            .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
         Ok((Device { inner }, stats))
     }
 
@@ -631,11 +649,11 @@ impl OwnedRxStream {
             let stream = self
                 .stream
                 .take()
-                .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+                .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
             let device = self
                 .device
                 .as_mut()
-                .ok_or(Error::stream_closed("owned RX stream is closed"))?;
+                .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
             self.stats = device.direct.stop_raw_rx_stream(stream)?;
             self.stopped = true;
         }
@@ -643,7 +661,7 @@ impl OwnedRxStream {
     }
 }
 
-impl Drop for OwnedRxStream {
+impl Drop for OwnedRawRxStream {
     fn drop(&mut self) {
         let _ = self.stop_inner();
     }
@@ -724,18 +742,18 @@ impl IntoRxStreamError {
 }
 
 /// Idle async stream guard for explicit async stop/finish lifecycle control.
-pub(crate) struct AsyncRxStreamInner<
+pub(crate) struct AsyncRawRxStreamInner<
     'dev,
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 > {
     device: &'dev mut DeviceInner<C>,
-    stream: Option<AsyncRawRxStream<C::BulkIn>>,
+    stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
     finished: bool,
 }
 
-impl<C> AsyncRxStreamInner<'_, C>
+impl<C> AsyncRawRxStreamInner<'_, C>
 where
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 {
@@ -774,12 +792,12 @@ where
     }
 }
 
-/// Idle async stream guard for explicit async stop/finish lifecycle control.
-pub struct AsyncRxStream<'dev> {
-    inner: AsyncRxStreamInner<'dev, NusbControl>,
+/// Async raw ADC block stream guard for explicit async stop/finish lifecycle control.
+pub struct AsyncRawRxStream<'dev> {
+    inner: AsyncRawRxStreamInner<'dev, NusbControl>,
 }
 
-impl AsyncRxStream<'_> {
+impl AsyncRawRxStream<'_> {
     /// Read the next sample block.
     pub async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         self.inner.next_block().await

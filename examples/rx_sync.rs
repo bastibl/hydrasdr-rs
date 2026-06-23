@@ -23,7 +23,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -36,11 +36,11 @@ fn main() -> hydrasdr_rs::Result<()> {
         dev.info().features
     );
     println!(
-        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=RawU8Iq"
+        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=RawAdc"
     );
 
     if run_rx {
-        let mut rx = dev.rx_stream()?;
+        let mut rx = dev.raw_rx_stream()?;
         if let Some(block) = rx.next_block()? {
             println!(
                 "rx block: {} bytes, {} samples, dropped={}",

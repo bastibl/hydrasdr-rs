@@ -29,7 +29,7 @@ The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `rx_stream_async`:
+For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `raw_rx_stream_async`:
 
 ```sh
 cargo check --features tokio
@@ -49,7 +49,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -57,7 +57,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let mut rx = dev.rx_stream()?;
+    let mut rx = dev.raw_rx_stream()?;
     if let Some(block) = rx.next_block()? {
         println!(
             "{} bytes, {} samples, dropped={}",
@@ -86,13 +86,13 @@ fn main() -> hydrasdr_rs::Result<()> {
         let mut dev = Device::builder()
             .frequency_hz(144_500_000)
             .sample_rate_hz(10_000_000)
-            .sample_format(SampleFormat::RawU8Iq)
+            .sample_format(SampleFormat::RawAdc)
             .rf_port(RfPort::Rx0)
             .gain(GainPreset::Linearity(10))
             .open_async()
             .await?;
 
-        let mut rx = dev.rx_stream_async().await?;
+        let mut rx = dev.raw_rx_stream_async().await?;
         if let Some(block) = rx.next_block().await? {
             println!("async block: {} bytes", block.raw_bytes().len());
         }

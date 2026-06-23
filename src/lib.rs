@@ -32,12 +32,12 @@
 //!     let mut dev = Device::builder()
 //!         .frequency_hz(100_000_000)
 //!         .sample_rate_hz(10_000_000)
-//!         .sample_format(SampleFormat::RawU8Iq)
+//!         .sample_format(SampleFormat::RawAdc)
 //!         .rf_port(RfPort::Rx0)
 //!         .gain(GainPreset::Linearity(12))
 //!         .open()?;
 //!
-//!     let mut rx = dev.rx_stream()?;
+//!     let mut rx = dev.raw_rx_stream()?;
 //!     if let Some(block) = rx.next_block()? {
 //!         println!("{} bytes", block.raw_bytes().len());
 //!     }
@@ -68,7 +68,8 @@ pub use config::{
 pub use discovery::HydraSdrDeviceInfo;
 pub use errors::{Error, Result, StatusCode};
 pub use high_level::{
-    AsyncRxStream, Device, DeviceBuilder, OwnedF32RxStream, OwnedRxStream, RxStream, SampleBlock,
+    AsyncRawRxStream, Device, DeviceBuilder, OwnedF32RxStream, OwnedRawRxStream, RawRxStream,
+    SampleBlock,
 };
 pub use streaming::StreamingStats;
 pub use types::{

@@ -32,7 +32,7 @@ fn hardware_configure_frequency_sample_rate_and_gains() {
     let mut dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(10))
         .bias_tee(false)
@@ -50,13 +50,13 @@ fn hardware_short_rx_stream_smoke_test() {
     let mut dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::RawU8Iq)
+        .sample_format(SampleFormat::RawAdc)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Sensitivity(8))
         .open()
         .expect("open and configure HydraSDR RFOne");
 
-    let mut rx = dev.rx_stream().expect("start RX stream");
+    let mut rx = dev.raw_rx_stream().expect("start RX stream");
     {
         let block = rx
             .next_block()
