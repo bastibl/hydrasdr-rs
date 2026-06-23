@@ -3,6 +3,7 @@
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
+use core::fmt;
 use std::time::Duration;
 
 use crate::streaming::{
@@ -738,6 +739,18 @@ impl IntoRxStreamError {
     /// Borrow the underlying start-stream error.
     pub const fn error(&self) -> &Error {
         &self.error
+    }
+}
+
+impl fmt::Display for IntoRxStreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to start owned RX stream: {}", self.error)
+    }
+}
+
+impl std::error::Error for IntoRxStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 

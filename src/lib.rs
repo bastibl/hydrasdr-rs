@@ -68,8 +68,8 @@ pub use config::{
 pub use discovery::HydraSdrDeviceInfo;
 pub use errors::{Error, Result, StatusCode};
 pub use high_level::{
-    AsyncRawRxStream, Device, DeviceBuilder, OwnedF32RxStream, OwnedRawRxStream, RawRxStream,
-    SampleBlock,
+    AsyncRawRxStream, Device, DeviceBuilder, IntoRxStreamError, OwnedF32RxStream, OwnedRawRxStream,
+    RawRxStream, SampleBlock,
 };
 pub use streaming::StreamingStats;
 pub use types::{
