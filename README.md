@@ -1,8 +1,8 @@
 # hydrasdr-rs
 
-Direct Rust translation of the HydraSDR RFOne host driver, currently focused on C API parity and traceability rather than an idiomatic high-level Rust API.
+Direct Rust translation of the HydraSDR RFOne host driver, currently focused on C API parity and traceability. The proposed idiomatic high-level Rust API is documented in `docs/ergonomic-api-design.md`.
 
-This crate is in the direct C-to-Rust translation phase. Public names intentionally stay close to the C driver (`hydrasdr_open`, `hydrasdr_set_freq`, `hydrasdr_start_rx`, and friends) so behavior can be compared against `/home/basti/src/hydrasdr-host`. A later phase is expected to layer a smaller, more Rust-like wrapper on top of this direct API.
+This crate is in the direct C-to-Rust translation phase. Public names intentionally stay close to the C driver (`hydrasdr_open`, `hydrasdr_set_freq`, `hydrasdr_start_rx`, and friends) so behavior can be compared against `/home/basti/src/hydrasdr-host`. The ergonomic API design keeps this direct layer available while adding builder/config types, `Device`, and `RxStream` wrappers on top.
 
 ## Status
 
@@ -13,12 +13,15 @@ Implemented in this branch:
 - Executor-agnostic async counterparts for the direct API.
 - No-hardware parity tests for constants, control-transfer packing, state handling, error mapping, and streaming loop behavior.
 - Hardware-gated smoke tests and examples for real devices.
+- A documented high-level Rust API plan for the next implementation stage.
 
 Not yet polished:
 
 - This is not the final ergonomic Rust API.
 - DSP/DDC conversion and a higher-level safe streaming abstraction are phase boundaries, not part of the current direct translation.
 - Async open/discovery and endpoint `clear_halt` follow what `nusb` exposes; this crate does not force a runtime by default.
+
+See `docs/ergonomic-api-design.md` for the proposed builder/config, `Device`, and sync/async streaming API shape that should be layered over this direct API.
 
 ## USB dependency and execution model
 
