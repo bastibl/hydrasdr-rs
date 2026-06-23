@@ -459,6 +459,11 @@ impl<C: ControlBackend> HydraSdr<C> {
     /// Request RX stop and send receiver-off unless a reset command already owns shutdown.
     pub fn stop_rx(&mut self) -> Result<()> {
         self.streaming.request_stop();
+        self.receiver_off_if_needed()
+    }
+
+    /// Send receiver-off unless a reset command already owns shutdown.
+    pub(crate) fn receiver_off_if_needed(&self) -> Result<()> {
         if !self.reset_command {
             self.receiver_mode(ReceiverMode::Off)?;
         }

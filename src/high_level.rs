@@ -805,6 +805,21 @@ where
     }
 }
 
+impl<C> Drop for AsyncRawRxStreamInner<'_, C>
+where
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+{
+    fn drop(&mut self) {
+        if !self.stopped && !self.finished {
+            if let Some(mut stream) = self.stream.take() {
+                self.stats = stream.close();
+            }
+            let _ = self.device.direct.receiver_off_if_needed();
+            self.stopped = true;
+        }
+    }
+}
+
 /// Async raw ADC block stream guard for explicit async stop/finish lifecycle control.
 pub struct AsyncRawRxStream<'dev> {
     inner: AsyncRawRxStreamInner<'dev, NusbControl>,

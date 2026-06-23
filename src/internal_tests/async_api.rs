@@ -5,10 +5,12 @@ use std::rc::Rc;
 use crate::commands::{ReceiverMode, VendorRequest};
 use crate::constants::DEFAULT_BUFFER_SIZE;
 use crate::device::HydraSdr;
+use crate::high_level::DeviceInner as Device;
 use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer};
 use crate::types::SampleType;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
+use crate::{Config, SampleFormat};
 use futures_lite::future::block_on;
 
 #[derive(Debug, Default)]
@@ -98,6 +100,7 @@ fn async_control_helpers_share_sync_request_encoding_and_update_state() {
 #[derive(Debug, Default)]
 struct FakeAsyncState {
     control_requests: Vec<VendorControlRequest>,
+    in_responses: VecDeque<Vec<u8>>,
     opened_endpoints: Vec<u8>,
     async_cleared_halts: Vec<u8>,
     allocated_sizes: Vec<usize>,
@@ -126,12 +129,47 @@ impl FakeAsyncDevice {
             .collect();
         this
     }
+
+    fn with_completions_and_in_responses(
+        completions: impl IntoIterator<Item = Vec<u8>>,
+        in_responses: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        let this = Self::with_completions(completions);
+        this.state.borrow_mut().in_responses = in_responses.into_iter().collect();
+        this
+    }
+
+    fn for_high_level_raw_stream(completions: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        Self::with_completions_and_in_responses(
+            completions,
+            [
+                1u32.to_le_bytes().to_vec(),
+                10_000_000u32.to_le_bytes().to_vec(),
+                vec![1],
+                vec![1],
+            ],
+        )
+    }
+
+    fn record_control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
+        let response_len = request.length;
+        let mut state = self.state.borrow_mut();
+        state.control_requests.push(request);
+        if let Some(response) = state.in_responses.pop_front() {
+            Ok(response)
+        } else {
+            let mut response = vec![0; response_len];
+            if let Some(first) = response.first_mut() {
+                *first = 1;
+            }
+            Ok(response)
+        }
+    }
 }
 
 impl ControlBackend for FakeAsyncDevice {
     fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
-        self.state.borrow_mut().control_requests.push(request);
-        Ok(vec![1])
+        self.record_control_in(request)
     }
 
     fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
@@ -142,8 +180,7 @@ impl ControlBackend for FakeAsyncDevice {
 
 impl AsyncControlBackend for FakeAsyncDevice {
     async fn control_in_async(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
-        self.state.borrow_mut().control_requests.push(request);
-        Ok(vec![1])
+        self.record_control_in(request)
     }
 
     async fn control_out_async(&self, request: VendorControlRequest) -> crate::Result<()> {
@@ -265,5 +302,87 @@ fn async_streaming_awaits_completions_without_using_sync_wait_path() {
         );
         assert!(state.cancelled);
         assert_eq!(stats.buffers_processed, 2);
+    });
+}
+
+#[test]
+fn async_high_level_stream_drop_turns_receiver_off() {
+    block_on(async {
+        let backend = FakeAsyncDevice::for_high_level_raw_stream([vec![0x11; DEFAULT_BUFFER_SIZE]]);
+        let state = backend.state.clone();
+        let direct = HydraSdr::from_control(backend);
+        let mut device = Device::from_direct_without_info(direct);
+        device
+            .configure_async(
+                &Config::builder()
+                    .sample_format(SampleFormat::RawAdc)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        state.borrow_mut().control_requests.clear();
+
+        {
+            let _stream = device.raw_rx_stream_async().await.unwrap();
+        }
+
+        let state = state.borrow();
+        assert!(state.cancelled);
+        let receiver_modes: Vec<_> = state
+            .control_requests
+            .iter()
+            .filter(|request| request.request == VendorRequest::ReceiverMode)
+            .map(|request| request.value)
+            .collect();
+        assert_eq!(
+            receiver_modes,
+            vec![
+                ReceiverMode::Off as u16,
+                ReceiverMode::Rx as u16,
+                ReceiverMode::Off as u16,
+            ]
+        );
+    });
+}
+
+#[test]
+fn async_high_level_stream_finish_does_not_duplicate_receiver_off_on_drop() {
+    block_on(async {
+        let backend = FakeAsyncDevice::for_high_level_raw_stream([vec![0x11; DEFAULT_BUFFER_SIZE]]);
+        let state = backend.state.clone();
+        let direct = HydraSdr::from_control(backend);
+        let mut device = Device::from_direct_without_info(direct);
+        device
+            .configure_async(
+                &Config::builder()
+                    .sample_format(SampleFormat::RawAdc)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        state.borrow_mut().control_requests.clear();
+
+        let stream = device.raw_rx_stream_async().await.unwrap();
+        let stats = stream.finish().await.unwrap();
+
+        assert_eq!(stats.buffers_processed, 0);
+        let state = state.borrow();
+        assert!(state.cancelled);
+        let receiver_modes: Vec<_> = state
+            .control_requests
+            .iter()
+            .filter(|request| request.request == VendorRequest::ReceiverMode)
+            .map(|request| request.value)
+            .collect();
+        assert_eq!(
+            receiver_modes,
+            vec![
+                ReceiverMode::Off as u16,
+                ReceiverMode::Rx as u16,
+                ReceiverMode::Off as u16,
+            ]
+        );
     });
 }
