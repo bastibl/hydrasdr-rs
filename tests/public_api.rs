@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
-    Bandwidth, Config, Device, DeviceSelector, GainPreset, IntoRxStreamError, RfPort, SampleBlock,
-    SampleFormat,
+    Bandwidth, Config, Device, DeviceSelector, FinishRxStreamError, GainPreset, IntoRxStreamError,
+    RfPort, SampleBlock, SampleFormat,
 };
 
 #[test]
@@ -46,4 +46,5 @@ fn public_owned_rx_stream_error_is_standard_error() {
     fn assert_error<T: std::error::Error>() {}
 
     assert_error::<IntoRxStreamError>();
+    assert_error::<FinishRxStreamError>();
 }

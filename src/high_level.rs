@@ -147,28 +147,16 @@ impl Device {
     /// from their device handle. Call [`OwnedRawRxStream::finish`] to recover
     /// the device after streaming.
     pub fn into_raw_rx_stream(self) -> std::result::Result<OwnedRawRxStream, IntoRxStreamError> {
-        let mut inner = self.inner;
-        if let Err(error) = inner.ensure_raw_adc_stream_format() {
-            return Err(IntoRxStreamError {
-                device: Box::new(Device { inner }),
-                error,
-            });
-        }
-        let stream = match inner.direct.start_raw_rx_stream() {
-            Ok(stream) => stream,
-            Err(error) => {
-                return Err(IntoRxStreamError {
+        self.inner
+            .into_raw_rx_stream_owned()
+            .map(|inner| OwnedRawRxStream { inner })
+            .map_err(|error| {
+                let (inner, error) = *error;
+                IntoRxStreamError {
                     device: Box::new(Device { inner }),
                     error,
-                });
-            }
-        };
-        Ok(OwnedRawRxStream {
-            device: Some(inner),
-            stream: Some(stream),
-            stats: StreamingStats::default(),
-            stopped: false,
-        })
+                }
+            })
     }
 
     /// Consume this device and start an owned converted `F32Iq` receive stream.
@@ -176,22 +164,16 @@ impl Device {
     /// This stream applies the same host-side conversion and decimation as the
     /// direct `Float32Iq` path.
     pub fn into_f32_rx_stream(self) -> std::result::Result<OwnedF32RxStream, IntoRxStreamError> {
-        let mut inner = self.inner;
-        let stream = match inner.direct.start_rx_stream() {
-            Ok(stream) => stream,
-            Err(error) => {
-                return Err(IntoRxStreamError {
+        self.inner
+            .into_f32_rx_stream_owned()
+            .map(|inner| OwnedF32RxStream { inner })
+            .map_err(|error| {
+                let (inner, error) = *error;
+                IntoRxStreamError {
                     device: Box::new(Device { inner }),
                     error,
-                });
-            }
-        };
-        Ok(OwnedF32RxStream {
-            device: Some(inner),
-            stream: Some(stream),
-            stats: StreamingStats::default(),
-            stopped: false,
-        })
+                }
+            })
     }
 
     /// Start an async receive stream for raw ADC USB blocks.
@@ -286,6 +268,39 @@ where
             stats: StreamingStats::default(),
             stopped: false,
             finished: false,
+        })
+    }
+
+    pub(crate) fn into_raw_rx_stream_owned(
+        mut self,
+    ) -> std::result::Result<OwnedRawRxStreamInner<C>, Box<(Self, Error)>> {
+        if let Err(error) = self.ensure_raw_adc_stream_format() {
+            return Err(Box::new((self, error)));
+        }
+        let stream = match self.direct.start_raw_rx_stream() {
+            Ok(stream) => stream,
+            Err(error) => return Err(Box::new((self, error))),
+        };
+        Ok(OwnedRawRxStreamInner {
+            device: Some(self),
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+        })
+    }
+
+    pub(crate) fn into_f32_rx_stream_owned(
+        mut self,
+    ) -> std::result::Result<OwnedF32RxStreamInner<C>, Box<(Self, Error)>> {
+        let stream = match self.direct.start_rx_stream() {
+            Ok(stream) => stream,
+            Err(error) => return Err(Box::new((self, error))),
+        };
+        Ok(OwnedF32RxStreamInner {
+            device: Some(self),
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
         })
     }
 }
@@ -612,13 +627,35 @@ impl RawRxStream<'_> {
 
 /// Owned synchronous raw ADC block stream.
 pub struct OwnedRawRxStream {
-    device: Option<DeviceInner<NusbControl>>,
-    stream: Option<DirectRawRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
+    inner: OwnedRawRxStreamInner<NusbControl>,
+}
+
+impl OwnedRawRxStream {
+    /// Read the next sample block.
+    pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        self.inner.next_block()
+    }
+
+    /// Finish streaming and return the device plus accumulated counters.
+    pub fn finish(self) -> std::result::Result<(Device, StreamingStats), FinishRxStreamError> {
+        self.inner
+            .finish()
+            .map(|(inner, stats)| (Device { inner }, stats))
+            .map_err(FinishRxStreamError::from_inner)
+    }
+}
+
+pub(crate) struct OwnedRawRxStreamInner<C: ControlBackend + StreamingBackend> {
+    device: Option<DeviceInner<C>>,
+    stream: Option<DirectRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
 }
 
-impl OwnedRawRxStream {
+impl<C> OwnedRawRxStreamInner<C>
+where
+    C: ControlBackend + StreamingBackend,
+{
     /// Read the next sample block.
     pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         let device = self
@@ -636,33 +673,53 @@ impl OwnedRawRxStream {
     }
 
     /// Finish streaming and return the device plus accumulated counters.
-    pub fn finish(mut self) -> Result<(Device, StreamingStats)> {
+    pub fn finish(
+        mut self,
+    ) -> std::result::Result<(DeviceInner<C>, StreamingStats), Box<FinishRxStreamInnerError<C>>>
+    {
         let stats = self.stop_inner()?;
         let inner = self
             .device
             .take()
-            .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
-        Ok((Device { inner }, stats))
+            .expect("owned raw RX stream retains device");
+        Ok((inner, stats))
     }
 
-    fn stop_inner(&mut self) -> Result<StreamingStats> {
+    fn stop_inner(
+        &mut self,
+    ) -> std::result::Result<StreamingStats, Box<FinishRxStreamInnerError<C>>> {
         if !self.stopped {
             let stream = self
                 .stream
                 .take()
-                .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
+                .expect("owned raw RX stream retains stream before stop");
             let device = self
                 .device
                 .as_mut()
-                .ok_or(Error::stream_closed("owned raw RX stream is closed"))?;
-            self.stats = device.direct.stop_raw_rx_stream(stream)?;
+                .expect("owned raw RX stream retains device before stop");
+            let (stats, stop_result) = device.direct.close_raw_rx_stream(stream);
+            self.stats = stats;
             self.stopped = true;
+            if let Err(error) = stop_result {
+                let device = self
+                    .device
+                    .take()
+                    .expect("owned raw RX stream retains device on stop error");
+                return Err(Box::new(FinishRxStreamInnerError {
+                    device,
+                    error,
+                    stats,
+                }));
+            }
         }
         Ok(self.stats)
     }
 }
 
-impl Drop for OwnedRawRxStream {
+impl<C> Drop for OwnedRawRxStreamInner<C>
+where
+    C: ControlBackend + StreamingBackend,
+{
     fn drop(&mut self) {
         let _ = self.stop_inner();
     }
@@ -670,13 +727,35 @@ impl Drop for OwnedRawRxStream {
 
 /// Owned synchronous converted `F32Iq` receive stream.
 pub struct OwnedF32RxStream {
-    device: Option<DeviceInner<NusbControl>>,
-    stream: Option<DirectRxStream<<NusbControl as StreamingBackend>::BulkIn>>,
+    inner: OwnedF32RxStreamInner<NusbControl>,
+}
+
+impl OwnedF32RxStream {
+    /// Read converted `(I, Q)` samples into `out`.
+    pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        self.inner.read(out, timeout)
+    }
+
+    /// Finish streaming and return the device plus accumulated counters.
+    pub fn finish(self) -> std::result::Result<(Device, StreamingStats), FinishRxStreamError> {
+        self.inner
+            .finish()
+            .map(|(inner, stats)| (Device { inner }, stats))
+            .map_err(FinishRxStreamError::from_inner)
+    }
+}
+
+pub(crate) struct OwnedF32RxStreamInner<C: ControlBackend + StreamingBackend> {
+    device: Option<DeviceInner<C>>,
+    stream: Option<DirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
 }
 
-impl OwnedF32RxStream {
+impl<C> OwnedF32RxStreamInner<C>
+where
+    C: ControlBackend + StreamingBackend,
+{
     /// Read converted `(I, Q)` samples into `out`.
     pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
         self.stream
@@ -686,35 +765,127 @@ impl OwnedF32RxStream {
     }
 
     /// Finish streaming and return the device plus accumulated counters.
-    pub fn finish(mut self) -> Result<(Device, StreamingStats)> {
+    pub fn finish(
+        mut self,
+    ) -> std::result::Result<(DeviceInner<C>, StreamingStats), Box<FinishRxStreamInnerError<C>>>
+    {
         let stats = self.stop_inner()?;
         let inner = self
             .device
             .take()
-            .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
-        Ok((Device { inner }, stats))
+            .expect("owned F32 RX stream retains device");
+        Ok((inner, stats))
     }
 
-    fn stop_inner(&mut self) -> Result<StreamingStats> {
+    fn stop_inner(
+        &mut self,
+    ) -> std::result::Result<StreamingStats, Box<FinishRxStreamInnerError<C>>> {
         if !self.stopped {
             let stream = self
                 .stream
                 .take()
-                .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
+                .expect("owned F32 RX stream retains stream before stop");
             let device = self
                 .device
                 .as_mut()
-                .ok_or(Error::stream_closed("owned F32 RX stream is closed"))?;
-            self.stats = device.direct.stop_rx_stream(stream)?;
+                .expect("owned F32 RX stream retains device before stop");
+            let (stats, stop_result) = device.direct.close_rx_stream(stream);
+            self.stats = stats;
             self.stopped = true;
+            if let Err(error) = stop_result {
+                let device = self
+                    .device
+                    .take()
+                    .expect("owned F32 RX stream retains device on stop error");
+                return Err(Box::new(FinishRxStreamInnerError {
+                    device,
+                    error,
+                    stats,
+                }));
+            }
         }
         Ok(self.stats)
     }
 }
 
-impl Drop for OwnedF32RxStream {
+impl<C> Drop for OwnedF32RxStreamInner<C>
+where
+    C: ControlBackend + StreamingBackend,
+{
     fn drop(&mut self) {
         let _ = self.stop_inner();
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FinishRxStreamInnerError<C: ControlBackend> {
+    device: DeviceInner<C>,
+    error: Error,
+    stats: StreamingStats,
+}
+
+impl<C: ControlBackend> FinishRxStreamInnerError<C> {
+    pub(crate) fn into_parts(self) -> (DeviceInner<C>, Error, StreamingStats) {
+        (self.device, self.error, self.stats)
+    }
+
+    pub(crate) const fn error(&self) -> &Error {
+        &self.error
+    }
+
+    pub(crate) const fn stats(&self) -> StreamingStats {
+        self.stats
+    }
+}
+
+/// Error returned when finishing an owned RX stream fails.
+#[derive(Debug)]
+pub struct FinishRxStreamError {
+    device: Box<Device>,
+    error: Error,
+    stats: StreamingStats,
+}
+
+impl FinishRxStreamError {
+    fn from_inner(error: Box<FinishRxStreamInnerError<NusbControl>>) -> Self {
+        let (inner, error, stats) = error.into_parts();
+        Self {
+            device: Box::new(Device { inner }),
+            error,
+            stats,
+        }
+    }
+
+    /// Return the device, finish error, and counters collected before cleanup failed.
+    pub fn into_parts(self) -> (Device, Error, StreamingStats) {
+        (*self.device, self.error, self.stats)
+    }
+
+    /// Borrow the preserved device handle.
+    pub const fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Borrow the underlying finish error.
+    pub const fn error(&self) -> &Error {
+        &self.error
+    }
+
+    /// Return counters collected before cleanup failed.
+    pub const fn stats(&self) -> StreamingStats {
+        self.stats
+    }
+}
+
+impl fmt::Display for FinishRxStreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to finish owned RX stream: {}", self.error)
+    }
+}
+
+impl std::error::Error for FinishRxStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::commands::{ReceiverMode, RfPort, VendorRequest};
 use crate::constants::DEFAULT_BUFFER_SIZE;
 use crate::device::HydraSdr;
-use crate::errors::StatusCode;
+use crate::errors::{Error, StatusCode};
 use crate::high_level::DeviceInner as Device;
 use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{BulkInBackend, BulkInCompletion, StreamingBackend, StreamingStats};
@@ -24,6 +24,7 @@ struct FakeState {
     submitted_count: usize,
     pending_count: usize,
     cancelled: bool,
+    fail_receiver_off_after_rx: bool,
     completions: VecDeque<BulkInCompletion<Vec<u8>>>,
 }
 
@@ -65,6 +66,14 @@ impl FakeDevice {
             .collect();
         this
     }
+
+    fn with_completions_and_final_receiver_off_error(
+        completions: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        let this = Self::with_completions(completions);
+        this.state.borrow_mut().fail_receiver_off_after_rx = true;
+        this
+    }
 }
 
 impl ControlBackend for FakeDevice {
@@ -83,7 +92,18 @@ impl ControlBackend for FakeDevice {
     }
 
     fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
-        self.state.borrow_mut().control_requests.push(request);
+        let mut state = self.state.borrow_mut();
+        let should_fail = state.fail_receiver_off_after_rx
+            && request.request == VendorRequest::ReceiverMode
+            && request.value == ReceiverMode::Off as u16
+            && state.control_requests.iter().any(|previous| {
+                previous.request == VendorRequest::ReceiverMode
+                    && previous.value == ReceiverMode::Rx as u16
+            });
+        state.control_requests.push(request);
+        if should_fail {
+            return Err(Error::Status(StatusCode::LibUsb));
+        }
         Ok(())
     }
 }
@@ -386,6 +406,162 @@ fn raw_rx_stream_stop_and_finish_are_idempotent_when_idle() {
     assert_eq!(stats, StreamingStats::default());
     let receiver_modes: Vec<_> = state
         .borrow()
+        .control_requests
+        .iter()
+        .filter(|request| request.request == VendorRequest::ReceiverMode)
+        .map(|request| request.value)
+        .collect();
+    assert_eq!(
+        receiver_modes,
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16
+        ]
+    );
+}
+
+#[test]
+fn owned_raw_rx_stream_finish_preserves_device_stats_and_error_on_stop_failure() {
+    let control = FakeDevice::with_completions_and_final_receiver_off_error([
+        vec![0x11; DEFAULT_BUFFER_SIZE],
+    ]);
+    let state = control.state.clone();
+    let direct = HydraSdr::from_control(control);
+    let mut device = Device::from_direct_without_info(direct);
+    device
+        .configure(
+            &Config::builder()
+                .sample_format(SampleFormat::RawAdc)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    state.borrow_mut().control_requests.clear();
+
+    let mut stream = device.into_raw_rx_stream_owned().unwrap();
+    let block = stream.next_block().unwrap().unwrap();
+    assert_eq!(block.raw_bytes()[0], 0x11);
+
+    let err = stream.finish().unwrap_err();
+    assert_eq!(err.error().status_code(), StatusCode::LibUsb);
+    assert_eq!(err.stats().buffers_processed, 1);
+    let (device, error, stats) = err.into_parts();
+    assert_eq!(device.direct().get_sample_type(), SampleType::Raw);
+    assert_eq!(error.status_code(), StatusCode::LibUsb);
+    assert_eq!(stats.buffers_processed, 1);
+
+    let state = state.borrow();
+    assert!(state.cancelled);
+    let receiver_modes: Vec<_> = state
+        .control_requests
+        .iter()
+        .filter(|request| request.request == VendorRequest::ReceiverMode)
+        .map(|request| request.value)
+        .collect();
+    assert_eq!(
+        receiver_modes,
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16
+        ]
+    );
+}
+
+#[test]
+fn owned_raw_rx_stream_finish_success_still_returns_device_and_stats() {
+    let control = FakeDevice::with_completions([vec![0x11; DEFAULT_BUFFER_SIZE]]);
+    let state = control.state.clone();
+    let direct = HydraSdr::from_control(control);
+    let mut device = Device::from_direct_without_info(direct);
+    device
+        .configure(
+            &Config::builder()
+                .sample_format(SampleFormat::RawAdc)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    state.borrow_mut().control_requests.clear();
+
+    let stream = device.into_raw_rx_stream_owned().unwrap();
+    let (device, stats) = stream.finish().unwrap();
+
+    assert_eq!(device.direct().get_sample_type(), SampleType::Raw);
+    assert_eq!(stats, StreamingStats::default());
+    let state = state.borrow();
+    assert!(state.cancelled);
+    let receiver_modes: Vec<_> = state
+        .control_requests
+        .iter()
+        .filter(|request| request.request == VendorRequest::ReceiverMode)
+        .map(|request| request.value)
+        .collect();
+    assert_eq!(
+        receiver_modes,
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16
+        ]
+    );
+}
+
+#[test]
+fn owned_f32_rx_stream_finish_preserves_device_stats_and_error_on_stop_failure() {
+    let control = FakeDevice::with_completions_and_final_receiver_off_error([
+        vec![0x80; DEFAULT_BUFFER_SIZE],
+    ]);
+    let state = control.state.clone();
+    let direct = HydraSdr::from_control(control);
+    let device = Device::from_direct_without_info(direct);
+    let mut stream = device.into_f32_rx_stream_owned().unwrap();
+
+    let mut out = [(0.0, 0.0); 4];
+    assert_eq!(stream.read(&mut out, Duration::from_millis(0)).unwrap(), 4);
+
+    let err = stream.finish().unwrap_err();
+    assert_eq!(err.error().status_code(), StatusCode::LibUsb);
+    assert_eq!(err.stats().buffers_processed, 1);
+    let (device, error, stats) = err.into_parts();
+    assert_eq!(device.direct().get_sample_type(), SampleType::Float32Iq);
+    assert_eq!(error.status_code(), StatusCode::LibUsb);
+    assert_eq!(stats.buffers_processed, 1);
+
+    let state = state.borrow();
+    assert!(state.cancelled);
+    let receiver_modes: Vec<_> = state
+        .control_requests
+        .iter()
+        .filter(|request| request.request == VendorRequest::ReceiverMode)
+        .map(|request| request.value)
+        .collect();
+    assert_eq!(
+        receiver_modes,
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16
+        ]
+    );
+}
+
+#[test]
+fn owned_f32_rx_stream_finish_success_still_returns_device_and_stats() {
+    let control = FakeDevice::with_completions([vec![0x80; DEFAULT_BUFFER_SIZE]]);
+    let state = control.state.clone();
+    let direct = HydraSdr::from_control(control);
+    let device = Device::from_direct_without_info(direct);
+    let stream = device.into_f32_rx_stream_owned().unwrap();
+
+    let (device, stats) = stream.finish().unwrap();
+
+    assert_eq!(device.direct().get_sample_type(), SampleType::Float32Iq);
+    assert_eq!(stats, StreamingStats::default());
+    let state = state.borrow();
+    assert!(state.cancelled);
+    let receiver_modes: Vec<_> = state
         .control_requests
         .iter()
         .filter(|request| request.request == VendorRequest::ReceiverMode)

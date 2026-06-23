@@ -1080,15 +1080,21 @@ where
     }
 
     /// Stop a persistent synchronous raw RX stream and return its accumulated counters.
-    pub fn stop_raw_rx_stream(
+    pub fn stop_raw_rx_stream(&mut self, stream: RawRxStream<C::BulkIn>) -> Result<StreamingStats> {
+        let (stats, stop_result) = self.close_raw_rx_stream(stream);
+        stop_result?;
+        Ok(stats)
+    }
+
+    pub(crate) fn close_raw_rx_stream(
         &mut self,
         mut stream: RawRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
+    ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
         if !self.reset_command {
-            self.receiver_mode(ReceiverMode::Off)?;
+            return (stats, self.receiver_mode(ReceiverMode::Off));
         }
-        Ok(stats)
+        (stats, Ok(()))
     }
 
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
@@ -1118,15 +1124,21 @@ where
     }
 
     /// Stop a persistent synchronous pull RX stream and return its accumulated counters.
-    pub fn stop_rx_stream(
+    pub fn stop_rx_stream(&mut self, stream: DirectRxStream<C::BulkIn>) -> Result<StreamingStats> {
+        let (stats, stop_result) = self.close_rx_stream(stream);
+        stop_result?;
+        Ok(stats)
+    }
+
+    pub(crate) fn close_rx_stream(
         &mut self,
         mut stream: DirectRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
+    ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
         if !self.reset_command {
-            self.receiver_mode(ReceiverMode::Off)?;
+            return (stats, self.receiver_mode(ReceiverMode::Off));
         }
-        Ok(stats)
+        (stats, Ok(()))
     }
 
     /// Start direct synchronous RX streaming.
