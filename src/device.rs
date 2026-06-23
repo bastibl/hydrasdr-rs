@@ -14,7 +14,9 @@ use crate::streaming::{
     AsyncStreamingBackend, DirectRxStream, StreamingBackend, StreamingState, StreamingStats,
     Transfer,
 };
-use crate::types::{BoardId, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature};
+use crate::types::{
+    BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature,
+};
 use crate::usb::control::{
     AsyncControlBackend, ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
     decode_u32_le_words,
@@ -43,6 +45,7 @@ pub struct HydraSdr<C = NusbControl> {
     current_samplerate: u32,
     hardware_samplerate: u32,
     decimation_factor: u32,
+    decimation_mode: DecimationMode,
     current_bandwidth: u32,
     packing_enabled: bool,
     reset_command: bool,
@@ -62,6 +65,7 @@ impl<C: ControlBackend> HydraSdr<C> {
             current_samplerate: 0,
             hardware_samplerate: 0,
             decimation_factor: 1,
+            decimation_mode: DecimationMode::LowBandwidth,
             current_bandwidth: 0,
             packing_enabled: false,
             reset_command: false,
@@ -350,6 +354,31 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.sample_type
     }
 
+    /// Select how virtual IQ sample rates choose a hardware rate and host-side DDC decimation.
+    ///
+    /// `LowBandwidth` prefers a direct firmware hardware rate when one is available. `HighDefinition`
+    /// prefers the highest compatible hardware rate and decimates in the host converter.
+    pub fn set_decimation_mode(&mut self, mode: DecimationMode) -> Result<()> {
+        if self.decimation_mode == mode {
+            return Ok(());
+        }
+
+        let previous = self.decimation_mode;
+        self.decimation_mode = mode;
+        if self.current_samplerate != 0 {
+            if let Err(err) = self.set_samplerate(self.current_samplerate) {
+                self.decimation_mode = previous;
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the currently selected virtual-rate decimation mode.
+    pub fn decimation_mode(&self) -> DecimationMode {
+        self.decimation_mode
+    }
+
     /// Write a GPIO value using the C port/pin packing.
     pub fn gpio_write(&self, port: u8, pin: u8, value: u8) -> Result<()> {
         self.control_out(VendorControlRequest::gpio_write(port, pin, value)?)
@@ -552,16 +581,20 @@ impl<C> HydraSdr<C> {
     }
 
     fn sample_rate_hardware_config(&self, samplerate: u32) -> Option<(u32, u32)> {
-        if let Some(index) = self
+        let direct_rate = self
             .sample_rates
             .iter()
-            .position(|rate| *rate == samplerate)
-        {
-            return Some((self.sample_rates[index], 1));
-        }
+            .find(|rate| **rate == samplerate)
+            .copied();
 
         if !self.sample_type_is_iq() {
-            return None;
+            return direct_rate.map(|rate| (rate, 1));
+        }
+
+        if self.decimation_mode == DecimationMode::LowBandwidth {
+            if let Some(rate) = direct_rate {
+                return Some((rate, 1));
+            }
         }
 
         let mut best = None;
@@ -571,8 +604,18 @@ impl<C> HydraSdr<C> {
                     best = match best {
                         None => Some((*hardware_rate, decimation)),
                         Some((best_hw, best_decimation))
-                            if *hardware_rate < best_hw
-                                || (*hardware_rate == best_hw && decimation > best_decimation) =>
+                            if self.decimation_mode == DecimationMode::HighDefinition
+                                && (*hardware_rate > best_hw
+                                    || (*hardware_rate == best_hw
+                                        && decimation > best_decimation)) =>
+                        {
+                            Some((*hardware_rate, decimation))
+                        }
+                        Some((best_hw, best_decimation))
+                            if self.decimation_mode == DecimationMode::LowBandwidth
+                                && (*hardware_rate < best_hw
+                                    || (*hardware_rate == best_hw
+                                        && decimation > best_decimation)) =>
                         {
                             Some((*hardware_rate, decimation))
                         }
@@ -711,6 +754,23 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         self.current_samplerate = samplerate;
         self.hardware_samplerate = hardware_samplerate;
         self.decimation_factor = decimation_factor;
+        Ok(())
+    }
+
+    /// Async counterpart to [`HydraSdr::set_decimation_mode`].
+    pub async fn set_decimation_mode_async(&mut self, mode: DecimationMode) -> Result<()> {
+        if self.decimation_mode == mode {
+            return Ok(());
+        }
+
+        let previous = self.decimation_mode;
+        self.decimation_mode = mode;
+        if self.current_samplerate != 0 {
+            if let Err(err) = self.set_samplerate_async(self.current_samplerate).await {
+                self.decimation_mode = previous;
+                return Err(err);
+            }
+        }
         Ok(())
     }
 

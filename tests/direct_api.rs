@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use hydrasdr_rs::commands::{RfPort, VendorRequest};
 use hydrasdr_rs::device::HydraSdr;
 use hydrasdr_rs::errors::StatusCode;
-use hydrasdr_rs::types::{BoardId, PartIdSerialNo};
+use hydrasdr_rs::types::{BoardId, DecimationMode, PartIdSerialNo};
 use hydrasdr_rs::usb::control::{
     ControlBackend, ControlDirection, VendorControlRequest, decode_part_id_serial,
 };
@@ -160,6 +160,34 @@ fn sample_rate_and_bandwidth_helpers_use_count_then_list_protocol() {
     assert_eq!(requests[4], VendorControlRequest::get_bandwidths_count());
     assert_eq!(requests[5], VendorControlRequest::get_bandwidths(2));
     assert_eq!(requests[6], VendorControlRequest::set_bandwidth(1));
+}
+
+#[test]
+fn decimation_mode_controls_virtual_iq_rate_selection() {
+    let control = FakeControl::with_in_responses(vec![
+        3u32.to_le_bytes().to_vec(),
+        [
+            10_000_000u32.to_le_bytes(),
+            5_000_000u32.to_le_bytes(),
+            2_500_000u32.to_le_bytes(),
+        ]
+        .concat(),
+        vec![1],
+        vec![1],
+    ]);
+    let mut dev = HydraSdr::from_control(control);
+
+    dev.get_samplerates().unwrap();
+    dev.set_samplerate(2_500_000).unwrap();
+    assert_eq!(dev.decimation_mode(), DecimationMode::LowBandwidth);
+
+    dev.set_decimation_mode(DecimationMode::HighDefinition)
+        .unwrap();
+    assert_eq!(dev.decimation_mode(), DecimationMode::HighDefinition);
+
+    let requests = dev.control().requests.borrow();
+    assert_eq!(requests[2], VendorControlRequest::set_samplerate(2, 1));
+    assert_eq!(requests[3], VendorControlRequest::set_samplerate(0, 1));
 }
 
 #[test]
