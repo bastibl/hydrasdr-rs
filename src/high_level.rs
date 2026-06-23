@@ -1,9 +1,12 @@
-//! Ergonomic HydraSDR RFOne API.
+//! HydraSDR RFOne sync and async APIs.
 
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
-use crate::streaming::{AsyncStreamingBackend, StreamingBackend, StreamingStats, Transfer};
+use crate::streaming::{
+    AsyncRawRxStream, AsyncStreamingBackend, RawRxStream, StreamingBackend, StreamingStats,
+    Transfer,
+};
 use crate::types::DeviceInfo;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 
@@ -13,7 +16,7 @@ use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 /// examples live on [`crate::Config`] and [`crate::ConfigBuilder`].
 ///
 /// ```no_run
-/// use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+/// use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 ///
 /// fn main() -> hydrasdr_rs::Result<()> {
 ///     let mut dev = Device::builder()
@@ -24,10 +27,11 @@ use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
 ///         .gain(GainPreset::Linearity(12))
 ///         .open()?;
 ///
-///     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+///     let mut rx = dev.rx_stream()?;
+///     if let Some(block) = rx.next_block()? {
 ///         println!("{} raw bytes", block.raw_bytes().len());
-///         true
-///     })?;
+///     }
+///     let stats = rx.finish()?;
 ///     println!("{stats:?}");
 ///
 ///     Ok(())
@@ -97,36 +101,18 @@ impl Device {
         self.inner.refresh_info_async().await
     }
 
-    /// Create an idle synchronous stream guard.
+    /// Start a synchronous receive stream.
     pub fn rx_stream(&mut self) -> Result<RxStream<'_>> {
         Ok(RxStream {
             inner: self.inner.rx_stream()?,
         })
     }
 
-    /// Create an idle async stream guard.
+    /// Start an async receive stream.
     pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStream<'_>> {
         Ok(AsyncRxStream {
             inner: self.inner.rx_stream_async().await?,
         })
-    }
-
-    /// Receive sample blocks through the high-level callback streaming loop.
-    ///
-    /// The callback returns `true` to stop the stream and `false` to continue.
-    pub fn receive_blocks<F>(&mut self, callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(SampleBlock<'_>) -> bool,
-    {
-        self.inner.receive_blocks(callback)
-    }
-
-    /// Async counterpart to [`Device::receive_blocks`].
-    pub async fn receive_blocks_async<F>(&mut self, callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(SampleBlock<'_>) -> bool,
-    {
-        self.inner.receive_blocks_async(callback).await
     }
 }
 
@@ -185,49 +171,24 @@ where
     pub const fn direct(&self) -> &HydraSdr<C> {
         &self.direct
     }
-
-    /// Create an idle synchronous stream guard.
-    pub fn rx_stream(&mut self) -> Result<RxStreamInner<'_, C>> {
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
-        Ok(RxStreamInner {
-            device: self,
-            stopped: false,
-            finished: false,
-        })
-    }
 }
 
 impl<C> DeviceInner<C>
 where
     C: ControlBackend + StreamingBackend,
 {
-    /// Receive sample blocks through the direct callback streaming loop.
-    ///
-    /// The callback returns `true` to stop the stream and `false` to continue.
-    ///
-    /// ```no_run
-    /// use hydrasdr_rs::{Device, SampleBlock};
-    ///
-    /// fn main() -> hydrasdr_rs::Result<()> {
-    ///     let mut dev = Device::open()?;
-    ///     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
-    ///         println!("{} samples", block.sample_count());
-    ///         true
-    ///     })?;
-    ///     println!("{stats:?}");
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn receive_blocks<F>(&mut self, mut callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(SampleBlock<'_>) -> bool,
-    {
-        let sample_format = self.sample_format;
-        self.direct.start_rx(|transfer: &Transfer<'_>| {
-            let block = SampleBlock::from_transfer(transfer, sample_format);
-            i32::from(callback(block))
+    /// Start a synchronous receive stream.
+    pub fn rx_stream(&mut self) -> Result<RxStreamInner<'_, C>> {
+        if self.direct.is_streaming() {
+            return Err(Error::stream_closed("direct receiver is already streaming"));
+        }
+        let stream = self.direct.start_raw_rx_stream()?;
+        Ok(RxStreamInner {
+            device: self,
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+            finished: false,
         })
     }
 }
@@ -248,36 +209,25 @@ where
         self.info = Some(self.direct.get_device_info_async().await?);
         Ok(self.info())
     }
-
-    /// Create an idle async stream guard.
-    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStreamInner<'_, C>> {
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
-        Ok(AsyncRxStreamInner {
-            device: self,
-            stopped: false,
-            finished: false,
-        })
-    }
 }
 
 impl<C> DeviceInner<C>
 where
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 {
-    /// Async counterpart to [`Device::receive_blocks`].
-    pub async fn receive_blocks_async<F>(&mut self, mut callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(SampleBlock<'_>) -> bool,
-    {
-        let sample_format = self.sample_format;
-        self.direct
-            .start_rx_async(|transfer: &Transfer<'_>| {
-                let block = SampleBlock::from_transfer(transfer, sample_format);
-                i32::from(callback(block))
-            })
-            .await
+    /// Start an async receive stream.
+    pub async fn rx_stream_async(&mut self) -> Result<AsyncRxStreamInner<'_, C>> {
+        if self.direct.is_streaming() {
+            return Err(Error::stream_closed("direct receiver is already streaming"));
+        }
+        let stream = self.direct.start_raw_rx_stream_async().await?;
+        Ok(AsyncRxStreamInner {
+            device: self,
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+            finished: false,
+        })
     }
 }
 
@@ -444,7 +394,7 @@ impl<'a> SampleBlock<'a> {
         }
     }
 
-    fn from_transfer(transfer: &'a Transfer<'a>, format: SampleFormat) -> Self {
+    fn from_transfer(transfer: &Transfer<'a>, format: SampleFormat) -> Self {
         Self::new(
             transfer.samples,
             format,
@@ -475,20 +425,37 @@ impl<'a> SampleBlock<'a> {
 }
 
 /// Idle synchronous stream guard for explicit stop/finish lifecycle control.
-pub(crate) struct RxStreamInner<'dev, C: ControlBackend> {
+pub(crate) struct RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     device: &'dev mut DeviceInner<C>,
+    stream: Option<RawRxStream<C::BulkIn>>,
+    stats: StreamingStats,
     stopped: bool,
     finished: bool,
 }
 
 impl<C> RxStreamInner<'_, C>
 where
-    C: ControlBackend,
+    C: ControlBackend + StreamingBackend,
 {
+    /// Read the next sample block.
+    pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        let sample_format = self.device.sample_format;
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(Error::stream_closed("RX stream is closed"));
+        };
+        Ok(stream
+            .next_transfer()?
+            .map(|transfer| SampleBlock::from_transfer(&transfer, sample_format)))
+    }
+
     /// Request receiver-off cleanup. Repeated calls are no-ops.
     pub fn stop(&mut self) -> Result<()> {
         if !self.stopped {
-            self.device.direct.stop_rx()?;
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("RX stream is closed"))?;
+            self.stats = self.device.direct.stop_raw_rx_stream(stream)?;
             self.stopped = true;
         }
         Ok(())
@@ -500,14 +467,19 @@ where
             self.stop()?;
         }
         self.finished = true;
-        Ok(self.device.direct.streaming_stats())
+        Ok(self.stats)
     }
 }
 
-impl<C: ControlBackend> Drop for RxStreamInner<'_, C> {
+impl<C> Drop for RxStreamInner<'_, C>
+where
+    C: ControlBackend + StreamingBackend,
+{
     fn drop(&mut self) {
         if !self.stopped && !self.finished {
-            let _ = self.device.direct.stop_rx();
+            if let Some(stream) = self.stream.take() {
+                let _ = self.device.direct.stop_raw_rx_stream(stream);
+            }
             self.stopped = true;
         }
     }
@@ -519,6 +491,11 @@ pub struct RxStream<'dev> {
 }
 
 impl RxStream<'_> {
+    /// Read the next sample block.
+    pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        self.inner.next_block()
+    }
+
     /// Request receiver-off cleanup. Repeated calls are no-ops.
     pub fn stop(&mut self) -> Result<()> {
         self.inner.stop()
@@ -531,20 +508,41 @@ impl RxStream<'_> {
 }
 
 /// Idle async stream guard for explicit async stop/finish lifecycle control.
-pub(crate) struct AsyncRxStreamInner<'dev, C: AsyncControlBackend + ControlBackend> {
+pub(crate) struct AsyncRxStreamInner<
+    'dev,
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+> {
     device: &'dev mut DeviceInner<C>,
+    stream: Option<AsyncRawRxStream<C::BulkIn>>,
+    stats: StreamingStats,
     stopped: bool,
     finished: bool,
 }
 
 impl<C> AsyncRxStreamInner<'_, C>
 where
-    C: AsyncControlBackend + ControlBackend,
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 {
+    /// Read the next sample block.
+    pub async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        let sample_format = self.device.sample_format;
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(Error::stream_closed("async RX stream is closed"));
+        };
+        Ok(stream
+            .next_transfer()
+            .await?
+            .map(|transfer| SampleBlock::from_transfer(&transfer, sample_format)))
+    }
+
     /// Request receiver-off cleanup. Repeated calls are no-ops.
     pub async fn stop(&mut self) -> Result<()> {
         if !self.stopped {
-            self.device.direct.stop_rx_async().await?;
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("async RX stream is closed"))?;
+            self.stats = self.device.direct.stop_raw_rx_stream_async(stream).await?;
             self.stopped = true;
         }
         Ok(())
@@ -556,7 +554,7 @@ where
             self.stop().await?;
         }
         self.finished = true;
-        Ok(self.device.direct.streaming_stats())
+        Ok(self.stats)
     }
 }
 
@@ -566,6 +564,11 @@ pub struct AsyncRxStream<'dev> {
 }
 
 impl AsyncRxStream<'_> {
+    /// Read the next sample block.
+    pub async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+        self.inner.next_block().await
+    }
+
     /// Request receiver-off cleanup. Repeated calls are no-ops.
     pub async fn stop(&mut self) -> Result<()> {
         self.inner.stop().await

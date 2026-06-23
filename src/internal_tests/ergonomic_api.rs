@@ -254,7 +254,7 @@ fn high_level_device_caches_info_and_applies_configuration() {
 }
 
 #[test]
-fn receive_blocks_wraps_direct_streaming_with_sample_blocks() {
+fn rx_stream_reads_sample_blocks() {
     let first = vec![0x11; DEFAULT_BUFFER_SIZE];
     let second = vec![0x22; DEFAULT_BUFFER_SIZE];
     let control = FakeDevice::with_completions([first, second]);
@@ -272,17 +272,25 @@ fn receive_blocks_wraps_direct_streaming_with_sample_blocks() {
         )
         .unwrap();
 
+    let mut stream = device.rx_stream().unwrap();
     let mut seen = Vec::new();
-    let stats = device
-        .receive_blocks(|block: SampleBlock<'_>| {
-            seen.push((
-                block.raw_bytes()[0],
-                block.sample_count(),
-                block.sample_format(),
-            ));
-            seen.len() == 2
-        })
-        .unwrap();
+    {
+        let block = stream.next_block().unwrap().unwrap();
+        seen.push((
+            block.raw_bytes()[0],
+            block.sample_count(),
+            block.sample_format(),
+        ));
+    }
+    {
+        let block = stream.next_block().unwrap().unwrap();
+        seen.push((
+            block.raw_bytes()[0],
+            block.sample_count(),
+            block.sample_format(),
+        ));
+    }
+    let stats = stream.finish().unwrap();
 
     assert_eq!(
         seen,
@@ -344,7 +352,14 @@ fn rx_stream_stop_and_finish_are_idempotent_when_idle() {
         .filter(|request| request.request == VendorRequest::ReceiverMode)
         .map(|request| request.value)
         .collect();
-    assert_eq!(receiver_modes, vec![ReceiverMode::Off as u16]);
+    assert_eq!(
+        receiver_modes,
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16
+        ]
+    );
 }
 
 #[test]

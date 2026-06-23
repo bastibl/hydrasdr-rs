@@ -11,8 +11,8 @@ use crate::rfone::{
     RFONE_VGA_MAX_GAIN, component_infos, default_gain_infos, rf_port_infos,
 };
 use crate::streaming::{
-    AsyncStreamingBackend, DirectRxStream, StreamingBackend, StreamingState, StreamingStats,
-    Transfer,
+    AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
+    StreamingState, StreamingStats, Transfer,
 };
 use crate::types::{
     BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature,
@@ -1052,6 +1052,40 @@ impl<C> HydraSdr<C>
 where
     C: ControlBackend + StreamingBackend,
 {
+    /// Start a persistent synchronous pull RX stream for raw USB blocks.
+    pub fn start_raw_rx_stream(&mut self) -> Result<RawRxStream<C::BulkIn>> {
+        self.receiver_mode(ReceiverMode::Off)?;
+        self.receiver_mode(ReceiverMode::Rx)?;
+
+        let bulk_in = match self.control.bulk_in(RFONE_RX_ENDPOINT) {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode(ReceiverMode::Off);
+                return Err(err);
+            }
+        };
+
+        match RawRxStream::start(bulk_in, self.streaming.config(), self.sample_type) {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                let _ = self.receiver_mode(ReceiverMode::Off);
+                Err(err)
+            }
+        }
+    }
+
+    /// Stop a persistent synchronous raw RX stream and return its accumulated counters.
+    pub fn stop_raw_rx_stream(
+        &mut self,
+        mut stream: RawRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
+        let stats = stream.close();
+        if !self.reset_command {
+            self.receiver_mode(ReceiverMode::Off)?;
+        }
+        Ok(stats)
+    }
+
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
     pub fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
@@ -1118,6 +1152,40 @@ impl<C> HydraSdr<C>
 where
     C: AsyncControlBackend + AsyncStreamingBackend,
 {
+    /// Start a persistent async pull RX stream for raw USB blocks.
+    pub async fn start_raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStream<C::BulkIn>> {
+        self.receiver_mode_async(ReceiverMode::Off).await?;
+        self.receiver_mode_async(ReceiverMode::Rx).await?;
+
+        let bulk_in = match self.control.bulk_in_async(RFONE_RX_ENDPOINT).await {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
+                return Err(err);
+            }
+        };
+
+        match AsyncRawRxStream::start(bulk_in, self.streaming.config(), self.sample_type).await {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Stop a persistent async raw RX stream and return its accumulated counters.
+    pub async fn stop_raw_rx_stream_async(
+        &mut self,
+        mut stream: AsyncRawRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
+        let stats = stream.close();
+        if !self.reset_command {
+            self.receiver_mode_async(ReceiverMode::Off).await?;
+        }
+        Ok(stats)
+    }
+
     /// Async counterpart to [`HydraSdr::start_rx`].
     pub async fn start_rx_async<F>(&mut self, callback: F) -> Result<StreamingStats>
     where

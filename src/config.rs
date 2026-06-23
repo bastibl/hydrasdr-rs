@@ -1,4 +1,4 @@
-//! Ergonomic receiver configuration.
+//! Receiver configuration.
 
 use crate::commands::{GainType, RfPort};
 use crate::device::HydraSdr;

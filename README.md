@@ -8,7 +8,7 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 Implemented:
 
-- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and `SampleBlock` receive callbacks.
+- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and pull-style `SampleBlock` receive streams.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
 - Internal synchronous control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
@@ -19,7 +19,7 @@ Implemented:
 TODO:
 
 - Packed-sample conversion.
-- Converted sample formats beyond pull-style `Float32Iq`; callback streaming intentionally exposes raw USB bytes.
+- Public typed sample conversion APIs, such as `Float32Iq` blocks instead of raw USB bytes.
 
 ## USB dependency and execution model
 
@@ -29,7 +29,7 @@ The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `receive_blocks_async`:
+For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `rx_stream_async`:
 
 ```sh
 cargo check --features tokio
@@ -43,7 +43,7 @@ Use `tokio` if the application already runs on Tokio; use `smol` for smaller exa
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
 
 ```rust,no_run
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
@@ -57,15 +57,16 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+    let mut rx = dev.rx_stream()?;
+    if let Some(block) = rx.next_block()? {
         println!(
             "{} bytes, {} samples, dropped={}",
             block.raw_bytes().len(),
             block.sample_count(),
             block.dropped_samples()
         );
-        true // stop after one callback
-    })?;
+    }
+    let stats = rx.finish()?;
     println!("{stats:?}");
 
     Ok(())
@@ -78,7 +79,7 @@ The async API mirrors the sync shape. Enable exactly one runtime integration fea
 
 ```rust,no_run
 use futures_lite::future::block_on;
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
     block_on(async {
@@ -91,10 +92,11 @@ fn main() -> hydrasdr_rs::Result<()> {
             .open_async()
             .await?;
 
-        let stats = dev.receive_blocks_async(|block: SampleBlock<'_>| {
+        let mut rx = dev.rx_stream_async().await?;
+        if let Some(block) = rx.next_block().await? {
             println!("async block: {} bytes", block.raw_bytes().len());
-            true
-        }).await?;
+        }
+        let stats = rx.finish().await?;
         println!("{stats:?}");
 
         Ok(())

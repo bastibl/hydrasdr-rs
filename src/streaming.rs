@@ -335,6 +335,208 @@ pub struct DirectRxStream<B: BulkInBackend> {
     closed: bool,
 }
 
+/// Persistent synchronous pull stream that yields raw USB transfer blocks.
+#[derive(Debug)]
+pub struct RawRxStream<B: BulkInBackend> {
+    bulk_in: Option<B>,
+    config: StreamingConfig,
+    sample_type: SampleType,
+    stats: StreamingStats,
+    current: Option<B::Buffer>,
+    closed: bool,
+}
+
+impl<B: BulkInBackend> RawRxStream<B> {
+    pub(crate) fn start(
+        mut bulk_in: B,
+        config: StreamingConfig,
+        sample_type: SampleType,
+    ) -> Result<Self> {
+        bulk_in.clear_halt()?;
+        while bulk_in.pending() < config.transfer_count {
+            let buffer = bulk_in.allocate(config_current_buffer_size(config));
+            bulk_in.submit(buffer);
+        }
+
+        Ok(Self {
+            bulk_in: Some(bulk_in),
+            config,
+            sample_type,
+            stats: StreamingStats::default(),
+            current: None,
+            closed: false,
+        })
+    }
+
+    /// Return counters accumulated by this pull stream.
+    pub fn stats(&self) -> StreamingStats {
+        self.stats
+    }
+
+    /// Read the next raw transfer block.
+    ///
+    /// Returns `Ok(None)` when the backend times out before a block is available.
+    pub fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+        if self.closed {
+            return Err(Error::stream_closed("raw RX stream is closed"));
+        }
+
+        if let Some(buffer) = self.current.take() {
+            self.bulk_in_mut()?.submit(buffer);
+        }
+
+        let timeout = self.config.transfer_timeout;
+        let Some(completion) = self.bulk_in_mut()?.wait_next_complete(timeout) else {
+            return Ok(None);
+        };
+
+        completion.status?;
+        let buffer = completion.buffer;
+        let actual_len = completion.actual_len;
+        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
+            self.stats.buffers_dropped += 1;
+            return Err(Error::Status(StatusCode::LibUsb));
+        }
+
+        self.stats.buffers_received += 1;
+        self.stats.buffers_processed += 1;
+        let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
+        let dropped_samples = self.stats.buffers_dropped * sample_count as u64;
+        self.current = Some(buffer);
+        let samples = &self.current.as_ref().expect("current buffer set")[..actual_len];
+
+        Ok(Some(Transfer {
+            samples,
+            sample_count,
+            dropped_samples,
+            sample_type: self.sample_type,
+        }))
+    }
+
+    /// Close the USB queue by cancelling pending transfers.
+    pub fn close(&mut self) -> StreamingStats {
+        if !self.closed {
+            if let Some(bulk_in) = self.bulk_in.as_mut() {
+                bulk_in.cancel_all();
+            }
+            self.bulk_in = None;
+            self.current = None;
+            self.closed = true;
+        }
+        self.stats
+    }
+
+    fn bulk_in_mut(&mut self) -> Result<&mut B> {
+        self.bulk_in
+            .as_mut()
+            .ok_or(Error::stream_closed("raw RX stream is closed"))
+    }
+}
+
+impl<B: BulkInBackend> Drop for RawRxStream<B> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+/// Persistent async pull stream that yields raw USB transfer blocks.
+#[derive(Debug)]
+pub struct AsyncRawRxStream<B: AsyncBulkInBackend> {
+    bulk_in: Option<B>,
+    config: StreamingConfig,
+    sample_type: SampleType,
+    stats: StreamingStats,
+    current: Option<B::Buffer>,
+    closed: bool,
+}
+
+impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
+    pub(crate) async fn start(
+        mut bulk_in: B,
+        config: StreamingConfig,
+        sample_type: SampleType,
+    ) -> Result<Self> {
+        bulk_in.clear_halt_async().await?;
+        while bulk_in.pending() < config.transfer_count {
+            let buffer = bulk_in.allocate(config_current_buffer_size(config));
+            bulk_in.submit(buffer);
+        }
+
+        Ok(Self {
+            bulk_in: Some(bulk_in),
+            config,
+            sample_type,
+            stats: StreamingStats::default(),
+            current: None,
+            closed: false,
+        })
+    }
+
+    /// Return counters accumulated by this pull stream.
+    pub fn stats(&self) -> StreamingStats {
+        self.stats
+    }
+
+    /// Read the next raw transfer block.
+    pub async fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+        if self.closed {
+            return Err(Error::stream_closed("async raw RX stream is closed"));
+        }
+
+        if let Some(buffer) = self.current.take() {
+            self.bulk_in_mut()?.submit(buffer);
+        }
+
+        let completion = self.bulk_in_mut()?.next_complete_async().await;
+        completion.status?;
+        let buffer = completion.buffer;
+        let actual_len = completion.actual_len;
+        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
+            self.stats.buffers_dropped += 1;
+            return Err(Error::Status(StatusCode::LibUsb));
+        }
+
+        self.stats.buffers_received += 1;
+        self.stats.buffers_processed += 1;
+        let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
+        let dropped_samples = self.stats.buffers_dropped * sample_count as u64;
+        self.current = Some(buffer);
+        let samples = &self.current.as_ref().expect("current buffer set")[..actual_len];
+
+        Ok(Some(Transfer {
+            samples,
+            sample_count,
+            dropped_samples,
+            sample_type: self.sample_type,
+        }))
+    }
+
+    /// Close the USB queue by cancelling pending transfers.
+    pub fn close(&mut self) -> StreamingStats {
+        if !self.closed {
+            if let Some(bulk_in) = self.bulk_in.as_mut() {
+                bulk_in.cancel_all();
+            }
+            self.bulk_in = None;
+            self.current = None;
+            self.closed = true;
+        }
+        self.stats
+    }
+
+    fn bulk_in_mut(&mut self) -> Result<&mut B> {
+        self.bulk_in
+            .as_mut()
+            .ok_or(Error::stream_closed("async raw RX stream is closed"))
+    }
+}
+
+impl<B: AsyncBulkInBackend> Drop for AsyncRawRxStream<B> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
 impl<B: BulkInBackend> DirectRxStream<B> {
     pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
         bulk_in.clear_halt()?;

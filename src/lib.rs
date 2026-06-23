@@ -2,10 +2,10 @@
 
 //! HydraSDR RFOne API on top of `nusb`.
 //!
-//! The crate exposes an ergonomic Rust layer for common receive workflows. The
-//! low-level C-to-Rust port is kept inside the crate as the USB/control
-//! implementation, but the public API is centered on [`Device`], [`Config`], and
-//! typed configuration values.
+//! The crate exposes synchronous and asynchronous Rust APIs for common receive
+//! workflows. The low-level C-to-Rust port is kept inside the crate as the
+//! USB/control implementation, but the public API is centered on [`Device`],
+//! [`Config`], and typed configuration values.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] to mirror the blocking C
 //! driver. Async counterparts are executor-agnostic at this crate layer and
@@ -21,28 +21,12 @@
 //! they open USB devices, change receiver state, and may touch RF bias/GPIO/SPI
 //! flash paths just like the C driver.
 //!
-//! # Ergonomic API
+//! # Synchronous API
 //!
-//! Build reusable receiver configurations without touching USB:
-//!
-//! ```
-//! use hydrasdr_rs::{Config, GainPreset, SampleFormat};
-//!
-//! let config = Config::builder()
-//!     .frequency_hz(100_000_000)
-//!     .sample_rate_hz(10_000_000)
-//!     .sample_format(SampleFormat::RawU8Iq)
-//!     .gain(GainPreset::Sensitivity(8))
-//!     .build()?;
-//!
-//! assert_eq!(config.frequency_hz(), 100_000_000);
-//! # Ok::<(), hydrasdr_rs::Error>(())
-//! ```
-//!
-//! Open and configure real hardware with the high-level [`Device`] builder:
+//! Open and configure real hardware with the [`Device`] builder:
 //!
 //! ```no_run
-//! use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+//! use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
 //!     let mut dev = Device::builder()
@@ -53,10 +37,11 @@
 //!         .gain(GainPreset::Linearity(12))
 //!         .open()?;
 //!
-//!     let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
+//!     let mut rx = dev.rx_stream()?;
+//!     if let Some(block) = rx.next_block()? {
 //!         println!("{} bytes", block.raw_bytes().len());
-//!         true
-//!     })?;
+//!     }
+//!     let stats = rx.finish()?;
 //!     println!("{stats:?}");
 //!
 //!     Ok(())

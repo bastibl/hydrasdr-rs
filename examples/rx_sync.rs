@@ -1,11 +1,11 @@
-//! Ergonomic synchronous HydraSDR receive example.
+//! Synchronous HydraSDR receive example.
 //!
 //! The default invocation prints usage and exits without touching USB. Pass
 //! `--run` only when an RFOne is connected and USB permissions are configured.
 
 use std::env;
 
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -40,18 +40,17 @@ fn main() -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut callbacks = 0;
-        let stats = dev.receive_blocks(|block: SampleBlock<'_>| {
-            callbacks += 1;
+        let mut rx = dev.rx_stream()?;
+        if let Some(block) = rx.next_block()? {
             println!(
                 "rx block: {} bytes, {} samples, dropped={}",
                 block.raw_bytes().len(),
                 block.sample_count(),
                 block.dropped_samples()
             );
-            true // stop after the first callback for a short smoke stream
-        })?;
-        println!("short RX complete after {callbacks} callback(s): {stats:?}");
+        }
+        let stats = rx.finish()?;
+        println!("short RX complete after one block: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer smoke stream.");
     }
@@ -61,7 +60,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "This ergonomic example opens and configures real HydraSDR hardware.\n\
+        "This example opens and configures real HydraSDR hardware.\n\
          It is gated to avoid accidental USB access during checks/tests.\n\n\
          Run:\n\
            cargo run --example rx_sync -- --run       # open/query/configure\n\

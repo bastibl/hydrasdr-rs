@@ -1,4 +1,4 @@
-//! Ergonomic async HydraSDR receive example.
+//! Async HydraSDR receive example.
 //!
 //! The default invocation prints usage and exits without touching USB. Pass
 //! `--run` only when an RFOne is connected and USB permissions are configured.
@@ -8,7 +8,7 @@ use std::env;
 #[cfg(any(feature = "smol", feature = "tokio"))]
 use futures_lite::future::block_on;
 #[cfg(any(feature = "smol", feature = "tokio"))]
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 
 #[cfg(any(feature = "smol", feature = "tokio"))]
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
@@ -62,20 +62,17 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut callbacks = 0;
-        let stats = dev
-            .receive_blocks_async(|block: SampleBlock<'_>| {
-                callbacks += 1;
-                println!(
-                    "rx block: {} bytes, {} samples, dropped={}",
-                    block.raw_bytes().len(),
-                    block.sample_count(),
-                    block.dropped_samples()
-                );
-                true // stop after the first callback for a short smoke stream
-            })
-            .await?;
-        println!("short async RX complete after {callbacks} callback(s): {stats:?}");
+        let mut rx = dev.rx_stream_async().await?;
+        if let Some(block) = rx.next_block().await? {
+            println!(
+                "rx block: {} bytes, {} samples, dropped={}",
+                block.raw_bytes().len(),
+                block.sample_count(),
+                block.dropped_samples()
+            );
+        }
+        let stats = rx.finish().await?;
+        println!("short async RX complete after one block: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer async smoke stream.");
     }
@@ -85,7 +82,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "This ergonomic example opens and configures real HydraSDR hardware through the async API.\n\
+        "This example opens and configures real HydraSDR hardware through the async API.\n\
          It is gated to avoid accidental USB access during checks/tests.\n\n\
          Run:\n\
            cargo run --features smol --example rx_async -- --run       # open/query/configure\n\

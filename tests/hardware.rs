@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard};
 
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleBlock, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
 
 static HARDWARE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -56,16 +56,16 @@ fn hardware_short_rx_stream_smoke_test() {
         .open()
         .expect("open and configure HydraSDR RFOne");
 
-    let mut callbacks = 0;
-    let stats = dev
-        .receive_blocks(|transfer: SampleBlock<'_>| {
-            callbacks += 1;
-            assert!(!transfer.raw_bytes().is_empty());
-            assert!(transfer.sample_count() > 0);
-            true
-        })
-        .expect("short RX stream");
+    let mut rx = dev.rx_stream().expect("start RX stream");
+    {
+        let block = rx
+            .next_block()
+            .expect("read RX block")
+            .expect("one RX block");
+        assert!(!block.raw_bytes().is_empty());
+        assert!(block.sample_count() > 0);
+    }
+    let stats = rx.finish().expect("finish RX stream");
 
-    assert_eq!(callbacks, 1);
     assert_eq!(stats.buffers_processed, 1);
 }
