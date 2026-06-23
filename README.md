@@ -107,7 +107,7 @@ See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples
 
 ## Linux permissions and hardware safety
 
-Opening a real HydraSDR RFOne requires permission to access the USB device. On Linux this usually means either running as root for quick local experiments or installing an appropriate udev rule for the RFOne VID/PID pairs:
+Opening a real HydraSDR RFOne requires permission to access the USB device. On Linux, install an appropriate udev rule for the RFOne VID/PID pairs and make sure your user is a member of the `plugdev` group:
 
 - legacy: `1d50:60a1`
 - official: `38af:0001`
@@ -119,7 +119,7 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="60a1", MODE="0660", 
 SUBSYSTEM=="usb", ATTR{idVendor}=="38af", ATTR{idProduct}=="0001", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 ```
 
-Reload udev rules and replug the device before running hardware examples/tests. Exact group names vary by distribution.
+Reload udev rules, replug the device, and start a new login session after adding your user to `plugdev`. Exact group names vary by distribution; if your system uses a different group, update the rule and group membership consistently.
 
 Some API calls can change receiver state or RF bias. The examples and hardware tests are gated so normal `cargo test`/`cargo run --example ...` invocations do not accidentally touch hardware.
 
