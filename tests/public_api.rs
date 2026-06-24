@@ -1,4 +1,6 @@
-use hydrasdr_rs::{Bandwidth, Config, DeviceInfo, ErrorKind, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{
+    Bandwidth, Config, DeviceInfo, ErrorKind, GainConfig, GainPreset, RfPort, SampleFormat,
+};
 
 #[test]
 fn public_config_builder_uses_ergonomic_types() {
@@ -43,6 +45,54 @@ fn public_config_builder_validates_rfone_frequency_range() {
             .build()
             .is_ok()
     );
+}
+
+#[test]
+fn public_config_builder_validates_manual_gain_ranges() {
+    assert!(
+        Config::builder()
+            .gain(GainConfig::Manual {
+                lna: Some(14),
+                mixer: Some(15),
+                vga: Some(15),
+                lna_agc: Some(true),
+                mixer_agc: Some(false),
+            })
+            .build()
+            .is_ok()
+    );
+
+    for gain in [
+        GainConfig::Manual {
+            lna: Some(15),
+            mixer: None,
+            vga: None,
+            lna_agc: None,
+            mixer_agc: None,
+        },
+        GainConfig::Manual {
+            lna: None,
+            mixer: Some(16),
+            vga: None,
+            lna_agc: None,
+            mixer_agc: None,
+        },
+        GainConfig::Manual {
+            lna: None,
+            mixer: None,
+            vga: Some(16),
+            lna_agc: None,
+            mixer_agc: None,
+        },
+        GainConfig::Preset(GainPreset::Linearity(22)),
+    ] {
+        assert!(
+            Config::builder()
+                .gain(gain)
+                .build()
+                .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+        );
+    }
 }
 
 #[test]

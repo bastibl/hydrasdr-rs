@@ -3,7 +3,10 @@
 use crate::commands::GainType;
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
-use crate::rfone::{RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ};
+use crate::rfone::{
+    RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ, RFONE_MIXER_MAX_GAIN,
+    RFONE_VGA_MAX_GAIN,
+};
 use crate::types::{DecimationMode, SampleType};
 use crate::usb::control::{AsyncControlBackend, ControlBackend};
 
@@ -485,6 +488,24 @@ fn validate_gain(gain: GainConfig) -> Result<()> {
                 "RFOne preset gain must be in 0..=21",
             ))
         }
+        GainConfig::Manual {
+            lna: Some(value), ..
+        } if value > RFONE_LNA_MAX_GAIN => Err(Error::invalid_config(
+            "gain",
+            "manual LNA gain must be in 0..=14",
+        )),
+        GainConfig::Manual {
+            mixer: Some(value), ..
+        } if value > RFONE_MIXER_MAX_GAIN => Err(Error::invalid_config(
+            "gain",
+            "manual mixer gain must be in 0..=15",
+        )),
+        GainConfig::Manual {
+            vga: Some(value), ..
+        } if value > RFONE_VGA_MAX_GAIN => Err(Error::invalid_config(
+            "gain",
+            "manual VGA gain must be in 0..=15",
+        )),
         _ => Ok(()),
     }
 }
