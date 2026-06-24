@@ -31,6 +31,30 @@ fn public_config_builder_uses_ergonomic_types() {
 }
 
 #[test]
+fn public_config_builder_validates_rfone_frequency_range() {
+    assert!(
+        Config::builder()
+            .frequency_hz(23_999_999)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+    assert!(
+        Config::builder()
+            .frequency_hz(1_800_000_001)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+
+    assert!(Config::builder().frequency_hz(24_000_000).build().is_ok());
+    assert!(
+        Config::builder()
+            .frequency_hz(1_800_000_000)
+            .build()
+            .is_ok()
+    );
+}
+
+#[test]
 fn public_sample_block_is_raw_view_with_metadata() {
     let raw = [1, 2, 3, 4];
     let block = SampleBlock::new(&raw, SampleFormat::RawAdc, 2, 9);

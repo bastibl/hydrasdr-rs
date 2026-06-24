@@ -2,6 +2,13 @@
 name = "hydrasdr-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Rust-native HydraSDR RFOne driver built on nusb."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/hydrasdr-rs"
+keywords = ["hydrasdr", "sdr", "usb", "rfone", "nusb"]
+categories = ["hardware-support", "api-bindings", "asynchronous"]
 
 [features]
 default = []

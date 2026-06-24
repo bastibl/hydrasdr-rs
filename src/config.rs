@@ -3,12 +3,12 @@
 use crate::commands::GainType;
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
+use crate::rfone::{RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ};
 use crate::types::{DecimationMode, SampleType};
 use crate::usb::control::{AsyncControlBackend, ControlBackend};
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
-const MAX_FREQUENCY_HZ: u64 = 10_000_000_000;
 const MIN_SAMPLE_RATE_HZ: u32 = 10_000;
 const MIN_BANDWIDTH_HZ: u32 = 1_000;
 const MAX_PRESET_GAIN: u8 = 21;
@@ -421,10 +421,10 @@ where
 }
 
 fn validate_frequency(value: u64) -> Result<()> {
-    if value == 0 || value > MAX_FREQUENCY_HZ {
+    if !(RFONE_MIN_FREQ_HZ..=RFONE_MAX_FREQ_HZ).contains(&value) {
         return Err(Error::invalid_config(
             "frequency_hz",
-            "must be in 1..=10_000_000_000 Hz",
+            "must be in 24_000_000..=1_800_000_000 Hz",
         ));
     }
     Ok(())

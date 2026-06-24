@@ -36,14 +36,14 @@ The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or async RX streams:
+For async USB operations, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Applications that call `open_async`, `configure_async`, or async RX streams should normally enable one of this crate's forwarding features:
 
 ```sh
 cargo check --features tokio
 cargo check --features smol
 ```
 
-Use `tokio` if the application already runs on Tokio; use `smol` for smaller examples or applications using the smol/async-io ecosystem. Do not enable both.
+Use `tokio` if the application already runs on Tokio; use `smol` for smaller examples or applications using the smol/async-io ecosystem.
 
 ## Synchronous API
 
