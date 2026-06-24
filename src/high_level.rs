@@ -326,6 +326,7 @@ where
             stream: Some(stream),
             converter: Float32IqConverter::default(),
             pending: Vec::new(),
+            pending_start: 0,
             decimation_factor,
             stats: StreamingStats::default(),
             stopped: false,
@@ -814,6 +815,7 @@ pub(crate) struct AsyncF32RxStreamInner<
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     converter: Float32IqConverter,
     pending: Vec<(f32, f32)>,
+    pending_start: usize,
     decimation_factor: usize,
     stats: StreamingStats,
     stopped: bool,
@@ -881,13 +883,18 @@ where
     }
 
     fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let take = (out.len() - *written).min(self.pending.len());
+        let pending = &self.pending[self.pending_start..];
+        let take = (out.len() - *written).min(pending.len());
         if take == 0 {
             return;
         }
 
-        out[*written..*written + take].copy_from_slice(&self.pending[..take]);
-        self.pending.drain(..take);
+        out[*written..*written + take].copy_from_slice(&pending[..take]);
+        self.pending_start += take;
+        if self.pending_start == self.pending.len() {
+            self.pending.clear();
+            self.pending_start = 0;
+        }
         *written += take;
     }
 
@@ -903,6 +910,7 @@ where
             *written += take;
         }
         if take < samples.len() {
+            debug_assert_eq!(self.pending_start, 0);
             self.pending.extend_from_slice(&samples[take..]);
         }
     }

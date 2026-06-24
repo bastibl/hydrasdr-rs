@@ -141,6 +141,7 @@ pub(crate) struct DirectRxStream<B: BulkInBackend> {
     config: StreamingConfig,
     converter: Float32IqConverter,
     pending: Vec<(f32, f32)>,
+    pending_start: usize,
     stats: StreamingStats,
     closed: bool,
 }
@@ -336,6 +337,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             config,
             converter: Float32IqConverter::default(),
             pending: Vec::new(),
+            pending_start: 0,
             stats: StreamingStats::default(),
             closed: false,
         })
@@ -349,6 +351,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             }
             self.bulk_in = None;
             self.pending.clear();
+            self.pending_start = 0;
             self.closed = true;
         }
         self.stats
@@ -415,13 +418,18 @@ impl<B: BulkInBackend> DirectRxStream<B> {
     }
 
     fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let take = (out.len() - *written).min(self.pending.len());
+        let pending = &self.pending[self.pending_start..];
+        let take = (out.len() - *written).min(pending.len());
         if take == 0 {
             return;
         }
 
-        out[*written..*written + take].copy_from_slice(&self.pending[..take]);
-        self.pending.drain(..take);
+        out[*written..*written + take].copy_from_slice(&pending[..take]);
+        self.pending_start += take;
+        if self.pending_start == self.pending.len() {
+            self.pending.clear();
+            self.pending_start = 0;
+        }
         *written += take;
     }
 
@@ -437,6 +445,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             *written += take;
         }
         if take < samples.len() {
+            debug_assert_eq!(self.pending_start, 0);
             self.pending.extend_from_slice(&samples[take..]);
         }
     }
