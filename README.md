@@ -1,6 +1,14 @@
-# hydrasdr-rs
+# HydraSDR Rust Driver (WIP)
 
-Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and sample-block types. The C-port remains inside the crate as the implementation and parity test bed.
+!!! Beware AI Slop !!!
+
+This is mainly an experiment for using [`nusb`](https://crates.io/crates/nusb) for a real Rust-native driver that does *not* require `libusb`.
+There are only a few Rust SDR drivers and the ones I know of are based on `rusb`, which wraps `libusb`.
+Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://github.com/futuresdr/futuresdr), but the [Seify](https://github.com/FutureSDR/seify) SDR hardware abstraction library has only a sync interface at the moment.
+Using this driver, I want to explore an async implementation for Seify.
+In the near future, `nusb` might also support cross-compilation to `WebUSB`, which would allow using the same driver for native and web, which would be awesome.
+
+Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and sample-block types.
 
 Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
 
@@ -12,14 +20,12 @@ Implemented:
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
 - Internal synchronous control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
-- No-hardware public and internal parity tests for constants, control-transfer packing, state handling, error mapping, configuration ordering, and streaming loop behavior.
-- Internal pull RX stream for unpacked `HYDRASDR_SAMPLE_FLOAT32_IQ`, including C-style virtual sample rates and DDC decimation.
-- Hardware-gated smoke tests and sync/async examples for real devices.
+- Complex float 32-bit sample conversion and downsampling (10MHz, 5MHz, and 2.5MHz).
 
 TODO:
 
 - Packed-sample conversion.
-- Public typed sample conversion APIs, such as `Float32Iq` blocks instead of raw USB bytes.
+- Type conversions other than complex float 32-bit.
 
 ## USB dependency and execution model
 
@@ -125,20 +131,6 @@ Reload udev rules, replug the device, and start a new login session after adding
 Some API calls can change receiver state or RF bias. The examples and hardware tests are gated so normal `cargo test`/`cargo run --example ...` invocations do not accidentally touch hardware.
 
 ## Checks and tests
-
-Default verification, no HydraSDR required:
-
-```sh
-cargo check
-cargo test
-cargo fmt --check
-cargo doc --no-deps
-cargo check --examples
-cargo run --example rx_sync --
-cargo run --example rx_async --
-cargo check --examples --features tokio
-cargo check --examples --features smol
-```
 
 Hardware-gated commands, run only with an RFOne connected and USB permissions in place:
 
