@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::commands::{ReceiverMode, RfPort, VendorRequest};
+use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
 use crate::constants::DEFAULT_BUFFER_SIZE;
 use crate::device::HydraSdr;
 use crate::errors::{Error, StatusCode};
@@ -296,16 +296,35 @@ fn high_level_device_caches_info_and_applies_configuration() {
     let mut device = Device::from_direct(direct).unwrap();
 
     assert_eq!(device.info().board_name, "HydraSDR RFOne");
+    assert_eq!(device.info().current_samplerate, 0);
+    assert_eq!(device.info().current_sample_type, SampleType::Float32Iq);
+    assert!(!device.info().current_packing);
     assert_eq!(device.direct().get_sample_type(), SampleType::Float32Iq);
 
     let config = Config::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
+        .bandwidth_hz(1_750_000)
         .sample_format(SampleFormat::RawAdc)
+        .gain(GainPreset::Linearity(12))
+        .packing(true)
         .build()
         .unwrap();
     device.configure(&config).unwrap();
     assert_eq!(device.direct().get_sample_type(), SampleType::Raw);
+    assert_eq!(device.info().current_samplerate, 10_000_000);
+    assert_eq!(device.info().current_bandwidth, 1_750_000);
+    assert_eq!(device.info().current_sample_type, SampleType::Raw);
+    assert!(device.info().current_packing);
+    assert_eq!(
+        device
+            .info()
+            .gains
+            .iter()
+            .find(|gain| gain.gain_type == GainType::Linearity)
+            .map(|gain| gain.value),
+        Some(12)
+    );
     assert!(!device.direct().is_streaming());
 
     assert!(state.borrow().control_requests.len() > 7);

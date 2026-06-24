@@ -557,6 +557,14 @@ impl<C: ControlBackend> HydraSdr<C> {
 }
 
 impl<C> HydraSdr<C> {
+    pub(crate) fn update_cached_device_info(&self, info: &mut DeviceInfo) {
+        info.gains = self.gains.clone();
+        info.current_samplerate = self.current_samplerate;
+        info.current_bandwidth = self.current_bandwidth;
+        info.current_sample_type = self.sample_type;
+        info.current_packing = self.packing_enabled;
+    }
+
     fn build_device_info(
         &self,
         board_id: BoardId,

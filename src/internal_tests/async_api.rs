@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crate::commands::{ReceiverMode, VendorRequest};
+use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::constants::DEFAULT_BUFFER_SIZE;
 use crate::device::HydraSdr;
 use crate::high_level::DeviceInner as Device;
@@ -10,7 +10,7 @@ use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer};
 use crate::types::{BoardId, SampleType};
 use crate::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
-use crate::{Config, SampleFormat};
+use crate::{Config, GainPreset, SampleFormat};
 use futures_lite::future::block_on;
 
 #[derive(Debug, Default)]
@@ -187,6 +187,49 @@ fn async_from_direct_queries_metadata_without_sync_control_calls() {
                 VendorRequest::GetCapabilities,
             ]
         );
+    });
+}
+
+#[test]
+fn async_configure_updates_cached_info_without_sync_control_calls() {
+    block_on(async {
+        let control = TrackedAsyncControl::with_info_responses();
+        let direct = HydraSdr::from_control(control);
+        let mut device = Device::from_direct_async(direct).await.unwrap();
+
+        assert_eq!(device.info().current_samplerate, 0);
+        assert_eq!(device.info().current_sample_type, SampleType::Float32Iq);
+        assert!(!device.info().current_packing);
+
+        device
+            .configure_async(
+                &Config::builder()
+                    .frequency_hz(100_000_000)
+                    .sample_rate_hz(10_000_000)
+                    .bandwidth_hz(1_750_000)
+                    .sample_format(SampleFormat::RawAdc)
+                    .gain(GainPreset::Linearity(12))
+                    .packing(true)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(device.info().current_samplerate, 10_000_000);
+        assert_eq!(device.info().current_bandwidth, 1_750_000);
+        assert_eq!(device.info().current_sample_type, SampleType::Raw);
+        assert!(device.info().current_packing);
+        assert_eq!(
+            device
+                .info()
+                .gains
+                .iter()
+                .find(|gain| gain.gain_type == GainType::Linearity)
+                .map(|gain| gain.value),
+            Some(12)
+        );
+        assert!(device.direct().control().sync_requests.borrow().is_empty());
     });
 }
 

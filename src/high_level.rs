@@ -232,6 +232,9 @@ where
     pub fn configure(&mut self, config: &Config) -> Result<()> {
         config.apply_direct(&mut self.direct)?;
         self.sample_format = config.sample_format();
+        if let Some(info) = &mut self.info {
+            self.direct.update_cached_device_info(info);
+        }
         Ok(())
     }
 
@@ -323,6 +326,9 @@ where
     pub async fn configure_async(&mut self, config: &Config) -> Result<()> {
         config.apply_direct_async(&mut self.direct).await?;
         self.sample_format = config.sample_format();
+        if let Some(info) = &mut self.info {
+            self.direct.update_cached_device_info(info);
+        }
         Ok(())
     }
 
