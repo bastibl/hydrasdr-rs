@@ -140,6 +140,7 @@ pub(crate) struct DirectRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     converter: Float32IqConverter,
+    converted: Vec<(f32, f32)>,
     pending: Vec<(f32, f32)>,
     pending_start: usize,
     stats: StreamingStats,
@@ -336,6 +337,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             bulk_in: Some(bulk_in),
             config,
             converter: Float32IqConverter::default(),
+            converted: Vec::new(),
             pending: Vec::new(),
             pending_start: 0,
             stats: StreamingStats::default(),
@@ -350,6 +352,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
                 bulk_in.cancel_all();
             }
             self.bulk_in = None;
+            self.converted.clear();
             self.pending.clear();
             self.pending_start = 0;
             self.closed = true;
@@ -396,11 +399,11 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             }
 
             self.stats.buffers_received += 1;
-            let mut converted = Vec::new();
+            self.converted.clear();
             self.converter.process_u16le_to_f32iq(
                 &buffer[..actual_len],
                 self.config.decimation_factor,
-                &mut converted,
+                &mut self.converted,
             );
             self.stats.buffers_processed += 1;
 
@@ -410,7 +413,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
                 .ok_or(Error::stream_closed("direct RX stream is closed"))?;
             bulk_in.submit(buffer);
 
-            self.copy_samples(&converted, out, &mut written);
+            self.copy_converted(out, &mut written);
             if written == out.len() {
                 return Ok(written);
             }
@@ -433,20 +436,15 @@ impl<B: BulkInBackend> DirectRxStream<B> {
         *written += take;
     }
 
-    fn copy_samples(
-        &mut self,
-        samples: &[(f32, f32)],
-        out: &mut [(f32, f32)],
-        written: &mut usize,
-    ) {
-        let take = (out.len() - *written).min(samples.len());
+    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let take = (out.len() - *written).min(self.converted.len());
         if take > 0 {
-            out[*written..*written + take].copy_from_slice(&samples[..take]);
+            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
             *written += take;
         }
-        if take < samples.len() {
+        if take < self.converted.len() {
             debug_assert_eq!(self.pending_start, 0);
-            self.pending.extend_from_slice(&samples[take..]);
+            self.pending.extend_from_slice(&self.converted[take..]);
         }
     }
 }

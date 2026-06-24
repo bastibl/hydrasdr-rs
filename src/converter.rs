@@ -126,6 +126,8 @@ pub(crate) struct Float32IqConverter {
     fir_queue: [f32; FIR_HISTORY_SIZE * 2],
     delay_line: [f32; 16],
     decimation_stages: [DecimationStage; DEC_MAX_STAGES],
+    scratch_a: Vec<f32>,
+    scratch_b: Vec<f32>,
     avg: f32,
     fir_index: usize,
     delay_index: usize,
@@ -142,6 +144,8 @@ impl Default for Float32IqConverter {
             fir_queue: [0.0; FIR_HISTORY_SIZE * 2],
             delay_line: [0.0; 16],
             decimation_stages: core::array::from_fn(DecimationStage::new),
+            scratch_a: Vec::new(),
+            scratch_b: Vec::new(),
             avg: 0.0,
             fir_index: 0,
             delay_index: 0,
@@ -159,8 +163,8 @@ impl Float32IqConverter {
     ) -> i32 {
         let output = self.process_u16le(raw, decimation_factor);
 
-        out.reserve(output.len() * core::mem::size_of::<f32>());
-        for value in &output {
+        out.reserve(core::mem::size_of_val(output));
+        for value in output {
             out.extend_from_slice(&value.to_le_bytes());
         }
 
@@ -184,12 +188,13 @@ impl Float32IqConverter {
         pairs
     }
 
-    fn process_u16le(&mut self, raw: &[u8], decimation_factor: usize) -> Vec<f32> {
+    fn process_u16le(&mut self, raw: &[u8], decimation_factor: usize) -> &[f32] {
         let decimation_factor = decimation_factor.max(1);
         let num_stages = decimation_factor.trailing_zeros() as usize;
         let sample_count = raw.len() / 2;
         let usable_samples = sample_count & !(decimation_factor.max(4) - 1);
-        let mut base = Vec::with_capacity(usable_samples);
+        self.scratch_a.clear();
+        self.scratch_a.reserve(usable_samples);
 
         for chunk in raw[..usable_samples * 2].chunks_exact(8) {
             let s0 = u16::from_le_bytes([chunk[0], chunk[1]]);
@@ -216,13 +221,18 @@ impl Float32IqConverter {
             let q0 = self.push_delay(dly_in0);
             let q1 = self.push_delay(dly_in1);
 
-            base.extend_from_slice(&[acc0, q0, acc1, q1]);
+            self.scratch_a.extend_from_slice(&[acc0, q0, acc1, q1]);
         }
 
         if num_stages == 0 {
-            base
+            &self.scratch_a
         } else {
-            self.process_decimation_stages(base, num_stages)
+            let output_is_a = self.process_decimation_stages(num_stages);
+            if output_is_a {
+                &self.scratch_a
+            } else {
+                &self.scratch_b
+            }
         }
     }
 
@@ -252,14 +262,21 @@ impl Float32IqConverter {
         out
     }
 
-    fn process_decimation_stages(&mut self, input: Vec<f32>, num_stages: usize) -> Vec<f32> {
-        let mut current = input;
-        for stage in self.decimation_stages.iter_mut().take(num_stages) {
-            let mut next = Vec::with_capacity(current.len() / 2);
-            stage.process(&current, &mut next);
-            current = next;
+    fn process_decimation_stages(&mut self, num_stages: usize) -> bool {
+        let mut output_is_a = true;
+        for stage_idx in 0..num_stages {
+            if output_is_a {
+                self.scratch_b.clear();
+                self.scratch_b.reserve(self.scratch_a.len() / 2);
+                self.decimation_stages[stage_idx].process(&self.scratch_a, &mut self.scratch_b);
+            } else {
+                self.scratch_a.clear();
+                self.scratch_a.reserve(self.scratch_b.len() / 2);
+                self.decimation_stages[stage_idx].process(&self.scratch_b, &mut self.scratch_a);
+            }
+            output_is_a = !output_is_a;
         }
-        current
+        output_is_a
     }
 }
 

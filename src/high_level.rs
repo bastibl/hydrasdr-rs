@@ -325,6 +325,7 @@ where
             device: self,
             stream: Some(stream),
             converter: Float32IqConverter::default(),
+            converted: Vec::new(),
             pending: Vec::new(),
             pending_start: 0,
             decimation_factor,
@@ -814,6 +815,7 @@ pub(crate) struct AsyncF32RxStreamInner<
     device: &'dev mut DeviceInner<C>,
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     converter: Float32IqConverter,
+    converted: Vec<(f32, f32)>,
     pending: Vec<(f32, f32)>,
     pending_start: usize,
     decimation_factor: usize,
@@ -847,13 +849,13 @@ where
                 return Ok(written);
             };
 
-            let mut converted = Vec::new();
+            self.converted.clear();
             self.converter.process_u16le_to_f32iq(
                 transfer.samples,
                 self.decimation_factor,
-                &mut converted,
+                &mut self.converted,
             );
-            self.copy_samples(&converted, out, &mut written);
+            self.copy_converted(out, &mut written);
             if written == out.len() {
                 return Ok(written);
             }
@@ -898,20 +900,15 @@ where
         *written += take;
     }
 
-    fn copy_samples(
-        &mut self,
-        samples: &[(f32, f32)],
-        out: &mut [(f32, f32)],
-        written: &mut usize,
-    ) {
-        let take = (out.len() - *written).min(samples.len());
+    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let take = (out.len() - *written).min(self.converted.len());
         if take > 0 {
-            out[*written..*written + take].copy_from_slice(&samples[..take]);
+            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
             *written += take;
         }
-        if take < samples.len() {
+        if take < self.converted.len() {
             debug_assert_eq!(self.pending_start, 0);
-            self.pending.extend_from_slice(&samples[take..]);
+            self.pending.extend_from_slice(&self.converted[take..]);
         }
     }
 }
