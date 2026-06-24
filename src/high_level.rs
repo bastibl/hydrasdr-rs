@@ -1,7 +1,5 @@
 //! HydraSDR RFOne sync and async APIs.
 
-#![allow(dead_code)]
-
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::converter::Float32IqConverter;
 use crate::device::HydraSdr;
@@ -215,18 +213,6 @@ where
         })
     }
 
-    /// Wrap an already-open direct handle without querying hardware metadata.
-    ///
-    /// This is mainly useful for no-hardware tests and low-level integration
-    /// harnesses that provide fake direct backends.
-    pub fn from_direct_without_info(direct: HydraSdr<C>) -> Self {
-        Self {
-            direct,
-            info: None,
-            sample_format: SampleFormat::F32Iq,
-        }
-    }
-
     /// Return cached device metadata.
     ///
     /// Handles opened through [`Device::open`], [`Device::open_serial`], or
@@ -262,11 +248,6 @@ where
         Ok(())
     }
 
-    /// Borrow the underlying direct C-style handle.
-    pub const fn direct(&self) -> &HydraSdr<C> {
-        &self.direct
-    }
-
     fn ensure_raw_adc_stream_format(&self) -> Result<()> {
         if self.sample_format != SampleFormat::RawAdc {
             return Err(Error::invalid_config(
@@ -295,9 +276,6 @@ where
     /// Start a synchronous receive stream for raw ADC USB blocks.
     pub fn raw_rx_stream(&mut self) -> Result<RawRxStreamInner<'_, C>> {
         self.ensure_raw_adc_stream_format()?;
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
         let stream = self.direct.start_raw_rx_stream()?;
         Ok(RawRxStreamInner {
             device: self,
@@ -311,9 +289,6 @@ where
     /// Start a synchronous receive stream for converted `F32Iq` samples.
     pub fn f32_rx_stream(&mut self) -> Result<F32RxStreamInner<'_, C>> {
         self.ensure_f32_iq_stream_format()?;
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
         let stream = self.direct.start_rx_stream()?;
         Ok(F32RxStreamInner {
             device: self,
@@ -406,9 +381,6 @@ where
     /// Start an async receive stream for raw ADC USB blocks.
     pub async fn raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStreamInner<'_, C>> {
         self.ensure_raw_adc_stream_format()?;
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
         let stream = self.direct.start_raw_rx_stream_async().await?;
         Ok(AsyncRawRxStreamInner {
             device: self,
@@ -422,9 +394,6 @@ where
     /// Start an async receive stream for converted `F32Iq` samples.
     pub async fn f32_rx_stream_async(&mut self) -> Result<AsyncF32RxStreamInner<'_, C>> {
         self.ensure_f32_iq_stream_format()?;
-        if self.direct.is_streaming() {
-            return Err(Error::stream_closed("direct receiver is already streaming"));
-        }
         let decimation_factor = self.direct.decimation_factor();
         let stream = self.direct.start_raw_rx_stream_async().await?;
         Ok(AsyncF32RxStreamInner {
@@ -1007,14 +976,6 @@ pub(crate) struct FinishRxStreamInnerError<C: ControlBackend> {
 impl<C: ControlBackend> FinishRxStreamInnerError<C> {
     pub(crate) fn into_parts(self) -> (DeviceInner<C>, Error, StreamingStats) {
         (self.device, self.error, self.stats)
-    }
-
-    pub(crate) const fn error(&self) -> &Error {
-        &self.error
-    }
-
-    pub(crate) const fn stats(&self) -> StreamingStats {
-        self.stats
     }
 }
 

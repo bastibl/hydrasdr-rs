@@ -1,7 +1,5 @@
 //! Error/status mapping for the HydraSDR API.
 
-#![allow(dead_code)]
-
 use core::fmt;
 
 /// Status codes mirrored from the C driver.
@@ -86,11 +84,6 @@ impl TryFrom<i32> for StatusCode {
             other => Err(UnknownStatusCode(other)),
         }
     }
-}
-
-/// Return the C status/error macro name for a known status code.
-pub fn error_name(code: StatusCode) -> &'static str {
-    code.name()
 }
 
 /// Error type used by the HydraSDR API.

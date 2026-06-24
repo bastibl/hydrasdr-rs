@@ -1,7 +1,5 @@
 //! USB discovery helpers for HydraSDR RFOne devices.
 
-#![allow(dead_code)]
-
 use nusb::MaybeFuture;
 
 use crate::errors::{Error, Result, StatusCode};
@@ -72,23 +70,6 @@ pub async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
     let devices = nusb::list_devices().await.map_err(Error::from)?;
     Ok(devices
         .filter_map(|device| DeviceDescriptor::from_nusb(&device))
-        .collect())
-}
-
-/// Return parsed serial numbers for visible HydraSDR devices.
-pub fn list_device_serials() -> Result<Vec<u64>> {
-    Ok(list_devices()?
-        .into_iter()
-        .filter_map(|d| d.serial)
-        .collect())
-}
-
-/// Return parsed serial numbers for visible HydraSDR devices through the async path.
-pub async fn list_device_serials_async() -> Result<Vec<u64>> {
-    Ok(list_devices_async()
-        .await?
-        .into_iter()
-        .filter_map(|d| d.serial)
         .collect())
 }
 

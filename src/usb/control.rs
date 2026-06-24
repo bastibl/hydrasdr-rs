@@ -1,7 +1,5 @@
 //! USB control-transfer encoding and the `nusb` backend implementation.
 
-#![allow(dead_code)]
-
 use std::future::Future;
 use std::time::Duration;
 
@@ -13,7 +11,7 @@ use nusb::transfer::{
 
 use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::config::RfPort;
-use crate::constants::{CTRL_TIMEOUT_CHIP_ERASE_MS, CTRL_TIMEOUT_MS};
+use crate::constants::CTRL_TIMEOUT_MS;
 use crate::errors::{Error, Result, StatusCode};
 use crate::streaming::{
     AsyncBulkInBackend, AsyncStreamingBackend, BulkInBackend, BulkInCompletion, StreamingBackend,
@@ -213,11 +211,6 @@ impl VendorControlRequest {
         Self::in_request(VendorRequest::SetRfPort, 0, port as u16, 1)
     }
 
-    /// Encode device reset.
-    pub fn reset() -> Self {
-        Self::in_request(VendorRequest::Reset, 0, 0, 1)
-    }
-
     /// Encode board ID read.
     pub fn board_id_read() -> Self {
         Self::in_request(VendorRequest::BoardIdRead, 0, 0, 1)
@@ -236,122 +229,6 @@ impl VendorControlRequest {
     /// Encode capability-word read.
     pub fn get_capabilities(word: u16) -> Self {
         Self::in_request(VendorRequest::GetCapabilities, 0, word, 4)
-    }
-
-    /// Encode GPIO write using C port/pin packing.
-    pub fn gpio_write(port: u8, pin: u8, value: u8) -> Result<Self> {
-        Ok(Self::out_request(
-            VendorRequest::GpioWrite,
-            value as u16,
-            gpio_port_pin(port, pin)?,
-            Vec::new(),
-        ))
-    }
-
-    /// Encode GPIO read using C port/pin packing.
-    pub fn gpio_read(port: u8, pin: u8) -> Result<Self> {
-        Ok(Self::in_request(
-            VendorRequest::GpioRead,
-            0,
-            gpio_port_pin(port, pin)?,
-            1,
-        ))
-    }
-
-    /// Encode GPIO direction write using C port/pin packing.
-    pub fn gpiodir_write(port: u8, pin: u8, value: u8) -> Result<Self> {
-        Ok(Self::out_request(
-            VendorRequest::GpioDirWrite,
-            value as u16,
-            gpio_port_pin(port, pin)?,
-            Vec::new(),
-        ))
-    }
-
-    /// Encode GPIO direction read using C port/pin packing.
-    pub fn gpiodir_read(port: u8, pin: u8) -> Result<Self> {
-        Ok(Self::in_request(
-            VendorRequest::GpioDirRead,
-            0,
-            gpio_port_pin(port, pin)?,
-            1,
-        ))
-    }
-
-    /// Encode clock-generator register write.
-    pub fn clockgen_write(reg: u8, value: u8) -> Self {
-        Self::out_request(
-            VendorRequest::ClockgenWrite,
-            value as u16,
-            reg as u16,
-            Vec::new(),
-        )
-    }
-
-    /// Encode clock-generator register read.
-    pub fn clockgen_read(reg: u8) -> Self {
-        Self::in_request(VendorRequest::ClockgenRead, 0, reg as u16, 1)
-    }
-
-    /// Encode RF frontend register write.
-    pub fn rf_frontend_write(reg: u16, value: u32) -> Self {
-        Self::out_request(
-            VendorRequest::RfFrontendWrite,
-            (value & 0xff) as u16,
-            reg & 0xff,
-            Vec::new(),
-        )
-    }
-
-    /// Encode RF frontend register read.
-    pub fn rf_frontend_read(reg: u16) -> Self {
-        Self::in_request(VendorRequest::RfFrontendRead, 0, reg & 0xff, 1)
-    }
-
-    /// Encode whole-chip SPI flash erase with the C long timeout.
-    pub fn spiflash_erase() -> Self {
-        Self::out_request_with_timeout(
-            VendorRequest::SpiFlashErase,
-            0,
-            0,
-            Vec::new(),
-            Duration::from_millis(CTRL_TIMEOUT_CHIP_ERASE_MS),
-        )
-    }
-
-    /// Encode SPI flash sector erase with the C long timeout.
-    pub fn spiflash_erase_sector(sector: u16) -> Self {
-        Self::out_request_with_timeout(
-            VendorRequest::SpiFlashEraseSector,
-            sector,
-            0,
-            Vec::new(),
-            Duration::from_millis(CTRL_TIMEOUT_CHIP_ERASE_MS),
-        )
-    }
-
-    /// Encode SPI flash write after validating the C-supported address range.
-    pub fn spiflash_write(addr: u32, data: &[u8]) -> Result<Self> {
-        validate_spiflash_addr(addr)?;
-        Ok(Self::out_request_with_timeout(
-            VendorRequest::SpiFlashWrite,
-            (addr >> 16) as u16,
-            (addr & 0xffff) as u16,
-            data.to_vec(),
-            Duration::from_millis(0),
-        ))
-    }
-
-    /// Encode SPI flash read after validating the C-supported address range.
-    pub fn spiflash_read(addr: u32, len: u16) -> Result<Self> {
-        validate_spiflash_addr(addr)?;
-        Ok(Self::in_request_with_timeout(
-            VendorRequest::SpiFlashRead,
-            (addr >> 16) as u16,
-            (addr & 0xffff) as u16,
-            len as usize,
-            Duration::from_millis(0),
-        ))
     }
 }
 
@@ -524,20 +401,6 @@ impl AsyncBulkInBackend for NusbBulkIn {
     fn cancel_all(&mut self) {
         self.endpoint.cancel_all();
     }
-}
-
-pub fn gpio_port_pin(port: u8, pin: u8) -> Result<u16> {
-    if port > 7 || pin > 31 {
-        return Err(Error::Status(StatusCode::InvalidParam));
-    }
-    Ok(((port as u16) << 5) | pin as u16)
-}
-
-pub fn validate_spiflash_addr(addr: u32) -> Result<()> {
-    if addr > 0x0f_ffff {
-        return Err(Error::Status(StatusCode::InvalidParam));
-    }
-    Ok(())
 }
 
 pub fn decode_u32_le_words(bytes: &[u8]) -> Result<Vec<u32>> {

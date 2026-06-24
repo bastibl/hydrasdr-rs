@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use nusb::MaybeFuture;
 
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
@@ -15,11 +13,9 @@ use crate::rfone::{
 };
 use crate::streaming::{
     AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
-    StreamingState, StreamingStats, Transfer,
+    StreamingState, StreamingStats,
 };
-use crate::types::{
-    BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType, Temperature,
-};
+use crate::types::{BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType};
 use crate::usb::control::{
     AsyncControlBackend, ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
     decode_u32_le_words,
@@ -51,7 +47,6 @@ pub struct HydraSdr<C = NusbControl> {
     decimation_mode: DecimationMode,
     current_bandwidth: u32,
     packing_enabled: bool,
-    reset_command: bool,
     streaming: StreamingState,
 }
 
@@ -71,22 +66,8 @@ impl<C: ControlBackend> HydraSdr<C> {
             decimation_mode: DecimationMode::LowBandwidth,
             current_bandwidth: 0,
             packing_enabled: false,
-            reset_command: false,
             streaming: StreamingState::new(),
         }
-    }
-
-    /// Borrow the underlying control backend.
-    pub fn control(&self) -> &C {
-        &self.control
-    }
-
-    /// Close the direct handle.
-    ///
-    /// This consumes `self`, matching the explicit C close step while relying on Rust drops for
-    /// the USB resources owned by the backend.
-    pub fn close(self) -> Result<()> {
-        Ok(())
     }
 
     /// Read the board ID, matching `hydrasdr_board_id_read`.
@@ -255,25 +236,7 @@ impl<C: ControlBackend> HydraSdr<C> {
             GainType::MixerAgc => self.set_mixer_agc(value),
             GainType::Linearity => self.set_linearity_gain(value),
             GainType::Sensitivity => self.set_sensitivity_gain(value),
-            GainType::Rf | GainType::Filter | GainType::RfAgc | GainType::FilterAgc => {
-                Err(Error::Status(StatusCode::Unsupported))
-            }
-            GainType::Count => Err(Error::Status(StatusCode::InvalidParam)),
         }
-    }
-
-    /// Return the cached descriptor for one gain type.
-    pub fn get_gain(&self, gain_type: GainType) -> Result<GainInfo> {
-        self.gains
-            .iter()
-            .copied()
-            .find(|gain| gain.gain_type == gain_type)
-            .ok_or(Error::Status(StatusCode::Unsupported))
-    }
-
-    /// Return all cached gain descriptors.
-    pub fn get_all_gains(&self) -> Result<Vec<GainInfo>> {
-        Ok(self.gains.clone())
     }
 
     /// Apply the RFOne linearity preset table, matching the C gain choreography.
@@ -322,25 +285,10 @@ impl<C: ControlBackend> HydraSdr<C> {
         Ok(())
     }
 
-    /// Send the reset command and remember that stop paths should not force receiver off again.
-    pub fn reset(&mut self) -> Result<()> {
-        let _ = self.control.control_in(VendorControlRequest::reset());
-        self.reset_command = true;
-        Ok(())
-    }
-
     /// Set the sample type tracked by the direct streaming path.
     pub fn set_sample_type(&mut self, sample_type: SampleType) -> Result<()> {
-        if sample_type == SampleType::End {
-            return Err(Error::Status(StatusCode::InvalidParam));
-        }
         self.sample_type = sample_type;
         Ok(())
-    }
-
-    /// Return the currently selected sample type.
-    pub fn get_sample_type(&self) -> SampleType {
-        self.sample_type
     }
 
     /// Select how virtual IQ sample rates choose a hardware rate and host-side DDC decimation.
@@ -363,110 +311,14 @@ impl<C: ControlBackend> HydraSdr<C> {
         Ok(())
     }
 
-    /// Return the currently selected virtual-rate decimation mode.
-    pub fn decimation_mode(&self) -> DecimationMode {
-        self.decimation_mode
-    }
-
-    /// Write a GPIO value using the C port/pin packing.
-    pub fn gpio_write(&self, port: u8, pin: u8, value: u8) -> Result<()> {
-        self.control_out(VendorControlRequest::gpio_write(port, pin, value)?)
-    }
-
-    /// Read a GPIO value using the C port/pin packing.
-    pub fn gpio_read(&self, port: u8, pin: u8) -> Result<u8> {
-        let data = self.control_in_exact(VendorControlRequest::gpio_read(port, pin)?, 1)?;
-        Ok(data[0])
-    }
-
-    /// Write a GPIO direction bit using the C port/pin packing.
-    pub fn gpiodir_write(&self, port: u8, pin: u8, value: u8) -> Result<()> {
-        self.control_out(VendorControlRequest::gpiodir_write(port, pin, value)?)
-    }
-
-    /// Read a GPIO direction bit using the C port/pin packing.
-    pub fn gpiodir_read(&self, port: u8, pin: u8) -> Result<u8> {
-        let data = self.control_in_exact(VendorControlRequest::gpiodir_read(port, pin)?, 1)?;
-        Ok(data[0])
-    }
-
-    /// Write one clock-generator register.
-    pub fn clockgen_write(&self, reg: u8, value: u8) -> Result<()> {
-        self.control_out(VendorControlRequest::clockgen_write(reg, value))
-    }
-
-    /// Read one clock-generator register.
-    pub fn clockgen_read(&self, reg: u8) -> Result<u8> {
-        let data = self.control_in_exact(VendorControlRequest::clockgen_read(reg), 1)?;
-        Ok(data[0])
-    }
-
-    /// Write one RF frontend register through the direct vendor request.
-    pub fn rf_frontend_write(&self, reg: u16, value: u32) -> Result<()> {
-        self.control_out(VendorControlRequest::rf_frontend_write(reg, value))
-    }
-
-    /// Read one RF frontend register through the direct vendor request.
-    pub fn rf_frontend_read(&self, reg: u16) -> Result<u32> {
-        let data = self.control_in_exact(VendorControlRequest::rf_frontend_read(reg), 1)?;
-        Ok(data[0] as u32)
-    }
-
-    /// Erase the whole SPI flash; this is a direct C-parity hazardous hardware operation.
-    pub fn spiflash_erase(&self) -> Result<()> {
-        self.control_out(VendorControlRequest::spiflash_erase())
-    }
-
-    /// Erase one SPI flash sector.
-    pub fn spiflash_erase_sector(&self, sector: u16) -> Result<()> {
-        self.control_out(VendorControlRequest::spiflash_erase_sector(sector))
-    }
-
-    /// Write bytes to SPI flash using the C address packing.
-    pub fn spiflash_write(&self, addr: u32, data: &[u8]) -> Result<()> {
-        self.control_out(VendorControlRequest::spiflash_write(addr, data)?)
-    }
-
-    /// Read bytes from SPI flash using the C address packing.
-    pub fn spiflash_read(&self, addr: u32, len: u16) -> Result<Vec<u8>> {
-        self.control_in_exact(
-            VendorControlRequest::spiflash_read(addr, len)?,
-            len as usize,
-        )
-    }
-
-    /// Temperature query placeholder; RFOne currently maps this to unsupported.
-    pub fn get_temperature(&self) -> Result<Temperature> {
-        Err(Error::Status(StatusCode::Unsupported))
-    }
-
     /// Set receiver mode directly.
     pub fn receiver_mode(&self, mode: ReceiverMode) -> Result<()> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
     }
 
-    /// Request RX stop and send receiver-off unless a reset command already owns shutdown.
-    pub fn stop_rx(&mut self) -> Result<()> {
-        self.streaming.request_stop();
-        self.receiver_off_if_needed()
-    }
-
-    /// Send receiver-off unless a reset command already owns shutdown.
+    /// Send receiver-off.
     pub(crate) fn receiver_off_if_needed(&self) -> Result<()> {
-        if !self.reset_command {
-            self.receiver_mode(ReceiverMode::Off)?;
-        }
-        Ok(())
-    }
-
-    /// Report whether the direct streaming state machine is currently active.
-    pub fn is_streaming(&self) -> bool {
-        self.streaming.is_streaming()
-    }
-
-    /// Return counters collected by the direct streaming state machine.
-    pub fn streaming_stats(&self) -> StreamingStats {
-        self.streaming.stats()
+        self.receiver_mode(ReceiverMode::Off)
     }
 
     fn sample_rate_config(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
@@ -596,10 +448,7 @@ impl<C> HydraSdr<C> {
     }
 
     fn sample_type_is_iq(&self) -> bool {
-        matches!(
-            self.sample_type,
-            SampleType::Float32Iq | SampleType::Int16Iq | SampleType::Int8Iq | SampleType::Uint8Iq
-        )
+        self.sample_type == SampleType::Float32Iq
     }
 
     fn sample_rate_hardware_config(&self, samplerate: u32) -> Option<(u32, u32)> {
@@ -873,10 +722,6 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
             GainType::MixerAgc => self.set_mixer_agc_async(value).await,
             GainType::Linearity => self.set_linearity_gain_async(value).await,
             GainType::Sensitivity => self.set_sensitivity_gain_async(value).await,
-            GainType::Rf | GainType::Filter | GainType::RfAgc | GainType::FilterAgc => {
-                Err(Error::Status(StatusCode::Unsupported))
-            }
-            GainType::Count => Err(Error::Status(StatusCode::InvalidParam)),
         }
     }
 
@@ -940,15 +785,6 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     pub async fn receiver_mode_async(&self, mode: ReceiverMode) -> Result<()> {
         self.control_out_async(VendorControlRequest::receiver_mode(mode))
             .await
-    }
-
-    /// Async counterpart to [`HydraSdr::stop_rx`].
-    pub async fn stop_rx_async(&mut self) -> Result<()> {
-        self.streaming.request_stop();
-        if !self.reset_command {
-            self.receiver_mode_async(ReceiverMode::Off).await?;
-        }
-        Ok(())
     }
 
     async fn sample_rate_config_async(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
@@ -1073,7 +909,7 @@ where
             }
         };
 
-        match RawRxStream::start(bulk_in, self.streaming.config(), self.sample_type) {
+        match RawRxStream::start(bulk_in, self.streaming.config()) {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off);
@@ -1094,10 +930,7 @@ where
         mut stream: RawRxStream<C::BulkIn>,
     ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
-        if !self.reset_command {
-            return (stats, self.receiver_mode(ReceiverMode::Off));
-        }
-        (stats, Ok(()))
+        (stats, self.receiver_mode(ReceiverMode::Off))
     }
 
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
@@ -1138,39 +971,7 @@ where
         mut stream: DirectRxStream<C::BulkIn>,
     ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
-        if !self.reset_command {
-            return (stats, self.receiver_mode(ReceiverMode::Off));
-        }
-        (stats, Ok(()))
-    }
-
-    /// Start direct synchronous RX streaming.
-    ///
-    /// The callback contract mirrors C: each callback receives raw USB bytes and returning
-    /// non-zero stops the stream. The method forces receiver OFF -> RX before streaming and runs
-    /// stop cleanup afterwards.
-    pub fn start_rx<F>(&mut self, callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(&Transfer<'_>) -> i32,
-    {
-        self.receiver_mode(ReceiverMode::Off)?;
-        self.receiver_mode(ReceiverMode::Rx)?;
-
-        let bulk_in = match self.control.bulk_in(RFONE_RX_ENDPOINT) {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off);
-                return Err(err);
-            }
-        };
-        let stream_result = self.streaming.run(bulk_in, self.sample_type, callback);
-        let stop_result = self.stop_rx();
-
-        match (stream_result, stop_result) {
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-            (Ok(stats), Ok(())) => Ok(stats),
-        }
+        (stats, self.receiver_mode(ReceiverMode::Off))
     }
 }
 
@@ -1191,7 +992,7 @@ where
             }
         };
 
-        match AsyncRawRxStream::start(bulk_in, self.streaming.config(), self.sample_type).await {
+        match AsyncRawRxStream::start(bulk_in, self.streaming.config()).await {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode_async(ReceiverMode::Off).await;
@@ -1206,38 +1007,8 @@ where
         mut stream: AsyncRawRxStream<C::BulkIn>,
     ) -> Result<StreamingStats> {
         let stats = stream.close();
-        if !self.reset_command {
-            self.receiver_mode_async(ReceiverMode::Off).await?;
-        }
-        Ok(stats)
-    }
-
-    /// Async counterpart to [`HydraSdr::start_rx`].
-    pub async fn start_rx_async<F>(&mut self, callback: F) -> Result<StreamingStats>
-    where
-        F: FnMut(&Transfer<'_>) -> i32,
-    {
         self.receiver_mode_async(ReceiverMode::Off).await?;
-        self.receiver_mode_async(ReceiverMode::Rx).await?;
-
-        let bulk_in = match self.control.bulk_in_async(RFONE_RX_ENDPOINT).await {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
-                return Err(err);
-            }
-        };
-        let stream_result = self
-            .streaming
-            .run_async(bulk_in, self.sample_type, callback)
-            .await;
-        let stop_result = self.stop_rx_async().await;
-
-        match (stream_result, stop_result) {
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-            (Ok(stats), Ok(())) => Ok(stats),
-        }
+        Ok(stats)
     }
 }
 

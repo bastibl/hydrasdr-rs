@@ -1,7 +1,5 @@
 //! Public data structures returned by the HydraSDR API.
 
-#![allow(dead_code)]
-
 /// HydraSDR board identifier values mirrored from the C driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -28,36 +26,12 @@ impl TryFrom<u8> for BoardId {
     }
 }
 
-/// Return the C-style human-readable board name for a raw board ID byte.
-pub fn board_id_name_raw(board_id: u8) -> &'static str {
-    match BoardId::try_from(board_id) {
-        Ok(BoardId::Invalid) => "Invalid Board ID",
-        Ok(BoardId::ProtoHydraSdr) => "HydraSDR RFOne Legacy VID/PID",
-        Ok(BoardId::HydraSdrRfOneOfficial) => "HydraSDR RFOne Official VID/PID",
-        Err(_) => "Unknown Board ID",
-    }
-}
-
 /// Sample type values accepted by the direct API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SampleType {
     Float32Iq = 0,
-    Float32Real = 1,
-    Int16Iq = 2,
-    Int16Real = 3,
-    Uint16Real = 4,
     Raw = 5,
-    Int8Iq = 6,
-    Uint8Iq = 7,
-    Int8Real = 8,
-    Uint8Real = 9,
-    End = 10,
-}
-
-/// Return the C capability bit for a sample type.
-pub const fn sample_type_bit(sample_type: SampleType) -> u16 {
-    1u16 << (sample_type as u8)
 }
 
 /// Host-side IQ decimation mode.
@@ -65,14 +39,6 @@ pub const fn sample_type_bit(sample_type: SampleType) -> u16 {
 pub enum DecimationMode {
     LowBandwidth,
     HighDefinition,
-}
-
-/// Library version tuple mirroring the C struct layout.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LibVersion {
-    pub major_version: u32,
-    pub minor_version: u32,
-    pub revision: u32,
 }
 
 /// Part ID and serial-number words returned by the firmware.
@@ -111,13 +77,6 @@ pub struct RfPortInfo {
     pub bias_tee: Option<BiasTeeInfo>,
 }
 
-/// Hardware component metadata returned in [`DeviceInfo`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct ComponentInfo {
-    pub name: &'static str,
-    pub register_count: u32,
-}
-
 /// Device metadata returned by the ergonomic API.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
@@ -128,14 +87,4 @@ pub struct DeviceInfo {
     pub max_frequency: u64,
     pub rf_ports: Vec<RfPortInfo>,
     pub current_config: Option<crate::Config>,
-}
-
-/// Temperature reading shape reserved for future hardware support.
-///
-/// RFOne temperature querying is currently reported as unsupported.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Temperature {
-    pub valid: bool,
-    pub temperature_celsius: f32,
-    pub temperature_fahrenheit: f32,
 }
