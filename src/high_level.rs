@@ -1,14 +1,13 @@
 //! HydraSDR RFOne sync and async APIs.
 
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
-use crate::converter::Float32IqConverter;
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 use std::time::Duration;
 
 use crate::streaming::{
-    AsyncRawRxStream as DirectAsyncRawRxStream, AsyncStreamingBackend, DirectRxStream,
-    RawRxStream as DirectRawRxStream, StreamingBackend, StreamingStats, Transfer,
+    AsyncDirectRxStream, AsyncRawRxStream as DirectAsyncRawRxStream, AsyncStreamingBackend,
+    DirectRxStream, RawRxStream as DirectRawRxStream, StreamingBackend, StreamingStats, Transfer,
 };
 use crate::types::DeviceInfo;
 use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
@@ -319,16 +318,10 @@ where
     /// Start an async receive stream for converted `F32Iq` samples.
     pub(crate) async fn f32_rx_stream_async(&mut self) -> Result<AsyncF32RxStreamInner<'_, C>> {
         self.ensure_f32_iq_stream_format()?;
-        let decimation_factor = self.direct.decimation_factor();
-        let stream = self.direct.start_raw_rx_stream_async().await?;
+        let stream = self.direct.start_rx_stream_async().await?;
         Ok(AsyncF32RxStreamInner {
             device: self,
             stream: Some(stream),
-            converter: Float32IqConverter::default(),
-            converted: Vec::new(),
-            pending: Vec::new(),
-            pending_start: 0,
-            decimation_factor,
             stats: StreamingStats::default(),
             stopped: false,
             finished: false,
@@ -816,12 +809,7 @@ pub(crate) struct AsyncF32RxStreamInner<
     C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
 > {
     device: &'dev mut DeviceInner<C>,
-    stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
-    converter: Float32IqConverter,
-    converted: Vec<(f32, f32)>,
-    pending: Vec<(f32, f32)>,
-    pending_start: usize,
-    decimation_factor: usize,
+    stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
     stopped: bool,
     finished: bool,
@@ -833,36 +821,11 @@ where
 {
     /// Read converted `(I, Q)` samples into `out`.
     pub(crate) async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-
-        let mut written = 0;
-        self.copy_pending(out, &mut written);
-        if written == out.len() {
-            return Ok(written);
-        }
-
-        loop {
-            let stream = self
-                .stream
-                .as_mut()
-                .ok_or(Error::stream_closed("async F32 RX stream is closed"))?;
-            let Some(transfer) = stream.next_transfer().await? else {
-                return Ok(written);
-            };
-
-            self.converted.clear();
-            self.converter.process_u16le_to_f32iq(
-                transfer.samples,
-                self.decimation_factor,
-                &mut self.converted,
-            );
-            self.copy_converted(out, &mut written);
-            if written == out.len() {
-                return Ok(written);
-            }
-        }
+        self.stream
+            .as_mut()
+            .ok_or(Error::stream_closed("async F32 RX stream is closed"))?
+            .read_float32_iq(out)
+            .await
     }
 
     /// Request receiver-off cleanup. Repeated calls are no-ops.
@@ -872,7 +835,7 @@ where
                 .stream
                 .take()
                 .ok_or(Error::stream_closed("async F32 RX stream is closed"))?;
-            self.stats = self.device.direct.stop_raw_rx_stream_async(stream).await?;
+            self.stats = self.device.direct.stop_rx_stream_async(stream).await?;
             self.stopped = true;
         }
         Ok(())
@@ -885,34 +848,6 @@ where
         }
         self.finished = true;
         Ok(self.stats)
-    }
-
-    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let pending = &self.pending[self.pending_start..];
-        let take = (out.len() - *written).min(pending.len());
-        if take == 0 {
-            return;
-        }
-
-        out[*written..*written + take].copy_from_slice(&pending[..take]);
-        self.pending_start += take;
-        if self.pending_start == self.pending.len() {
-            self.pending.clear();
-            self.pending_start = 0;
-        }
-        *written += take;
-    }
-
-    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let take = (out.len() - *written).min(self.converted.len());
-        if take > 0 {
-            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
-            *written += take;
-        }
-        if take < self.converted.len() {
-            debug_assert_eq!(self.pending_start, 0);
-            self.pending.extend_from_slice(&self.converted[take..]);
-        }
     }
 }
 

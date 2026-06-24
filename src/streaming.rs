@@ -249,6 +249,19 @@ pub(crate) struct AsyncRawRxStream<B: AsyncBulkInBackend> {
     closed: bool,
 }
 
+/// Persistent async pull stream for unpacked F32 IQ RX.
+#[derive(Debug)]
+pub(crate) struct AsyncDirectRxStream<B: AsyncBulkInBackend> {
+    bulk_in: Option<B>,
+    config: StreamingConfig,
+    converter: Float32IqConverter,
+    converted: Vec<(f32, f32)>,
+    pending: Vec<(f32, f32)>,
+    pending_start: usize,
+    stats: StreamingStats,
+    closed: bool,
+}
+
 impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
     pub(crate) async fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
         bulk_in.clear_halt_async().await?;
@@ -320,6 +333,127 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
 }
 
 impl<B: AsyncBulkInBackend> Drop for AsyncRawRxStream<B> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
+    pub(crate) async fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
+        bulk_in.clear_halt_async().await?;
+        while bulk_in.pending() < config.transfer_count {
+            let buffer = bulk_in.allocate(config_current_buffer_size(config));
+            bulk_in.submit(buffer);
+        }
+
+        Ok(Self {
+            bulk_in: Some(bulk_in),
+            config,
+            converter: Float32IqConverter::default(),
+            converted: Vec::new(),
+            pending: Vec::new(),
+            pending_start: 0,
+            stats: StreamingStats::default(),
+            closed: false,
+        })
+    }
+
+    /// Close the USB queue by cancelling pending transfers.
+    pub(crate) fn close(&mut self) -> StreamingStats {
+        if !self.closed {
+            if let Some(bulk_in) = self.bulk_in.as_mut() {
+                bulk_in.cancel_all();
+            }
+            self.bulk_in = None;
+            self.converted.clear();
+            self.pending.clear();
+            self.pending_start = 0;
+            self.closed = true;
+        }
+        self.stats
+    }
+
+    /// Read converted `(I, Q)` float samples into `out`.
+    pub(crate) async fn read_float32_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+        if self.closed {
+            return Err(Error::stream_closed("async direct RX stream is closed"));
+        }
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        self.copy_pending(out, &mut written);
+        if written == out.len() {
+            return Ok(written);
+        }
+
+        loop {
+            let bulk_in = self
+                .bulk_in
+                .as_mut()
+                .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+            let completion = bulk_in.next_complete_async().await;
+            completion.status?;
+            let buffer = completion.buffer;
+            let actual_len = completion.actual_len;
+            if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
+                self.stats.buffers_dropped += 1;
+                return Err(Error::status(StatusCode::LibUsb));
+            }
+
+            self.stats.buffers_received += 1;
+            self.converted.clear();
+            self.converter.process_u16le_to_f32iq(
+                &buffer[..actual_len],
+                self.config.decimation_factor,
+                &mut self.converted,
+            );
+            self.stats.buffers_processed += 1;
+
+            let bulk_in = self
+                .bulk_in
+                .as_mut()
+                .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+            bulk_in.submit(buffer);
+
+            self.copy_converted(out, &mut written);
+            if written == out.len() {
+                return Ok(written);
+            }
+        }
+    }
+
+    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let pending = &self.pending[self.pending_start..];
+        let take = (out.len() - *written).min(pending.len());
+        if take == 0 {
+            return;
+        }
+
+        out[*written..*written + take].copy_from_slice(&pending[..take]);
+        self.pending_start += take;
+        if self.pending_start == self.pending.len() {
+            self.pending.clear();
+            self.pending_start = 0;
+        }
+        *written += take;
+    }
+
+    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let take = (out.len() - *written).min(self.converted.len());
+        if take > 0 {
+            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
+            *written += take;
+        }
+        if take < self.converted.len() {
+            debug_assert_eq!(self.pending_start, 0);
+            self.pending.extend_from_slice(&self.converted[take..]);
+        }
+    }
+}
+
+impl<B: AsyncBulkInBackend> Drop for AsyncDirectRxStream<B> {
     fn drop(&mut self) {
         let _ = self.close();
     }
@@ -478,4 +612,81 @@ fn remaining_timeout(deadline: Option<Instant>, fallback: Duration) -> Duration 
     deadline.map_or(fallback, |deadline| {
         deadline.saturating_duration_since(Instant::now())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use futures_lite::future::block_on;
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct FakeAsyncBulkIn {
+        submitted: VecDeque<Vec<u8>>,
+        submit_count: usize,
+        cancelled: bool,
+    }
+
+    impl AsyncBulkInBackend for FakeAsyncBulkIn {
+        type Buffer = Vec<u8>;
+
+        async fn clear_halt_async(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn allocate(&self, len: usize) -> Self::Buffer {
+            vec![0; len]
+        }
+
+        fn submit(&mut self, buffer: Self::Buffer) {
+            self.submit_count += 1;
+            self.submitted.push_back(buffer);
+        }
+
+        fn pending(&self) -> usize {
+            self.submitted.len()
+        }
+
+        async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
+            let buffer = self
+                .submitted
+                .pop_front()
+                .expect("fake async bulk queue should contain a submitted buffer");
+            BulkInCompletion {
+                actual_len: buffer.len(),
+                buffer,
+                status: Ok(()),
+            }
+        }
+
+        fn cancel_all(&mut self) {
+            self.cancelled = true;
+            self.submitted.clear();
+        }
+    }
+
+    #[test]
+    fn async_f32_read_resubmits_completed_buffer_before_returning() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+                .await
+                .expect("start fake async stream");
+            let initial_submit_count = stream.bulk_in.as_ref().expect("bulk in").submit_count;
+            assert_eq!(initial_submit_count, RFONE_TRANSFER_COUNT as usize);
+
+            let mut out = [(0.0, 0.0); 1];
+            let read = stream
+                .read_float32_iq(&mut out)
+                .await
+                .expect("read converted samples");
+
+            let bulk_in = stream.bulk_in.as_ref().expect("bulk in");
+            assert_eq!(read, out.len());
+            assert_eq!(bulk_in.submit_count, initial_submit_count + 1);
+            assert_eq!(bulk_in.pending(), RFONE_TRANSFER_COUNT as usize);
+        });
+    }
 }

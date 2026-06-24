@@ -12,8 +12,8 @@ use crate::rfone::{
     default_gain_infos, rf_port_infos,
 };
 use crate::streaming::{
-    AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
-    StreamingState, StreamingStats,
+    AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream,
+    StreamingBackend, StreamingState, StreamingStats,
 };
 use crate::types::{BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType};
 use crate::usb::control::{
@@ -415,10 +415,6 @@ impl<C> HydraSdr<C> {
     pub(crate) fn update_cached_device_info(&self, info: &mut DeviceInfo) {
         let _ = self;
         let _ = info;
-    }
-
-    pub(crate) const fn decimation_factor(&self) -> usize {
-        self.decimation_factor as usize
     }
 
     fn build_device_info(
@@ -1013,6 +1009,42 @@ where
     pub(crate) async fn stop_raw_rx_stream_async(
         &mut self,
         mut stream: AsyncRawRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
+        let stats = stream.close();
+        self.receiver_mode_async(ReceiverMode::Off).await?;
+        Ok(stats)
+    }
+
+    /// Start a persistent async pull RX stream for unpacked float32 IQ samples.
+    pub(crate) async fn start_rx_stream_async(&mut self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
+        if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
+            return Err(Error::status(StatusCode::Unsupported));
+        }
+
+        self.receiver_mode_async(ReceiverMode::Off).await?;
+        self.receiver_mode_async(ReceiverMode::Rx).await?;
+
+        let bulk_in = match self.control.bulk_in_async(RFONE_RX_ENDPOINT).await {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
+                return Err(err);
+            }
+        };
+
+        match AsyncDirectRxStream::start(bulk_in, self.streaming.config()).await {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Stop a persistent async pull RX stream and return its accumulated counters.
+    pub(crate) async fn stop_rx_stream_async(
+        &mut self,
+        mut stream: AsyncDirectRxStream<C::BulkIn>,
     ) -> Result<StreamingStats> {
         let stats = stream.close();
         self.receiver_mode_async(ReceiverMode::Off).await?;
