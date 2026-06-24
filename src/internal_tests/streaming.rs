@@ -23,6 +23,7 @@ struct FakeState {
     wait_count: usize,
     cancelled: bool,
     cancel_count: usize,
+    fail_bulk_in: bool,
     completions: VecDeque<BulkInCompletion<Vec<u8>>>,
 }
 
@@ -44,6 +45,12 @@ impl FakeDevice {
             .collect();
         this
     }
+
+    fn with_failing_bulk_in() -> Self {
+        let this = Self::default();
+        this.state.borrow_mut().fail_bulk_in = true;
+        this
+    }
 }
 
 impl ControlBackend for FakeDevice {
@@ -62,7 +69,12 @@ impl StreamingBackend for FakeDevice {
     type BulkIn = FakeBulkIn;
 
     fn bulk_in(&self, endpoint: u8) -> crate::Result<Self::BulkIn> {
-        self.state.borrow_mut().opened_endpoints.push(endpoint);
+        let mut state = self.state.borrow_mut();
+        state.opened_endpoints.push(endpoint);
+        if state.fail_bulk_in {
+            return Err(StatusCode::LibUsb.into());
+        }
+        drop(state);
         Ok(FakeBulkIn {
             endpoint,
             state: self.state.clone(),
@@ -131,6 +143,30 @@ fn receiver_modes(state: &FakeState) -> Vec<u16> {
         .filter(|request| request.request == VendorRequest::ReceiverMode)
         .map(|request| request.value)
         .collect()
+}
+
+#[test]
+fn start_rx_turns_receiver_off_when_endpoint_open_fails() {
+    let backend = FakeDevice::with_failing_bulk_in();
+    let state = backend.state.clone();
+    let mut dev = HydraSdr::from_control(backend);
+
+    let err = dev.start_rx(|_| 0).unwrap_err();
+
+    let state = state.borrow();
+    assert_eq!(err.status_code(), StatusCode::LibUsb);
+    assert_eq!(
+        receiver_modes(&state),
+        vec![
+            ReceiverMode::Off as u16,
+            ReceiverMode::Rx as u16,
+            ReceiverMode::Off as u16,
+        ]
+    );
+    assert_eq!(state.opened_endpoints, vec![RFONE_RX_ENDPOINT]);
+    assert!(state.cleared_halts.is_empty());
+    assert!(!state.cancelled);
+    assert!(!dev.is_streaming());
 }
 
 #[test]

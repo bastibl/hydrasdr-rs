@@ -1165,7 +1165,13 @@ where
         self.receiver_mode(ReceiverMode::Off)?;
         self.receiver_mode(ReceiverMode::Rx)?;
 
-        let bulk_in = self.control.bulk_in(RFONE_RX_ENDPOINT)?;
+        let bulk_in = match self.control.bulk_in(RFONE_RX_ENDPOINT) {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode(ReceiverMode::Off);
+                return Err(err);
+            }
+        };
         let stream_result = self.streaming.run(bulk_in, self.sample_type, callback);
         let stop_result = self.stop_rx();
 
@@ -1223,7 +1229,13 @@ where
         self.receiver_mode_async(ReceiverMode::Off).await?;
         self.receiver_mode_async(ReceiverMode::Rx).await?;
 
-        let bulk_in = self.control.bulk_in_async(RFONE_RX_ENDPOINT).await?;
+        let bulk_in = match self.control.bulk_in_async(RFONE_RX_ENDPOINT).await {
+            Ok(bulk_in) => bulk_in,
+            Err(err) => {
+                let _ = self.receiver_mode_async(ReceiverMode::Off).await;
+                return Err(err);
+            }
+        };
         let stream_result = self
             .streaming
             .run_async(bulk_in, self.sample_type, callback)

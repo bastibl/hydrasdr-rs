@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::constants::DEFAULT_BUFFER_SIZE;
 use crate::device::HydraSdr;
+use crate::errors::StatusCode;
 use crate::high_level::DeviceInner as Device;
 use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer};
@@ -244,6 +245,7 @@ struct FakeAsyncState {
     pending_count: usize,
     async_next_count: usize,
     cancelled: bool,
+    fail_bulk_in: bool,
     completions: VecDeque<BulkInCompletion<Vec<u8>>>,
 }
 
@@ -263,6 +265,12 @@ impl FakeAsyncDevice {
                 status: Ok(()),
             })
             .collect();
+        this
+    }
+
+    fn with_failing_bulk_in() -> Self {
+        let this = Self::default();
+        this.state.borrow_mut().fail_bulk_in = true;
         this
     }
 
@@ -343,7 +351,12 @@ impl AsyncStreamingBackend for FakeAsyncDevice {
     type BulkIn = FakeAsyncBulkIn;
 
     async fn bulk_in_async(&self, endpoint: u8) -> crate::Result<Self::BulkIn> {
-        self.state.borrow_mut().opened_endpoints.push(endpoint);
+        let mut state = self.state.borrow_mut();
+        state.opened_endpoints.push(endpoint);
+        if state.fail_bulk_in {
+            return Err(StatusCode::LibUsb.into());
+        }
+        drop(state);
         Ok(FakeAsyncBulkIn {
             endpoint,
             state: self.state.clone(),
@@ -398,6 +411,38 @@ impl AsyncBulkInBackend for FakeAsyncBulkIn {
     fn cancel_all(&mut self) {
         self.state.borrow_mut().cancelled = true;
     }
+}
+
+#[test]
+fn async_start_rx_turns_receiver_off_when_endpoint_open_fails() {
+    block_on(async {
+        let backend = FakeAsyncDevice::with_failing_bulk_in();
+        let state = backend.state.clone();
+        let mut dev = HydraSdr::from_control(backend);
+
+        let err = dev.start_rx_async(|_| 0).await.unwrap_err();
+
+        let state = state.borrow();
+        let receiver_modes: Vec<_> = state
+            .control_requests
+            .iter()
+            .filter(|request| request.request == VendorRequest::ReceiverMode)
+            .map(|request| request.value)
+            .collect();
+        assert_eq!(err.status_code(), StatusCode::LibUsb);
+        assert_eq!(
+            receiver_modes,
+            vec![
+                ReceiverMode::Off as u16,
+                ReceiverMode::Rx as u16,
+                ReceiverMode::Off as u16,
+            ]
+        );
+        assert_eq!(state.opened_endpoints, vec![RFONE_RX_ENDPOINT]);
+        assert!(state.async_cleared_halts.is_empty());
+        assert!(!state.cancelled);
+        assert!(!dev.is_streaming());
+    });
 }
 
 #[test]
