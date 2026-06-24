@@ -35,6 +35,8 @@ pub enum Bandwidth {
     /// Leave bandwidth selection to firmware defaults.
     Auto,
     /// Set an explicit bandwidth in Hz before setting the sample rate.
+    ///
+    /// Manual bandwidths must be in the inclusive range `1_000..=65_535_999`.
     ManualHz(u32),
 }
 
@@ -42,8 +44,11 @@ pub enum Bandwidth {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum RfPort {
+    /// First RF input port.
     Rx0 = 0,
+    /// Second RF input port.
     Rx1 = 1,
+    /// Third RF input port.
     Rx2 = 2,
 }
 
@@ -51,8 +56,12 @@ pub enum RfPort {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
     /// Raw ADC USB blocks at the selected firmware/hardware sample rate.
+    ///
+    /// Raw ADC sample rates must be in the inclusive range `10_000..=65_535_999` Hz.
     RawAdc,
     /// Converted 32-bit float IQ samples with optional host-side decimation.
+    ///
+    /// Float IQ sample rates must be in the inclusive range `10_000..=32_767_999` Hz.
     F32Iq,
 }
 
@@ -83,10 +92,21 @@ pub enum GainConfig {
     Preset(GainPreset),
     /// Apply explicit component gains/AGC bits where present.
     Manual {
+        /// LNA gain value, if explicitly configured.
+        ///
+        /// RFOne accepts values in the inclusive range `0..=14`.
         lna: Option<u8>,
+        /// Mixer gain value, if explicitly configured.
+        ///
+        /// RFOne accepts values in the inclusive range `0..=15`.
         mixer: Option<u8>,
+        /// VGA gain value, if explicitly configured.
+        ///
+        /// RFOne accepts values in the inclusive range `0..=15`.
         vga: Option<u8>,
+        /// LNA AGC enable state, if explicitly configured.
         lna_agc: Option<bool>,
+        /// Mixer AGC enable state, if explicitly configured.
         mixer_agc: Option<bool>,
     },
 }
@@ -294,55 +314,89 @@ pub struct ConfigBuilder {
 }
 
 impl ConfigBuilder {
+    /// Set the tuned center frequency in Hz.
+    ///
+    /// RFOne accepts center frequencies in the inclusive range
+    /// `24_000_000..=1_800_000_000` Hz.
     pub fn frequency_hz(mut self, value: u64) -> Self {
         self.config.frequency_hz = value;
         self
     }
 
+    /// Set the ADC/sample rate in Hz.
+    ///
+    /// [`SampleFormat::RawAdc`] accepts `10_000..=65_535_999` Hz.
+    /// [`SampleFormat::F32Iq`] accepts `10_000..=32_767_999` Hz because
+    /// the hardware rate is doubled before host-side IQ conversion.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config.sample_rate_hz = value;
         self
     }
 
+    /// Set the analog bandwidth policy.
+    ///
+    /// [`Bandwidth::ManualHz`] values must be in the inclusive range
+    /// `1_000..=65_535_999` Hz.
     pub fn bandwidth(mut self, value: Bandwidth) -> Self {
         self.config.bandwidth = value;
         self
     }
 
+    /// Set an explicit analog bandwidth in Hz.
+    ///
+    /// This is shorthand for [`ConfigBuilder::bandwidth`] with
+    /// [`Bandwidth::ManualHz`]. Values must be in the inclusive range
+    /// `1_000..=65_535_999` Hz.
     pub fn bandwidth_hz(self, value: u32) -> Self {
         self.bandwidth(Bandwidth::ManualHz(value))
     }
 
+    /// Set the high-level sample format.
+    ///
+    /// The sample format determines which sample-rate range is valid.
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config.sample_format = value;
         self
     }
 
+    /// Set the firmware/host decimation policy for float IQ samples.
+    ///
+    /// Decimation is only valid with [`SampleFormat::F32Iq`].
     pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
         self.config.decimation_mode = value;
         self
     }
 
+    /// Select the RF input port.
     pub fn rf_port(mut self, value: RfPort) -> Self {
         self.config.rf_port = Some(value);
         self
     }
 
+    /// Set the gain configuration.
+    ///
+    /// Preset gain indexes must be in the inclusive range `0..=21`.
+    /// Manual component gains use the ranges documented on [`GainConfig::Manual`].
     pub fn gain(mut self, value: impl Into<GainConfig>) -> Self {
         self.config.gain = value.into();
         self
     }
 
+    /// Enable or disable the RF port bias tee.
     pub fn bias_tee(mut self, enabled: bool) -> Self {
         self.config.bias_tee = Some(enabled);
         self
     }
 
+    /// Enable or disable packed raw-sample transfers.
+    ///
+    /// Packing is only valid with [`SampleFormat::RawAdc`].
     pub fn packing(mut self, enabled: bool) -> Self {
         self.config.packing = enabled;
         self
     }
 
+    /// Validate and build a reusable configuration.
     pub fn build(self) -> Result<Config> {
         self.config.validate()?;
         Ok(self.config)

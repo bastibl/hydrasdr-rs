@@ -28,10 +28,15 @@ pub(crate) const USB_DEVICE_IDS: &[UsbDeviceId] = &[
 /// Device information collected from `nusb` without opening the interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceDescriptor {
+    /// USB vendor ID.
     pub vid: u16,
+    /// USB product ID.
     pub pid: u16,
+    /// Static board description matched from the known VID/PID table.
     pub description: &'static str,
+    /// Parsed 64-bit RFOne serial number, if the device reports one.
     pub serial: Option<u64>,
+    /// USB product string, if the backend reports one.
     pub product_string: Option<String>,
 }
 

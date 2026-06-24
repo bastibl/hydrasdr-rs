@@ -44,3 +44,6 @@ jobs:
 
       - name: Run doc tests with all features
         run: cargo test --locked --doc --all-features
+
+      - name: Check public API docs
+        run: cargo doc --locked --no-deps --all-features

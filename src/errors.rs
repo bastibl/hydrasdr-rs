@@ -57,12 +57,19 @@ enum ErrorRepr {
 /// Stable high-level error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
+    /// A provided configuration value failed validation.
     InvalidConfig,
+    /// No matching HydraSDR device was found.
     NotFound,
+    /// The device or USB resource is already in use.
     Busy,
+    /// The requested operation is not supported by the backend or device.
     Unsupported,
+    /// The USB backend returned an error.
     Usb,
+    /// The stream was already stopped, finished, or otherwise closed.
     StreamClosed,
+    /// Any other driver or backend error.
     Other,
 }
 

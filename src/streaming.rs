@@ -23,8 +23,11 @@ pub(crate) struct Transfer<'a> {
 /// Counters collected during a direct streaming run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StreamingStats {
+    /// Number of USB buffers completed by the backend.
     pub buffers_received: u64,
+    /// Number of buffers successfully processed by the streaming layer.
     pub buffers_processed: u64,
+    /// Number of buffers dropped because the backend reported an error.
     pub buffers_dropped: u64,
 }
 

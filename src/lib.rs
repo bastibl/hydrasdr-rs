@@ -37,6 +37,8 @@
 //! }
 //! ```
 
+#![deny(missing_docs)]
+
 mod commands;
 mod config;
 mod constants;

@@ -375,51 +375,84 @@ impl DeviceBuilder {
         self
     }
 
+    /// Set the tuned center frequency in Hz.
+    ///
+    /// RFOne accepts center frequencies in the inclusive range
+    /// `24_000_000..=1_800_000_000` Hz.
     pub fn frequency_hz(mut self, value: u64) -> Self {
         self.config = self.config.frequency_hz(value);
         self
     }
 
+    /// Set the ADC/sample rate in Hz.
+    ///
+    /// [`SampleFormat::RawAdc`] accepts `10_000..=65_535_999` Hz.
+    /// [`SampleFormat::F32Iq`] accepts `10_000..=32_767_999` Hz because
+    /// the hardware rate is doubled before host-side IQ conversion.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config = self.config.sample_rate_hz(value);
         self
     }
 
+    /// Set the analog bandwidth policy.
+    ///
+    /// [`crate::Bandwidth::ManualHz`] values must be in the inclusive range
+    /// `1_000..=65_535_999` Hz.
     pub fn bandwidth(mut self, value: crate::Bandwidth) -> Self {
         self.config = self.config.bandwidth(value);
         self
     }
 
+    /// Set an explicit analog bandwidth in Hz.
+    ///
+    /// This is shorthand for [`DeviceBuilder::bandwidth`] with
+    /// [`crate::Bandwidth::ManualHz`]. Values must be in the inclusive range
+    /// `1_000..=65_535_999` Hz.
     pub fn bandwidth_hz(mut self, value: u32) -> Self {
         self.config = self.config.bandwidth_hz(value);
         self
     }
 
+    /// Set the high-level sample format.
+    ///
+    /// The sample format determines which sample-rate range is valid.
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config = self.config.sample_format(value);
         self
     }
 
+    /// Set the firmware/host decimation policy for float IQ samples.
+    ///
+    /// Decimation is only valid with [`SampleFormat::F32Iq`].
     pub fn decimation_mode(mut self, value: crate::DecimationMode) -> Self {
         self.config = self.config.decimation_mode(value);
         self
     }
 
+    /// Select the RF input port.
     pub fn rf_port(mut self, value: crate::RfPort) -> Self {
         self.config = self.config.rf_port(value);
         self
     }
 
+    /// Set the gain configuration.
+    ///
+    /// Preset gain indexes must be in the inclusive range `0..=21`.
+    /// Manual component gains use the ranges documented on [`crate::GainConfig::Manual`].
     pub fn gain(mut self, value: impl Into<crate::GainConfig>) -> Self {
         self.config = self.config.gain(value);
         self
     }
 
+    /// Enable or disable the RF port bias tee.
     pub fn bias_tee(mut self, enabled: bool) -> Self {
         self.config = self.config.bias_tee(enabled);
         self
     }
 
+    /// Enable or disable packed raw-sample transfers.
+    ///
+    /// Packing is only valid with [`SampleFormat::RawAdc`].
     pub fn packing(mut self, enabled: bool) -> Self {
         self.config = self.config.packing(enabled);
         self
@@ -742,8 +775,12 @@ where
     }
 }
 
-/// Async raw ADC block stream guard for explicit async stop/finish lifecycle control.
-#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+/// Async raw ADC block stream guard.
+///
+/// Call [`AsyncRawRxStream::stop`] or [`AsyncRawRxStream::finish`] to stop the
+/// receiver through the async USB path. Dropping the stream cancels pending
+/// transfers and attempts best-effort synchronous receiver-off cleanup.
+#[must_use = "call stop().await or finish().await to stop the receiver cleanly"]
 pub struct AsyncRawRxStream<'dev> {
     inner: AsyncRawRxStreamInner<'dev, NusbControl>,
 }
@@ -754,12 +791,15 @@ impl AsyncRawRxStream<'_> {
         self.inner.next_block().await
     }
 
-    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    /// Request async receiver-off cleanup.
+    ///
+    /// Repeated calls are no-ops after the first successful stop. Prefer this
+    /// over relying on drop when you are already in async code.
     pub async fn stop(&mut self) -> Result<()> {
         self.inner.stop().await
     }
 
-    /// Finish this stream guard and return current streaming counters.
+    /// Stop the receiver asynchronously and return current streaming counters.
     pub async fn finish(self) -> Result<StreamingStats> {
         self.inner.finish().await
     }
@@ -883,8 +923,12 @@ where
     }
 }
 
-/// Async converted `F32Iq` stream guard for explicit stop/finish lifecycle control.
-#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+/// Async converted `F32Iq` stream guard.
+///
+/// Call [`AsyncF32RxStream::stop`] or [`AsyncF32RxStream::finish`] to stop the
+/// receiver through the async USB path. Dropping the stream cancels pending
+/// transfers and attempts best-effort synchronous receiver-off cleanup.
+#[must_use = "call stop().await or finish().await to stop the receiver cleanly"]
 pub struct AsyncF32RxStream<'dev> {
     inner: AsyncF32RxStreamInner<'dev, NusbControl>,
 }
@@ -895,12 +939,15 @@ impl AsyncF32RxStream<'_> {
         self.inner.read(out).await
     }
 
-    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    /// Request async receiver-off cleanup.
+    ///
+    /// Repeated calls are no-ops after the first successful stop. Prefer this
+    /// over relying on drop when you are already in async code.
     pub async fn stop(&mut self) -> Result<()> {
         self.inner.stop().await
     }
 
-    /// Finish this stream guard and return current streaming counters.
+    /// Stop the receiver asynchronously and return current streaming counters.
     pub async fn finish(self) -> Result<StreamingStats> {
         self.inner.finish().await
     }

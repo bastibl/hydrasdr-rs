@@ -37,7 +37,9 @@ pub(crate) enum SampleType {
 /// Host-side IQ decimation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecimationMode {
+    /// Prefer lower host bandwidth by using firmware decimation by 2.
     LowBandwidth,
+    /// Prefer higher-definition IQ conversion without firmware decimation.
     HighDefinition,
 }
 
@@ -63,28 +65,42 @@ pub(crate) struct GainInfo {
 /// Bias tee electrical limits for an RF port.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BiasTeeInfo {
+    /// Bias tee voltage in volts.
     pub voltage: f32,
+    /// Maximum bias tee current in milliamps.
     pub max_current_milliamp: f32,
 }
 
 /// RF port metadata returned in [`DeviceInfo`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RfPortInfo {
+    /// Firmware-provided RF port name.
     pub name: &'static str,
+    /// Minimum tunable frequency for this port, in Hz.
     pub min_frequency: u64,
+    /// Maximum tunable frequency for this port, in Hz.
     pub max_frequency: u64,
+    /// Whether this port exposes a bias tee.
     pub has_bias_tee: bool,
+    /// Bias tee electrical limits, if this port has a bias tee.
     pub bias_tee: Option<BiasTeeInfo>,
 }
 
 /// Device metadata returned by the ergonomic API.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
+    /// Board name detected from the firmware board ID.
     pub board_name: &'static str,
+    /// Firmware version string.
     pub firmware_version: String,
+    /// Parsed 64-bit serial number, if available.
     pub serial: Option<u64>,
+    /// Minimum tunable device frequency in Hz.
     pub min_frequency: u64,
+    /// Maximum tunable device frequency in Hz.
     pub max_frequency: u64,
+    /// RF ports reported for this device.
     pub rf_ports: Vec<RfPortInfo>,
+    /// Last high-level configuration applied through this crate, if any.
     pub current_config: Option<crate::Config>,
 }

@@ -45,6 +45,12 @@ cargo check --features smol
 
 Use `tokio` if the application already runs on Tokio; use `smol` for smaller examples or applications using the smol/async-io ecosystem.
 
+## Configuration validation
+
+`Config::builder()` and `Device::builder()` validate receiver settings before they touch hardware. RFOne center frequency must be `24_000_000..=1_800_000_000` Hz. Raw ADC sample rates must be `10_000..=65_535_999` Hz, while converted `F32Iq` sample rates must be `10_000..=32_767_999` Hz because the requested hardware rate is doubled before host-side IQ conversion. Manual bandwidths must be `1_000..=65_535_999` Hz.
+
+Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mixer `0..=15`, and VGA `0..=15`.
+
 ## Synchronous API
 
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
@@ -105,6 +111,8 @@ fn main() -> hydrasdr_rs::Result<()> {
     })
 }
 ```
+
+Prefer `finish().await` or `stop().await` for async receive streams so receiver-off cleanup goes through the async USB path. Dropping an async stream cancels queued transfers and attempts best-effort synchronous cleanup, but it is a fallback rather than the primary shutdown path.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 
