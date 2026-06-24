@@ -23,34 +23,29 @@ fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
-        .sample_format(SampleFormat::RawAdc)
+        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
         .open()?;
 
     println!(
-        "opened {} firmware={} features=0x{:08x}",
+        "opened {} firmware={} serial={:?}",
         dev.info().board_name,
         dev.info().firmware_version,
-        dev.info().features
+        dev.info().serial
     );
     println!(
-        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=RawAdc"
+        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=F32Iq"
     );
 
     if run_rx {
-        let mut rx = dev.raw_rx_stream()?;
-        if let Some(block) = rx.next_block()? {
-            println!(
-                "rx block: {} bytes, {} samples, dropped={}",
-                block.raw_bytes().len(),
-                block.sample_count(),
-                block.dropped_samples()
-            );
-        }
+        let mut rx = dev.f32_rx_stream()?;
+        let mut samples = [(0.0, 0.0); 32];
+        let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
         let stats = rx.finish()?;
-        println!("short RX complete after one block: {stats:?}");
+        println!("rx samples: {count}, first={:?}", samples.first());
+        println!("short RX complete: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer smoke stream.");
     }

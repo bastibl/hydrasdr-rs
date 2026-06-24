@@ -29,7 +29,7 @@ fn main() -> hydrasdr_rs::Result<()> {
              Run with one feature enabled, for example:\n\
                cargo run --features smol --example rx_async -- --run --rx"
         );
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(any(feature = "smol", feature = "tokio"))]
@@ -44,7 +44,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
-        .sample_format(SampleFormat::RawAdc)
+        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -52,27 +52,22 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
         .await?;
 
     println!(
-        "opened {} firmware={} features=0x{:08x}",
+        "opened {} firmware={} serial={:?}",
         dev.info().board_name,
         dev.info().firmware_version,
-        dev.info().features
+        dev.info().serial
     );
     println!(
-        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=RawAdc"
+        "configured: freq={EXAMPLE_FREQ_HZ}Hz sample_rate={EXAMPLE_SAMPLE_RATE_HZ}Hz format=F32Iq"
     );
 
     if run_rx {
-        let mut rx = dev.raw_rx_stream_async().await?;
-        if let Some(block) = rx.next_block().await? {
-            println!(
-                "rx block: {} bytes, {} samples, dropped={}",
-                block.raw_bytes().len(),
-                block.sample_count(),
-                block.dropped_samples()
-            );
-        }
+        let mut rx = dev.f32_rx_stream_async().await?;
+        let mut samples = [(0.0, 0.0); 32];
+        let count = rx.read(&mut samples).await?;
         let stats = rx.finish().await?;
-        println!("short async RX complete after one block: {stats:?}");
+        println!("rx samples: {count}, first={:?}", samples.first());
+        println!("short async RX complete: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer async smoke stream.");
     }

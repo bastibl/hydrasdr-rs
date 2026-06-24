@@ -1,14 +1,17 @@
+#![allow(dead_code)]
+
 use nusb::MaybeFuture;
 
-use crate::commands::{Capability, GainType, ReceiverMode, RfPort, VendorRequest};
+use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
+use crate::config::RfPort;
 use crate::discovery;
 use crate::errors::{Error, Result, StatusCode};
 use crate::rfone::{
     RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
     RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
-    RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT, RFONE_SAMPLE_TYPES, RFONE_SENSITIVITY_LNA_GAINS,
-    RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_TYPICAL_POWER_MW,
-    RFONE_VGA_MAX_GAIN, component_infos, default_gain_infos, rf_port_infos,
+    RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT, RFONE_SENSITIVITY_LNA_GAINS,
+    RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_VGA_MAX_GAIN,
+    default_gain_infos, rf_port_infos,
 };
 use crate::streaming::{
     AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream, StreamingBackend,
@@ -558,42 +561,30 @@ impl<C: ControlBackend> HydraSdr<C> {
 
 impl<C> HydraSdr<C> {
     pub(crate) fn update_cached_device_info(&self, info: &mut DeviceInfo) {
-        info.gains = self.gains.clone();
-        info.current_samplerate = self.current_samplerate;
-        info.current_bandwidth = self.current_bandwidth;
-        info.current_sample_type = self.sample_type;
-        info.current_packing = self.packing_enabled;
+        let _ = self;
+        let _ = info;
+    }
+
+    pub(crate) const fn decimation_factor(&self) -> usize {
+        self.decimation_factor as usize
     }
 
     fn build_device_info(
         &self,
-        board_id: BoardId,
+        _board_id: BoardId,
         firmware_version: String,
         part_serial: PartIdSerialNo,
-        features: u32,
-        features_reserved: [u32; 3],
+        _features: u32,
+        _features_reserved: [u32; 3],
     ) -> DeviceInfo {
         DeviceInfo {
-            board_id,
+            serial: serial_from_part_id(&part_serial),
             board_name: "HydraSDR RFOne",
             firmware_version,
-            part_serial,
-            features,
-            features_reserved,
-            gains: self.gains.clone(),
-            components: component_infos(),
             min_frequency: RFONE_MIN_FREQ_HZ,
             max_frequency: RFONE_MAX_FREQ_HZ,
             rf_ports: rf_port_infos(),
-            gpio_count: crate::rfone::RFONE_GPIO_COUNT,
-            sample_types: RFONE_SAMPLE_TYPES,
-            typical_power_mw: RFONE_TYPICAL_POWER_MW,
-            max_power_mw: crate::rfone::RFONE_MAX_POWER_MW,
-            max_safe_temp_celsius: crate::rfone::RFONE_MAX_SAFE_TEMP_C,
-            current_samplerate: self.current_samplerate,
-            current_bandwidth: self.current_bandwidth,
-            current_sample_type: self.sample_type,
-            current_packing: self.packing_enabled,
+            current_config: None,
         }
     }
 
@@ -1322,6 +1313,11 @@ fn decode_c_string(bytes: &[u8]) -> String {
 
 fn reverse_gain_table_index(value: u8) -> usize {
     21usize.saturating_sub(value.min(21) as usize)
+}
+
+fn serial_from_part_id(part_serial: &PartIdSerialNo) -> Option<u64> {
+    let serial = ((part_serial.serial_no[2] as u64) << 32) | part_serial.serial_no[3] as u64;
+    (serial != 0).then_some(serial)
 }
 
 fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {

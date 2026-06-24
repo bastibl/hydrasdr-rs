@@ -1,4 +1,6 @@
-//! Error/status mapping for the direct HydraSDR API.
+//! Error/status mapping for the HydraSDR API.
+
+#![allow(dead_code)]
 
 use core::fmt;
 
@@ -91,9 +93,9 @@ pub fn error_name(code: StatusCode) -> &'static str {
     code.name()
 }
 
-/// Error type used by the direct API.
+/// Error type used by the HydraSDR API.
 ///
-/// `nusb` errors are mapped to the closest C-style status code while preserving the USB message.
+/// USB errors preserve the backend message while exposing a stable high-level [`ErrorKind`].
 #[derive(Debug)]
 pub enum Error {
     Status(StatusCode),
@@ -109,6 +111,18 @@ pub enum Error {
     StreamClosed(&'static str),
 }
 
+/// Stable high-level error category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    InvalidConfig,
+    NotFound,
+    Busy,
+    Unsupported,
+    Usb,
+    StreamClosed,
+    Other,
+}
+
 impl Error {
     /// Build a high-level configuration validation error.
     pub const fn invalid_config(field: &'static str, reason: &'static str) -> Self {
@@ -120,8 +134,21 @@ impl Error {
         Self::StreamClosed(reason)
     }
 
+    /// Return the high-level error category.
+    pub const fn kind(&self) -> ErrorKind {
+        match self.status_code() {
+            StatusCode::InvalidParam => ErrorKind::InvalidConfig,
+            StatusCode::NotFound => ErrorKind::NotFound,
+            StatusCode::Busy => ErrorKind::Busy,
+            StatusCode::Unsupported => ErrorKind::Unsupported,
+            StatusCode::LibUsb => ErrorKind::Usb,
+            StatusCode::StreamingStopped => ErrorKind::StreamClosed,
+            _ => ErrorKind::Other,
+        }
+    }
+
     /// Return the C-style status code represented by this error.
-    pub const fn status_code(&self) -> StatusCode {
+    pub(crate) const fn status_code(&self) -> StatusCode {
         match self {
             Self::Status(code) => *code,
             Self::UnknownStatus(_) => StatusCode::Other,
@@ -189,5 +216,5 @@ impl From<nusb::transfer::TransferError> for Error {
     }
 }
 
-/// Crate result alias using the direct API [`Error`].
+/// Crate result alias using [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;

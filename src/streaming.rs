@@ -1,5 +1,7 @@
 //! Direct C-style streaming state machine and backend traits.
 
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::ops::Deref;
 use std::time::Duration;

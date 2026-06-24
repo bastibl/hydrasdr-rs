@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
-    Bandwidth, Config, Device, DeviceSelector, FinishRxStreamError, GainPreset, IntoRxStreamError,
-    RfPort, SampleBlock, SampleFormat,
+    Bandwidth, Config, Device, DeviceInfo, DeviceSelector, Error, ErrorKind, FinishRxStreamError,
+    GainPreset, IntoRxStreamError, RfPort, SampleBlock, SampleFormat,
 };
 
 #[test]
@@ -47,4 +47,26 @@ fn public_owned_rx_stream_error_is_standard_error() {
 
     assert_error::<IntoRxStreamError>();
     assert_error::<FinishRxStreamError>();
+}
+
+#[test]
+fn public_error_and_metadata_are_ergonomic() {
+    let err = Error::invalid_config("sample_rate_hz", "too low");
+    assert_eq!(err.kind(), ErrorKind::InvalidConfig);
+
+    let info = DeviceInfo {
+        board_name: "HydraSDR RFOne",
+        firmware_version: "test".to_string(),
+        serial: Some(0x1234),
+        min_frequency: 24_000_000,
+        max_frequency: 1_800_000_000,
+        rf_ports: Vec::new(),
+        current_config: Some(Config::default()),
+    };
+
+    assert_eq!(info.serial, Some(0x1234));
+    assert_eq!(
+        info.current_config.as_ref().map(Config::sample_format),
+        Some(SampleFormat::RawAdc)
+    );
 }

@@ -1,5 +1,7 @@
 //! USB control-transfer encoding and the `nusb` backend implementation.
 
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::time::Duration;
 
@@ -9,7 +11,8 @@ use nusb::transfer::{
     Buffer as NusbBuffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient,
 };
 
-use crate::commands::{GainType, ReceiverMode, RfPort, VendorRequest};
+use crate::commands::{GainType, ReceiverMode, VendorRequest};
+use crate::config::RfPort;
 use crate::constants::{CTRL_TIMEOUT_CHIP_ERASE_MS, CTRL_TIMEOUT_MS};
 use crate::errors::{Error, Result, StatusCode};
 use crate::streaming::{

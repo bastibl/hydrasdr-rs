@@ -1,6 +1,9 @@
 //! HydraSDR RFOne sync and async APIs.
 
+#![allow(dead_code)]
+
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
+use crate::converter::Float32IqConverter;
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 use core::fmt;
@@ -55,12 +58,12 @@ pub struct Device {
 
 impl Device {
     /// List visible HydraSDR RFOne USB devices without opening them.
-    pub fn list() -> Result<Vec<crate::HydraSdrDeviceInfo>> {
+    pub fn list() -> Result<Vec<crate::DeviceDescriptor>> {
         crate::discovery::list_devices()
     }
 
     /// Async counterpart to [`Device::list`].
-    pub async fn list_async() -> Result<Vec<crate::HydraSdrDeviceInfo>> {
+    pub async fn list_async() -> Result<Vec<crate::DeviceDescriptor>> {
         crate::discovery::list_devices_async().await
     }
 
@@ -141,6 +144,13 @@ impl Device {
         })
     }
 
+    /// Start a synchronous receive stream for converted `F32Iq` samples.
+    pub fn f32_rx_stream(&mut self) -> Result<F32RxStream<'_>> {
+        Ok(F32RxStream {
+            inner: self.inner.f32_rx_stream()?,
+        })
+    }
+
     /// Consume this device and start an owned synchronous raw ADC block stream.
     ///
     /// This shape is useful for frameworks that store streamers independently
@@ -180,6 +190,13 @@ impl Device {
     pub async fn raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStream<'_>> {
         Ok(AsyncRawRxStream {
             inner: self.inner.raw_rx_stream_async().await?,
+        })
+    }
+
+    /// Start an async receive stream for converted `F32Iq` samples.
+    pub async fn f32_rx_stream_async(&mut self) -> Result<AsyncF32RxStream<'_>> {
+        Ok(AsyncF32RxStream {
+            inner: self.inner.f32_rx_stream_async().await?,
         })
     }
 }
@@ -224,7 +241,13 @@ where
 
     /// Refresh and return direct device metadata.
     pub fn refresh_info(&mut self) -> Result<&DeviceInfo> {
-        self.info = Some(self.direct.get_device_info()?);
+        let current_config = self
+            .info
+            .as_ref()
+            .and_then(|info| info.current_config.clone());
+        let mut info = self.direct.get_device_info()?;
+        info.current_config = current_config;
+        self.info = Some(info);
         Ok(self.info())
     }
 
@@ -234,6 +257,7 @@ where
         self.sample_format = config.sample_format();
         if let Some(info) = &mut self.info {
             self.direct.update_cached_device_info(info);
+            info.current_config = Some(config.clone());
         }
         Ok(())
     }
@@ -252,6 +276,16 @@ where
         }
         Ok(())
     }
+
+    fn ensure_f32_iq_stream_format(&self) -> Result<()> {
+        if self.sample_format != SampleFormat::F32Iq {
+            return Err(Error::invalid_config(
+                "sample_format",
+                "F32 IQ streams require SampleFormat::F32Iq",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl<C> DeviceInner<C>
@@ -266,6 +300,22 @@ where
         }
         let stream = self.direct.start_raw_rx_stream()?;
         Ok(RawRxStreamInner {
+            device: self,
+            stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+            finished: false,
+        })
+    }
+
+    /// Start a synchronous receive stream for converted `F32Iq` samples.
+    pub fn f32_rx_stream(&mut self) -> Result<F32RxStreamInner<'_, C>> {
+        self.ensure_f32_iq_stream_format()?;
+        if self.direct.is_streaming() {
+            return Err(Error::stream_closed("direct receiver is already streaming"));
+        }
+        let stream = self.direct.start_rx_stream()?;
+        Ok(F32RxStreamInner {
             device: self,
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -295,6 +345,9 @@ where
     pub(crate) fn into_f32_rx_stream_owned(
         mut self,
     ) -> std::result::Result<OwnedF32RxStreamInner<C>, Box<(Self, Error)>> {
+        if let Err(error) = self.ensure_f32_iq_stream_format() {
+            return Err(Box::new((self, error)));
+        }
         let stream = match self.direct.start_rx_stream() {
             Ok(stream) => stream,
             Err(error) => return Err(Box::new((self, error))),
@@ -328,13 +381,20 @@ where
         self.sample_format = config.sample_format();
         if let Some(info) = &mut self.info {
             self.direct.update_cached_device_info(info);
+            info.current_config = Some(config.clone());
         }
         Ok(())
     }
 
     /// Refresh and return direct device metadata through the async layer.
     pub async fn refresh_info_async(&mut self) -> Result<&DeviceInfo> {
-        self.info = Some(self.direct.get_device_info_async().await?);
+        let current_config = self
+            .info
+            .as_ref()
+            .and_then(|info| info.current_config.clone());
+        let mut info = self.direct.get_device_info_async().await?;
+        info.current_config = current_config;
+        self.info = Some(info);
         Ok(self.info())
     }
 }
@@ -353,6 +413,26 @@ where
         Ok(AsyncRawRxStreamInner {
             device: self,
             stream: Some(stream),
+            stats: StreamingStats::default(),
+            stopped: false,
+            finished: false,
+        })
+    }
+
+    /// Start an async receive stream for converted `F32Iq` samples.
+    pub async fn f32_rx_stream_async(&mut self) -> Result<AsyncF32RxStreamInner<'_, C>> {
+        self.ensure_f32_iq_stream_format()?;
+        if self.direct.is_streaming() {
+            return Err(Error::stream_closed("direct receiver is already streaming"));
+        }
+        let decimation_factor = self.direct.decimation_factor();
+        let stream = self.direct.start_raw_rx_stream_async().await?;
+        Ok(AsyncF32RxStreamInner {
+            device: self,
+            stream: Some(stream),
+            converter: Float32IqConverter::default(),
+            pending: Vec::new(),
+            decimation_factor,
             stats: StreamingStats::default(),
             stopped: false,
             finished: false,
@@ -488,10 +568,10 @@ impl DeviceBuilder {
     }
 }
 
-/// Borrowed high-level view of one receive callback block.
+/// Borrowed high-level view of one raw receive block.
 ///
 /// `SampleBlock::new` is available for tests and adapters that already have raw
-/// bytes and direct streaming metadata:
+/// bytes and streaming metadata:
 ///
 /// ```
 /// use hydrasdr_rs::{SampleBlock, SampleFormat};
@@ -547,12 +627,12 @@ impl<'a> SampleBlock<'a> {
         self.format
     }
 
-    /// C-parity sample count for this block.
+    /// Sample count reported for this block.
     pub const fn sample_count(&self) -> i32 {
         self.sample_count
     }
 
-    /// C-parity dropped sample count reported by the direct streaming layer.
+    /// Dropped sample count reported by the streaming layer.
     pub const fn dropped_samples(&self) -> u64 {
         self.dropped_samples
     }
@@ -620,6 +700,7 @@ where
 }
 
 /// Raw ADC block stream guard for explicit stop/finish lifecycle control.
+#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
 pub struct RawRxStream<'dev> {
     inner: RawRxStreamInner<'dev, NusbControl>,
 }
@@ -641,7 +722,89 @@ impl RawRxStream<'_> {
     }
 }
 
+/// Idle synchronous converted `F32Iq` stream guard.
+pub(crate) struct F32RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
+    device: &'dev mut DeviceInner<C>,
+    stream: Option<DirectRxStream<C::BulkIn>>,
+    stats: StreamingStats,
+    stopped: bool,
+    finished: bool,
+}
+
+impl<C> F32RxStreamInner<'_, C>
+where
+    C: ControlBackend + StreamingBackend,
+{
+    /// Read converted `(I, Q)` samples into `out`.
+    pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        self.stream
+            .as_mut()
+            .ok_or(Error::stream_closed("F32 RX stream is closed"))?
+            .read_float32_iq(out, timeout)
+    }
+
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub fn stop(&mut self) -> Result<()> {
+        if !self.stopped {
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("F32 RX stream is closed"))?;
+            self.stats = self.device.direct.stop_rx_stream(stream)?;
+            self.stopped = true;
+        }
+        Ok(())
+    }
+
+    /// Finish this stream guard and return current direct streaming counters.
+    pub fn finish(mut self) -> Result<StreamingStats> {
+        if !self.stopped {
+            self.stop()?;
+        }
+        self.finished = true;
+        Ok(self.stats)
+    }
+}
+
+impl<C> Drop for F32RxStreamInner<'_, C>
+where
+    C: ControlBackend + StreamingBackend,
+{
+    fn drop(&mut self) {
+        if !self.stopped && !self.finished {
+            if let Some(stream) = self.stream.take() {
+                let _ = self.device.direct.stop_rx_stream(stream);
+            }
+            self.stopped = true;
+        }
+    }
+}
+
+/// Converted `F32Iq` stream guard for explicit stop/finish lifecycle control.
+#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+pub struct F32RxStream<'dev> {
+    inner: F32RxStreamInner<'dev, NusbControl>,
+}
+
+impl F32RxStream<'_> {
+    /// Read converted `(I, Q)` samples into `out`.
+    pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        self.inner.read(out, timeout)
+    }
+
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub fn stop(&mut self) -> Result<()> {
+        self.inner.stop()
+    }
+
+    /// Finish this stream guard and return current streaming counters.
+    pub fn finish(self) -> Result<StreamingStats> {
+        self.inner.finish()
+    }
+}
+
 /// Owned synchronous raw ADC block stream.
+#[must_use = "owned RX streams keep hardware running until dropped or finished"]
 pub struct OwnedRawRxStream {
     inner: OwnedRawRxStreamInner<NusbControl>,
 }
@@ -742,6 +905,7 @@ where
 }
 
 /// Owned synchronous converted `F32Iq` receive stream.
+#[must_use = "owned RX streams keep hardware running until dropped or finished"]
 pub struct OwnedF32RxStream {
     inner: OwnedF32RxStreamInner<NusbControl>,
 }
@@ -1008,6 +1172,7 @@ where
 }
 
 /// Async raw ADC block stream guard for explicit async stop/finish lifecycle control.
+#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
 pub struct AsyncRawRxStream<'dev> {
     inner: AsyncRawRxStreamInner<'dev, NusbControl>,
 }
@@ -1016,6 +1181,147 @@ impl AsyncRawRxStream<'_> {
     /// Read the next sample block.
     pub async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         self.inner.next_block().await
+    }
+
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub async fn stop(&mut self) -> Result<()> {
+        self.inner.stop().await
+    }
+
+    /// Finish this stream guard and return current streaming counters.
+    pub async fn finish(self) -> Result<StreamingStats> {
+        self.inner.finish().await
+    }
+}
+
+/// Idle async converted `F32Iq` stream guard for explicit async stop/finish lifecycle control.
+pub(crate) struct AsyncF32RxStreamInner<
+    'dev,
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+> {
+    device: &'dev mut DeviceInner<C>,
+    stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
+    converter: Float32IqConverter,
+    pending: Vec<(f32, f32)>,
+    decimation_factor: usize,
+    stats: StreamingStats,
+    stopped: bool,
+    finished: bool,
+}
+
+impl<C> AsyncF32RxStreamInner<'_, C>
+where
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+{
+    /// Read converted `(I, Q)` samples into `out`.
+    pub async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0;
+        self.copy_pending(out, &mut written);
+        if written == out.len() {
+            return Ok(written);
+        }
+
+        loop {
+            let stream = self
+                .stream
+                .as_mut()
+                .ok_or(Error::stream_closed("async F32 RX stream is closed"))?;
+            let Some(transfer) = stream.next_transfer().await? else {
+                return Ok(written);
+            };
+
+            let mut converted = Vec::new();
+            self.converter.process_u16le_to_f32iq(
+                transfer.samples,
+                self.decimation_factor,
+                &mut converted,
+            );
+            self.copy_samples(&converted, out, &mut written);
+            if written == out.len() {
+                return Ok(written);
+            }
+        }
+    }
+
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub async fn stop(&mut self) -> Result<()> {
+        if !self.stopped {
+            let stream = self
+                .stream
+                .take()
+                .ok_or(Error::stream_closed("async F32 RX stream is closed"))?;
+            self.stats = self.device.direct.stop_raw_rx_stream_async(stream).await?;
+            self.stopped = true;
+        }
+        Ok(())
+    }
+
+    /// Finish this stream guard and return current streaming counters.
+    pub async fn finish(mut self) -> Result<StreamingStats> {
+        if !self.stopped {
+            self.stop().await?;
+        }
+        self.finished = true;
+        Ok(self.stats)
+    }
+
+    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let take = (out.len() - *written).min(self.pending.len());
+        if take == 0 {
+            return;
+        }
+
+        out[*written..*written + take].copy_from_slice(&self.pending[..take]);
+        self.pending.drain(..take);
+        *written += take;
+    }
+
+    fn copy_samples(
+        &mut self,
+        samples: &[(f32, f32)],
+        out: &mut [(f32, f32)],
+        written: &mut usize,
+    ) {
+        let take = (out.len() - *written).min(samples.len());
+        if take > 0 {
+            out[*written..*written + take].copy_from_slice(&samples[..take]);
+            *written += take;
+        }
+        if take < samples.len() {
+            self.pending.extend_from_slice(&samples[take..]);
+        }
+    }
+}
+
+impl<C> Drop for AsyncF32RxStreamInner<'_, C>
+where
+    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+{
+    fn drop(&mut self) {
+        if !self.stopped && !self.finished {
+            if let Some(mut stream) = self.stream.take() {
+                self.stats = stream.close();
+            }
+            let _ = self.device.direct.receiver_off_if_needed();
+            self.stopped = true;
+        }
+    }
+}
+
+/// Async converted `F32Iq` stream guard for explicit stop/finish lifecycle control.
+#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+pub struct AsyncF32RxStream<'dev> {
+    inner: AsyncF32RxStreamInner<'dev, NusbControl>,
+}
+
+impl AsyncF32RxStream<'_> {
+    /// Read converted `(I, Q)` samples into `out`.
+    pub async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+        self.inner.read(out).await
     }
 
     /// Request receiver-off cleanup. Repeated calls are no-ops.

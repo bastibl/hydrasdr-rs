@@ -1,5 +1,7 @@
 //! Constants copied from the C headers for the direct parity layer.
 
+#![allow(dead_code)]
+
 /// C `HYDRASDR_VERSION` string mirrored for crate parity checks.
 pub const HYDRASDR_VERSION: &str = "1.1.2";
 /// C `HYDRASDR_VER_MAJOR` value.

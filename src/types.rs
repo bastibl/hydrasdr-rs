@@ -1,4 +1,6 @@
-//! Public data structures returned by the direct HydraSDR API.
+//! Public data structures returned by the HydraSDR API.
+
+#![allow(dead_code)]
 
 /// HydraSDR board identifier values mirrored from the C driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,12 +60,11 @@ pub const fn sample_type_bit(sample_type: SampleType) -> u16 {
     1u16 << (sample_type as u8)
 }
 
-/// Decimation modes from the C API; not all are wired into the RFOne phase yet.
+/// Host-side IQ decimation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
 pub enum DecimationMode {
-    LowBandwidth = 0,
-    HighDefinition = 1,
+    LowBandwidth,
+    HighDefinition,
 }
 
 /// Library version tuple mirroring the C struct layout.
@@ -81,7 +82,7 @@ pub struct PartIdSerialNo {
     pub serial_no: [u32; 4],
 }
 
-/// Gain descriptor equivalent to the C `hydrasdr_gain_info_t` shape.
+/// Internal gain descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GainInfo {
     pub gain_type: crate::commands::GainType,
@@ -117,34 +118,21 @@ pub struct ComponentInfo {
     pub register_count: u32,
 }
 
-/// Direct device-info aggregate built from C-parity firmware queries and RFOne constants.
+/// Device metadata returned by the ergonomic API.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
-    pub board_id: BoardId,
     pub board_name: &'static str,
     pub firmware_version: String,
-    pub part_serial: PartIdSerialNo,
-    pub features: u32,
-    pub features_reserved: [u32; 3],
-    pub gains: Vec<GainInfo>,
-    pub components: Vec<ComponentInfo>,
+    pub serial: Option<u64>,
     pub min_frequency: u64,
     pub max_frequency: u64,
     pub rf_ports: Vec<RfPortInfo>,
-    pub gpio_count: u16,
-    pub sample_types: u16,
-    pub typical_power_mw: f32,
-    pub max_power_mw: f32,
-    pub max_safe_temp_celsius: f32,
-    pub current_samplerate: u32,
-    pub current_bandwidth: u32,
-    pub current_sample_type: SampleType,
-    pub current_packing: bool,
+    pub current_config: Option<crate::Config>,
 }
 
-/// Temperature reading shape retained for C API parity.
+/// Temperature reading shape reserved for future hardware support.
 ///
-/// RFOne temperature querying is currently reported as unsupported by the direct API.
+/// RFOne temperature querying is currently reported as unsupported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Temperature {
     pub valid: bool,

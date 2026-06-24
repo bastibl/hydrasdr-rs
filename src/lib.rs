@@ -1,25 +1,19 @@
-#![allow(dead_code)]
-
 //! HydraSDR RFOne API on top of `nusb`.
 //!
-//! The crate exposes synchronous and asynchronous Rust APIs for common receive
-//! workflows. The low-level C-to-Rust port is kept inside the crate as the
-//! USB/control implementation, but the public API is centered on [`Device`],
-//! [`Config`], and typed configuration values.
+//! The crate exposes synchronous and asynchronous Rust APIs.
 //!
-//! The synchronous API uses [`nusb::MaybeFuture::wait`] to mirror the blocking C
-//! driver. Async counterparts are executor-agnostic at this crate layer and
-//! share the same `VendorControlRequest` encoding and streaming state machinery
-//! as the sync path. Bulk/control transfers are natively async in `nusb`; async
-//! device discovery/open and endpoint `clear_halt` follow the support exposed by
-//! `nusb`, so applications that await those paths can enable exactly one of this
-//! crate's `tokio` or `smol` features for `nusb` IO thread integration. No async
-//! runtime is forced by default.
+//! The synchronous API uses [`nusb::MaybeFuture::wait`] for blocking operation.
+//! Async counterparts are executor-agnostic at this crate layer. Bulk/control
+//! transfers are natively async in `nusb`; async device discovery/open and
+//! endpoint `clear_halt` follow the support exposed by `nusb`, so applications
+//! that await those paths can enable exactly one of this crate's `tokio` or
+//! `smol` features for `nusb` IO thread integration. No async runtime is forced
+//! by default.
 //!
 //! Hardware access is never required for default tests. Real-device smoke tests
 //! and examples are gated with `#[ignore]` or an explicit `--run` flag because
 //! they open USB devices, change receiver state, and may touch RF bias/GPIO/SPI
-//! flash paths just like the C driver.
+//! flash paths.
 //!
 //! # Synchronous API
 //!
@@ -61,34 +55,14 @@ mod streaming;
 mod types;
 mod usb;
 
-pub use commands::{GainType, RfPort};
 pub use config::{
-    Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, SampleFormat,
+    Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, RfPort, SampleFormat,
 };
-pub use discovery::HydraSdrDeviceInfo;
-pub use errors::{Error, Result, StatusCode};
+pub use discovery::DeviceDescriptor;
+pub use errors::{Error, ErrorKind, Result};
 pub use high_level::{
-    AsyncRawRxStream, Device, DeviceBuilder, FinishRxStreamError, IntoRxStreamError,
-    OwnedF32RxStream, OwnedRawRxStream, RawRxStream, SampleBlock,
+    AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, F32RxStream, FinishRxStreamError,
+    IntoRxStreamError, OwnedF32RxStream, OwnedRawRxStream, RawRxStream, SampleBlock,
 };
 pub use streaming::StreamingStats;
-pub use types::{
-    BiasTeeInfo, BoardId, ComponentInfo, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo,
-    RfPortInfo, SampleType,
-};
-
-#[cfg(test)]
-mod internal_tests {
-    #[path = "async_api.rs"]
-    mod async_api;
-    #[path = "direct_api.rs"]
-    mod direct_api;
-    #[path = "ergonomic_api.rs"]
-    mod ergonomic_api;
-    #[path = "foundation.rs"]
-    mod foundation;
-    #[path = "no_hardware_parity.rs"]
-    mod no_hardware_parity;
-    #[path = "streaming.rs"]
-    mod streaming;
-}
+pub use types::{BiasTeeInfo, DecimationMode, DeviceInfo, RfPortInfo};

@@ -8,7 +8,7 @@ Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://
 Using this driver, I want to explore an async implementation for Seify.
 In the near future, `nusb` might also support cross-compilation to `WebUSB`, which would allow using the same driver for native and web, which would be awesome.
 
-Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and sample-block types.
+Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and receive-stream types.
 
 Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
 
@@ -16,11 +16,12 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 Implemented:
 
-- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and pull-style `SampleBlock` receive streams.
+- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and pull-style receive streams.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs.
-- Internal synchronous control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
+- Internal USB control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
 - Complex float 32-bit sample conversion and downsampling (10MHz, 5MHz, and 2.5MHz).
+- Low-level raw ADC block streaming for applications that need raw USB blocks.
 
 TODO:
 
@@ -35,7 +36,7 @@ The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or `raw_rx_stream_async`:
+For async USB operations, `nusb` needs one runtime integration feature so it can run blocking OS work on an IO thread. Enable exactly one of this crate's forwarding features in applications that call `open_async`, `configure_async`, or async RX streams:
 
 ```sh
 cargo check --features tokio
@@ -55,7 +56,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::RawAdc)
+        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -63,15 +64,10 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let mut rx = dev.raw_rx_stream()?;
-    if let Some(block) = rx.next_block()? {
-        println!(
-            "{} bytes, {} samples, dropped={}",
-            block.raw_bytes().len(),
-            block.sample_count(),
-            block.dropped_samples()
-        );
-    }
+    let mut rx = dev.f32_rx_stream()?;
+    let mut samples = [(0.0, 0.0); 32];
+    let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
+    println!("read {count} IQ samples");
     let stats = rx.finish()?;
     println!("{stats:?}");
 
@@ -92,16 +88,16 @@ fn main() -> hydrasdr_rs::Result<()> {
         let mut dev = Device::builder()
             .frequency_hz(144_500_000)
             .sample_rate_hz(10_000_000)
-            .sample_format(SampleFormat::RawAdc)
+            .sample_format(SampleFormat::F32Iq)
             .rf_port(RfPort::Rx0)
             .gain(GainPreset::Linearity(10))
             .open_async()
             .await?;
 
-        let mut rx = dev.raw_rx_stream_async().await?;
-        if let Some(block) = rx.next_block().await? {
-            println!("async block: {} bytes", block.raw_bytes().len());
-        }
+        let mut rx = dev.f32_rx_stream_async().await?;
+        let mut samples = [(0.0, 0.0); 32];
+        let count = rx.read(&mut samples).await?;
+        println!("async samples: {count}");
         let stats = rx.finish().await?;
         println!("{stats:?}");
 

@@ -1,4 +1,6 @@
-//! C command IDs and bit assignments for HydraSDR RFOne vendor requests.
+//! Internal USB command IDs and bit assignments for HydraSDR RFOne vendor requests.
+
+#![allow(dead_code)]
 
 /// Receiver state values sent with the C `HYDRASDR_VENDOR_REQUEST_RECEIVER_MODE` request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,16 +50,6 @@ pub enum VendorRequest {
     GetTemperature = 32,
     SetGain = 33,
     VendorRequestCount = 34,
-}
-
-/// RF input port selector values used by `hydrasdr_set_rf_port`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum RfPort {
-    Rx0 = 0,
-    Rx1 = 1,
-    Rx2 = 2,
-    Max = 31,
 }
 
 /// Build the C-style bit mask for the first `n` RF ports.

@@ -1,6 +1,6 @@
 //! Receiver configuration.
 
-use crate::commands::{GainType, RfPort};
+use crate::commands::GainType;
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 use crate::types::{DecimationMode, SampleType};
@@ -25,10 +25,19 @@ pub enum DeviceSelector {
 /// Analog bandwidth policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Bandwidth {
-    /// Leave bandwidth selection to the direct layer / firmware defaults.
+    /// Leave bandwidth selection to firmware defaults.
     Auto,
     /// Set an explicit bandwidth in Hz before setting the sample rate.
     ManualHz(u32),
+}
+
+/// RF input port selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RfPort {
+    Rx0 = 0,
+    Rx1 = 1,
+    Rx2 = 2,
 }
 
 /// High-level sample format names.
@@ -175,7 +184,7 @@ impl Config {
     }
 
     /// Configured RF port, if explicitly selected.
-    pub const fn rf_port(&self) -> Option<crate::RfPort> {
+    pub const fn rf_port(&self) -> Option<RfPort> {
         self.rf_port
     }
 
@@ -307,7 +316,7 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn rf_port(mut self, value: crate::RfPort) -> Self {
+    pub fn rf_port(mut self, value: RfPort) -> Self {
         self.config.rf_port = Some(value);
         self
     }

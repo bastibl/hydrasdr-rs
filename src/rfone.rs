@@ -1,5 +1,7 @@
 //! RFOne constants and descriptor helpers copied from the C reference driver.
 
+#![allow(dead_code)]
+
 use crate::commands::{Capability, GainType};
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::types::{BiasTeeInfo, ComponentInfo, GainInfo, RfPortInfo, SampleType, sample_type_bit};
