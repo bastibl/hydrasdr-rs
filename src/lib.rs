@@ -10,10 +10,6 @@
 //! `smol` features for `nusb` IO thread integration. No async runtime is forced
 //! by default.
 //!
-//! Hardware access is never required for default tests. Real-device smoke tests
-//! and examples are gated with `#[ignore]` or an explicit `--run` flag because
-//! they open USB devices, change receiver state, and may touch RF bias.
-//!
 //! # Synchronous API
 //!
 //! Open and configure real hardware with the [`Device`] builder:
