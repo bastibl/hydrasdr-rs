@@ -696,6 +696,9 @@ pub struct F32RxStream<'dev> {
 
 impl F32RxStream<'_> {
     /// Read converted `(I, Q)` samples into `out`.
+    ///
+    /// `timeout` bounds the whole read call, including any additional USB
+    /// completions needed to fill `out`.
     pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
         self.inner.read(out, timeout)
     }

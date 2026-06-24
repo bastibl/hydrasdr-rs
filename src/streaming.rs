@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::ops::Deref;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::converter::Float32IqConverter;
@@ -363,6 +363,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
     /// Read converted `(I, Q)` float samples into `out`.
     ///
     /// Returns `Ok(0)` when the backend times out before any sample is available.
+    /// `timeout` is a total deadline for this read call, not a per-transfer timeout.
     pub(crate) fn read_float32_iq(
         &mut self,
         out: &mut [(f32, f32)],
@@ -381,12 +382,14 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             return Ok(written);
         }
 
+        let deadline = Instant::now().checked_add(timeout);
         loop {
             let bulk_in = self
                 .bulk_in
                 .as_mut()
                 .ok_or(Error::stream_closed("direct RX stream is closed"))?;
-            let Some(completion) = bulk_in.wait_next_complete(timeout) else {
+            let Some(completion) = bulk_in.wait_next_complete(remaining_timeout(deadline, timeout))
+            else {
                 return Ok(written);
             };
 
@@ -469,4 +472,10 @@ fn config_current_buffer_size(config: StreamingConfig) -> usize {
     } else {
         config.buffer_size
     }
+}
+
+fn remaining_timeout(deadline: Option<Instant>, fallback: Duration) -> Duration {
+    deadline.map_or(fallback, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    })
 }
