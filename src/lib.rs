@@ -12,8 +12,7 @@
 //!
 //! Hardware access is never required for default tests. Real-device smoke tests
 //! and examples are gated with `#[ignore]` or an explicit `--run` flag because
-//! they open USB devices, change receiver state, and may touch RF bias/GPIO/SPI
-//! flash paths.
+//! they open USB devices, change receiver state, and may touch RF bias.
 //!
 //! # Synchronous API
 //!
@@ -55,14 +54,12 @@ mod streaming;
 mod types;
 mod usb;
 
-pub use config::{
-    Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, GainPreset, RfPort, SampleFormat,
-};
+pub use config::{Bandwidth, Config, ConfigBuilder, GainConfig, GainPreset, RfPort, SampleFormat};
 pub use discovery::DeviceDescriptor;
 pub use errors::{Error, ErrorKind, Result};
 pub use high_level::{
-    AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, F32RxStream, FinishRxStreamError,
-    IntoRxStreamError, OwnedF32RxStream, OwnedRawRxStream, RawRxStream, SampleBlock,
+    AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, F32RxStream, RawRxStream,
+    SampleBlock,
 };
 pub use streaming::StreamingStats;
 pub use types::{BiasTeeInfo, DecimationMode, DeviceInfo, RfPortInfo};

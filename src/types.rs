@@ -3,7 +3,7 @@
 /// HydraSDR board identifier values mirrored from the C driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum BoardId {
+pub(crate) enum BoardId {
     ProtoHydraSdr = 0,
     HydraSdrRfOneOfficial = 1,
     Invalid = 0xff,
@@ -11,7 +11,7 @@ pub enum BoardId {
 
 /// Raw board ID value that is not known to this direct translation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnknownBoardId(pub u8);
+pub(crate) struct UnknownBoardId(pub(crate) u8);
 
 impl TryFrom<u8> for BoardId {
     type Error = UnknownBoardId;
@@ -29,7 +29,7 @@ impl TryFrom<u8> for BoardId {
 /// Sample type values accepted by the direct API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum SampleType {
+pub(crate) enum SampleType {
     Float32Iq = 0,
     Raw = 5,
 }
@@ -43,21 +43,21 @@ pub enum DecimationMode {
 
 /// Part ID and serial-number words returned by the firmware.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PartIdSerialNo {
-    pub part_id: [u32; 2],
-    pub serial_no: [u32; 4],
+pub(crate) struct PartIdSerialNo {
+    pub(crate) part_id: [u32; 2],
+    pub(crate) serial_no: [u32; 4],
 }
 
 /// Internal gain descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GainInfo {
-    pub gain_type: crate::commands::GainType,
-    pub min_value: u8,
-    pub max_value: u8,
-    pub step_value: u8,
-    pub default_value: u8,
-    pub value: u8,
-    pub flags: u8,
+pub(crate) struct GainInfo {
+    pub(crate) gain_type: crate::commands::GainType,
+    pub(crate) min_value: u8,
+    pub(crate) max_value: u8,
+    pub(crate) step_value: u8,
+    pub(crate) default_value: u8,
+    pub(crate) value: u8,
+    pub(crate) flags: u8,
 }
 
 /// Bias tee electrical limits for an RF port.

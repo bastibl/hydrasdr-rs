@@ -14,10 +14,10 @@ use crate::rfone::RFONE_TRANSFER_COUNT;
 /// The buffer contains raw USB bytes. `sample_count` follows the C driver's byte-count formula,
 /// not a final typed IQ sample abstraction.
 #[derive(Debug)]
-pub struct Transfer<'a> {
-    pub samples: &'a [u8],
-    pub sample_count: i32,
-    pub dropped_samples: u64,
+pub(crate) struct Transfer<'a> {
+    pub(crate) samples: &'a [u8],
+    pub(crate) sample_count: i32,
+    pub(crate) dropped_samples: u64,
 }
 
 /// Counters collected during a direct streaming run.
@@ -30,14 +30,14 @@ pub struct StreamingStats {
 
 /// Completed bulk-IN transfer from a backend.
 #[derive(Debug)]
-pub struct BulkInCompletion<B> {
-    pub buffer: B,
-    pub actual_len: usize,
-    pub status: Result<()>,
+pub(crate) struct BulkInCompletion<B> {
+    pub(crate) buffer: B,
+    pub(crate) actual_len: usize,
+    pub(crate) status: Result<()>,
 }
 
 /// Minimal synchronous bulk-IN backend used by direct streaming tests and `nusb`.
-pub trait BulkInBackend: std::fmt::Debug {
+pub(crate) trait BulkInBackend: std::fmt::Debug {
     type Buffer: Deref<Target = [u8]>;
 
     fn clear_halt(&mut self) -> Result<()>;
@@ -49,14 +49,14 @@ pub trait BulkInBackend: std::fmt::Debug {
 }
 
 /// Provider of synchronous bulk-IN endpoints.
-pub trait StreamingBackend: std::fmt::Debug {
+pub(crate) trait StreamingBackend: std::fmt::Debug {
     type BulkIn: BulkInBackend;
 
     fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn>;
 }
 
 /// Minimal async bulk-IN backend used by direct async streaming.
-pub trait AsyncBulkInBackend: std::fmt::Debug {
+pub(crate) trait AsyncBulkInBackend: std::fmt::Debug {
     type Buffer: Deref<Target = [u8]>;
 
     fn clear_halt_async(&mut self) -> impl Future<Output = Result<()>> + '_;
@@ -68,7 +68,7 @@ pub trait AsyncBulkInBackend: std::fmt::Debug {
 }
 
 /// Provider of async bulk-IN endpoints.
-pub trait AsyncStreamingBackend: std::fmt::Debug {
+pub(crate) trait AsyncStreamingBackend: std::fmt::Debug {
     type BulkIn: AsyncBulkInBackend;
 
     fn bulk_in_async(&self, endpoint: u8) -> impl Future<Output = Result<Self::BulkIn>> + '_;
@@ -76,13 +76,13 @@ pub trait AsyncStreamingBackend: std::fmt::Debug {
 
 /// C-parity streaming buffer configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StreamingConfig {
-    pub transfer_count: usize,
-    pub buffer_size: usize,
-    pub packed_buffer_size: usize,
-    pub packing_enabled: bool,
-    pub decimation_factor: usize,
-    pub transfer_timeout: Duration,
+pub(crate) struct StreamingConfig {
+    transfer_count: usize,
+    buffer_size: usize,
+    packed_buffer_size: usize,
+    packing_enabled: bool,
+    decimation_factor: usize,
+    transfer_timeout: Duration,
 }
 
 impl Default for StreamingConfig {
@@ -100,31 +100,31 @@ impl Default for StreamingConfig {
 
 /// Mutable streaming configuration.
 #[derive(Debug, Default)]
-pub struct StreamingState {
+pub(crate) struct StreamingState {
     config: StreamingConfig,
 }
 
 impl StreamingState {
     /// Create an idle streaming state with C RFOne defaults.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Return the current streaming configuration.
-    pub fn config(&self) -> StreamingConfig {
+    pub(crate) fn config(&self) -> StreamingConfig {
         self.config
     }
 
     /// Enable or disable packed samples before streaming starts.
-    pub fn set_packing(&mut self, enabled: bool) -> Result<()> {
+    pub(crate) fn set_packing(&mut self, enabled: bool) -> Result<()> {
         self.config.packing_enabled = enabled;
         Ok(())
     }
 
     /// Set the DDC decimation factor before streaming starts.
-    pub fn set_decimation(&mut self, factor: usize) -> Result<()> {
+    pub(crate) fn set_decimation(&mut self, factor: usize) -> Result<()> {
         if !matches!(factor, 1 | 2 | 4 | 8 | 16 | 32 | 64) {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         self.config.decimation_factor = factor;
         Ok(())
@@ -133,7 +133,7 @@ impl StreamingState {
 
 /// Persistent synchronous pull stream for unpacked F32 IQ RX.
 #[derive(Debug)]
-pub struct DirectRxStream<B: BulkInBackend> {
+pub(crate) struct DirectRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     converter: Float32IqConverter,
@@ -144,7 +144,7 @@ pub struct DirectRxStream<B: BulkInBackend> {
 
 /// Persistent synchronous pull stream that yields raw USB transfer blocks.
 #[derive(Debug)]
-pub struct RawRxStream<B: BulkInBackend> {
+pub(crate) struct RawRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     stats: StreamingStats,
@@ -172,7 +172,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
     /// Read the next raw transfer block.
     ///
     /// Returns `Ok(None)` when the backend times out before a block is available.
-    pub fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+    pub(crate) fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
         if self.closed {
             return Err(Error::stream_closed("raw RX stream is closed"));
         }
@@ -191,7 +191,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
         let actual_len = completion.actual_len;
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
-            return Err(Error::Status(StatusCode::LibUsb));
+            return Err(Error::status(StatusCode::LibUsb));
         }
 
         self.stats.buffers_received += 1;
@@ -209,7 +209,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
     }
 
     /// Close the USB queue by cancelling pending transfers.
-    pub fn close(&mut self) -> StreamingStats {
+    pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
                 bulk_in.cancel_all();
@@ -236,7 +236,7 @@ impl<B: BulkInBackend> Drop for RawRxStream<B> {
 
 /// Persistent async pull stream that yields raw USB transfer blocks.
 #[derive(Debug)]
-pub struct AsyncRawRxStream<B: AsyncBulkInBackend> {
+pub(crate) struct AsyncRawRxStream<B: AsyncBulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     stats: StreamingStats,
@@ -262,7 +262,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
     }
 
     /// Read the next raw transfer block.
-    pub async fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+    pub(crate) async fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
         if self.closed {
             return Err(Error::stream_closed("async raw RX stream is closed"));
         }
@@ -277,7 +277,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         let actual_len = completion.actual_len;
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
-            return Err(Error::Status(StatusCode::LibUsb));
+            return Err(Error::status(StatusCode::LibUsb));
         }
 
         self.stats.buffers_received += 1;
@@ -295,7 +295,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
     }
 
     /// Close the USB queue by cancelling pending transfers.
-    pub fn close(&mut self) -> StreamingStats {
+    pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
                 bulk_in.cancel_all();
@@ -339,7 +339,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
     }
 
     /// Close the USB queue by cancelling pending transfers.
-    pub fn close(&mut self) -> StreamingStats {
+    pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
                 bulk_in.cancel_all();
@@ -354,7 +354,11 @@ impl<B: BulkInBackend> DirectRxStream<B> {
     /// Read converted `(I, Q)` float samples into `out`.
     ///
     /// Returns `Ok(0)` when the backend times out before any sample is available.
-    pub fn read_float32_iq(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+    pub(crate) fn read_float32_iq(
+        &mut self,
+        out: &mut [(f32, f32)],
+        timeout: Duration,
+    ) -> Result<usize> {
         if self.closed {
             return Err(Error::stream_closed("direct RX stream is closed"));
         }
@@ -382,7 +386,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             let actual_len = completion.actual_len;
             if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
                 self.stats.buffers_dropped += 1;
-                return Err(Error::Status(StatusCode::LibUsb));
+                return Err(Error::status(StatusCode::LibUsb));
             }
 
             self.stats.buffers_received += 1;

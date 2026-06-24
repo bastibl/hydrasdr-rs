@@ -5,14 +5,14 @@ use nusb::MaybeFuture;
 use crate::errors::{Error, Result, StatusCode};
 /// Known HydraSDR USB VID/PID pair and its board identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsbDeviceId {
+pub(crate) struct UsbDeviceId {
     pub vid: u16,
     pub pid: u16,
     pub description: &'static str,
 }
 
 /// Known HydraSDR RFOne USB IDs accepted by the direct open/list helpers.
-pub const USB_DEVICE_IDS: &[UsbDeviceId] = &[
+pub(crate) const USB_DEVICE_IDS: &[UsbDeviceId] = &[
     UsbDeviceId {
         vid: 0x1d50,
         pid: 0x60a1,
@@ -37,7 +37,7 @@ pub struct DeviceDescriptor {
 
 impl DeviceDescriptor {
     /// Convert a `nusb` descriptor into direct HydraSDR metadata if the VID/PID matches.
-    pub fn from_nusb(info: &nusb::DeviceInfo) -> Option<Self> {
+    pub(crate) fn from_nusb(info: &nusb::DeviceInfo) -> Option<Self> {
         let device_id = find_usb_device_id(info.vendor_id(), info.product_id())?;
         Some(Self {
             vid: device_id.vid,
@@ -50,7 +50,7 @@ impl DeviceDescriptor {
 }
 
 /// Find a known HydraSDR USB ID by VID/PID.
-pub fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
+pub(crate) fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
     USB_DEVICE_IDS
         .iter()
         .copied()
@@ -58,7 +58,7 @@ pub fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
 }
 
 /// List visible HydraSDR devices synchronously using `nusb::MaybeFuture::wait()`.
-pub fn list_devices() -> Result<Vec<DeviceDescriptor>> {
+pub(crate) fn list_devices() -> Result<Vec<DeviceDescriptor>> {
     let devices = nusb::list_devices().wait().map_err(Error::from)?;
     Ok(devices
         .filter_map(|device| DeviceDescriptor::from_nusb(&device))
@@ -66,7 +66,7 @@ pub fn list_devices() -> Result<Vec<DeviceDescriptor>> {
 }
 
 /// List visible HydraSDR devices through the async `nusb` path.
-pub async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
+pub(crate) async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
     let devices = nusb::list_devices().await.map_err(Error::from)?;
     Ok(devices
         .filter_map(|device| DeviceDescriptor::from_nusb(&device))
@@ -85,7 +85,7 @@ pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo
         }
         return Ok(device);
     }
-    Err(Error::Status(StatusCode::NotFound))
+    Err(Error::status(StatusCode::NotFound))
 }
 
 pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
@@ -100,11 +100,11 @@ pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb
         }
         return Ok(device);
     }
-    Err(Error::Status(StatusCode::NotFound))
+    Err(Error::status(StatusCode::NotFound))
 }
 
 /// Parse the C firmware serial string format `HYDRASDR SN:<16 hex digits>`.
-pub fn parse_hydrasdr_serial(serial: &str) -> Option<u64> {
+pub(crate) fn parse_hydrasdr_serial(serial: &str) -> Option<u64> {
     let hex = serial.strip_prefix("HYDRASDR SN:")?.trim();
     if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;

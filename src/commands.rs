@@ -3,7 +3,7 @@
 /// Receiver state values sent with the C `HYDRASDR_VENDOR_REQUEST_RECEIVER_MODE` request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum ReceiverMode {
+pub(crate) enum ReceiverMode {
     Off = 0,
     Rx = 1,
 }
@@ -12,7 +12,7 @@ pub enum ReceiverMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
-pub enum VendorRequest {
+pub(crate) enum VendorRequest {
     ReceiverMode = 1,
     BoardIdRead = 9,
     VersionStringRead = 10,
@@ -37,7 +37,7 @@ pub enum VendorRequest {
 /// Capability bit positions reported by the firmware.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum Capability {
+pub(crate) enum Capability {
     LnaGain = 0,
     MixerGain = 2,
     VgaGain = 4,
@@ -54,7 +54,7 @@ pub enum Capability {
 
 impl Capability {
     /// Return the single-bit capability mask for this capability.
-    pub const fn bits(self) -> u32 {
+    pub(crate) const fn bits(self) -> u32 {
         1u32 << (self as u8)
     }
 }
@@ -62,7 +62,7 @@ impl Capability {
 /// Gain selector values used by the legacy and extended gain APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub enum GainType {
+pub(crate) enum GainType {
     Lna = 0,
     Mixer = 2,
     Vga = 4,

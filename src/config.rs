@@ -15,7 +15,7 @@ const MAX_PRESET_GAIN: u8 = 21;
 
 /// Device selection used by [`crate::DeviceBuilder`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DeviceSelector {
+pub(crate) enum DeviceSelector {
     /// Open the first visible HydraSDR RFOne.
     First,
     /// Open the HydraSDR RFOne with a parsed 64-bit serial number.

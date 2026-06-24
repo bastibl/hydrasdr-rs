@@ -34,7 +34,7 @@ const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 /// The default backend is `nusb`; tests can inject fake control/streaming backends with
 /// [`HydraSdr::from_control`] to verify C-parity request packing without hardware.
 #[derive(Debug)]
-pub struct HydraSdr<C = NusbControl> {
+pub(crate) struct HydraSdr<C = NusbControl> {
     control: C,
     sample_type: SampleType,
     sample_rates: Vec<u32>,
@@ -52,7 +52,7 @@ pub struct HydraSdr<C = NusbControl> {
 
 impl<C: ControlBackend> HydraSdr<C> {
     /// Build a direct device handle from a control backend.
-    pub fn from_control(control: C) -> Self {
+    pub(crate) fn from_control(control: C) -> Self {
         Self {
             control,
             sample_type: SampleType::Float32Iq,
@@ -71,13 +71,13 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Read the board ID, matching `hydrasdr_board_id_read`.
-    pub fn board_id_read(&self) -> Result<BoardId> {
+    pub(crate) fn board_id_read(&self) -> Result<BoardId> {
         let data = self.control_in_exact(VendorControlRequest::board_id_read(), 1)?;
-        BoardId::try_from(data[0]).map_err(|_| Error::Status(StatusCode::Other))
+        BoardId::try_from(data[0]).map_err(|_| Error::status(StatusCode::Other))
     }
 
     /// Read the firmware version C string, matching `hydrasdr_version_string_read`.
-    pub fn version_string_read(&self) -> Result<String> {
+    pub(crate) fn version_string_read(&self) -> Result<String> {
         let data = self.control_in_min(
             VendorControlRequest::version_string_read(VERSION_STRING_SIZE),
             0,
@@ -86,7 +86,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Read part ID and serial-number words, matching `hydrasdr_board_partid_serialno_read`.
-    pub fn board_partid_serialno_read(&self) -> Result<PartIdSerialNo> {
+    pub(crate) fn board_partid_serialno_read(&self) -> Result<PartIdSerialNo> {
         let data = self.control_in_exact(VendorControlRequest::board_partid_serialno_read(), 24)?;
         decode_part_id_serial(&data)
     }
@@ -94,7 +94,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     /// Read the primary firmware capability word.
     ///
     /// If firmware does not support the request, the RFOne hard-coded C capability mask is used.
-    pub fn get_capabilities(&self) -> Result<u32> {
+    pub(crate) fn get_capabilities(&self) -> Result<u32> {
         match self.control_in_exact(VendorControlRequest::get_capabilities(0), 4) {
             Ok(data) => Ok(u32::from_le_bytes(
                 data[0..4].try_into().expect("four bytes"),
@@ -104,7 +104,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Read reserved capability words when firmware provides them.
-    pub fn get_capabilities_reserved(&self) -> Result<[u32; 3]> {
+    pub(crate) fn get_capabilities_reserved(&self) -> Result<[u32; 3]> {
         let mut reserved = [0; 3];
         for (i, slot) in reserved.iter_mut().enumerate() {
             if let Ok(data) =
@@ -117,7 +117,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Build direct device metadata from firmware queries and RFOne static tables.
-    pub fn get_device_info(&mut self) -> Result<DeviceInfo> {
+    pub(crate) fn get_device_info(&mut self) -> Result<DeviceInfo> {
         let board_id = self.board_id_read()?;
         let firmware_version = self.version_string_read()?;
         let part_serial = self.board_partid_serialno_read()?;
@@ -137,7 +137,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     ///
     /// IQ sample modes return the C-style virtual rate table built from hardware rates and
     /// supported DDC decimation factors.
-    pub fn get_samplerates(&mut self) -> Result<Vec<u32>> {
+    pub(crate) fn get_samplerates(&mut self) -> Result<Vec<u32>> {
         let count = self.read_count(VendorControlRequest::get_samplerates_count(false))?;
         let rates =
             self.read_u32_list(VendorControlRequest::get_samplerates(count, false), count)?;
@@ -146,7 +146,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set sample rate by C-compatible index or kHz fallback calculation.
-    pub fn set_samplerate(&mut self, samplerate: u32) -> Result<()> {
+    pub(crate) fn set_samplerate(&mut self, samplerate: u32) -> Result<()> {
         let (rate_param, hardware_samplerate, decimation_factor) =
             self.sample_rate_config(samplerate)?;
         self.control_in_min(VendorControlRequest::set_samplerate(rate_param, 1), 1)?;
@@ -158,7 +158,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Read supported bandwidths with the C count-then-list protocol.
-    pub fn get_bandwidths(&mut self) -> Result<Vec<u32>> {
+    pub(crate) fn get_bandwidths(&mut self) -> Result<Vec<u32>> {
         let count = self.read_count(VendorControlRequest::get_bandwidths_count())?;
         let bandwidths = self.read_u32_list(VendorControlRequest::get_bandwidths(count), count)?;
         self.bandwidths = bandwidths.clone();
@@ -166,7 +166,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set analog bandwidth by C-compatible index or kHz fallback calculation.
-    pub fn set_bandwidth(&mut self, bandwidth: u32) -> Result<()> {
+    pub(crate) fn set_bandwidth(&mut self, bandwidth: u32) -> Result<()> {
         let bandwidth_param = self.bandwidth_param(bandwidth)?;
         self.control_in_min(VendorControlRequest::set_bandwidth(bandwidth_param), 1)?;
         self.current_bandwidth = bandwidth;
@@ -174,15 +174,15 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
-    pub fn set_freq(&mut self, freq_hz: u64) -> Result<()> {
+    pub(crate) fn set_freq(&mut self, freq_hz: u64) -> Result<()> {
         if freq_hz == 0 || freq_hz > MAX_FREQ_HZ {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         self.control_out(VendorControlRequest::set_frequency(freq_hz))
     }
 
     /// Set legacy LNA gain; values above the RFOne maximum are clamped like the C driver.
-    pub fn set_lna_gain(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_lna_gain(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain(
             GainType::Lna,
             VendorRequest::SetLnaGain,
@@ -192,7 +192,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set legacy mixer gain; values above the RFOne maximum are clamped like the C driver.
-    pub fn set_mixer_gain(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_mixer_gain(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain(
             GainType::Mixer,
             VendorRequest::SetMixerGain,
@@ -202,7 +202,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set legacy VGA gain; values above the RFOne maximum are clamped like the C driver.
-    pub fn set_vga_gain(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_vga_gain(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain(
             GainType::Vga,
             VendorRequest::SetVgaGain,
@@ -212,17 +212,17 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Enable or disable LNA AGC through the legacy request.
-    pub fn set_lna_agc(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_lna_agc(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain(GainType::LnaAgc, VendorRequest::SetLnaAgc, value, 1)
     }
 
     /// Enable or disable mixer AGC through the legacy request.
-    pub fn set_mixer_agc(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_mixer_agc(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain(GainType::MixerAgc, VendorRequest::SetMixerAgc, value, 1)
     }
 
     /// Set a gain through the extended gain API when available, otherwise through C fallbacks.
-    pub fn set_gain(&mut self, gain_type: GainType, value: u8) -> Result<()> {
+    pub(crate) fn set_gain(&mut self, gain_type: GainType, value: u8) -> Result<()> {
         if self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0 {
             self.control_in_min(VendorControlRequest::unified_gain(gain_type, value), 1)?;
             self.update_gain_cache(gain_type, value, value.max(1));
@@ -240,7 +240,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Apply the RFOne linearity preset table, matching the C gain choreography.
-    pub fn set_linearity_gain(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_linearity_gain(&mut self, value: u8) -> Result<()> {
         let index = reverse_gain_table_index(value);
         self.set_mixer_agc(0)?;
         self.set_lna_agc(0)?;
@@ -252,7 +252,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Apply the RFOne sensitivity preset table, matching the C gain choreography.
-    pub fn set_sensitivity_gain(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_sensitivity_gain(&mut self, value: u8) -> Result<()> {
         let index = reverse_gain_table_index(value);
         self.set_mixer_agc(0)?;
         self.set_lna_agc(0)?;
@@ -264,12 +264,12 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Control RF bias tee power through the C vendor request.
-    pub fn set_rf_bias(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_rf_bias(&mut self, value: u8) -> Result<()> {
         self.control_out(VendorControlRequest::set_rf_bias(value))
     }
 
     /// Enable or disable C packed-sample mode before streaming.
-    pub fn set_packing(&mut self, value: u8) -> Result<()> {
+    pub(crate) fn set_packing(&mut self, value: u8) -> Result<()> {
         self.control_in_min(VendorControlRequest::set_packing(value), 1)?;
         self.packing_enabled = value == 1;
         self.streaming.set_packing(self.packing_enabled)?;
@@ -277,16 +277,16 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Select an RF input port and require the firmware success byte used by the C API.
-    pub fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
+    pub(crate) fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
         let response = self.control_in_min(VendorControlRequest::set_rf_port(port), 1)?;
         if response.first().copied() != Some(1) {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         Ok(())
     }
 
     /// Set the sample type tracked by the direct streaming path.
-    pub fn set_sample_type(&mut self, sample_type: SampleType) -> Result<()> {
+    pub(crate) fn set_sample_type(&mut self, sample_type: SampleType) -> Result<()> {
         self.sample_type = sample_type;
         Ok(())
     }
@@ -295,7 +295,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     ///
     /// `LowBandwidth` prefers a direct firmware hardware rate when one is available. `HighDefinition`
     /// prefers the highest compatible hardware rate and decimates in the host converter.
-    pub fn set_decimation_mode(&mut self, mode: DecimationMode) -> Result<()> {
+    pub(crate) fn set_decimation_mode(&mut self, mode: DecimationMode) -> Result<()> {
         if self.decimation_mode == mode {
             return Ok(());
         }
@@ -312,7 +312,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     }
 
     /// Set receiver mode directly.
-    pub fn receiver_mode(&self, mode: ReceiverMode) -> Result<()> {
+    pub(crate) fn receiver_mode(&self, mode: ReceiverMode) -> Result<()> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
     }
 
@@ -345,7 +345,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         if bandwidth < self.bandwidths.len() as u32 {
             return Ok(bandwidth);
         }
-        Err(Error::Status(StatusCode::InvalidParam))
+        Err(Error::status(StatusCode::InvalidParam))
     }
 
     fn set_legacy_gain(
@@ -397,7 +397,7 @@ impl<C: ControlBackend> HydraSdr<C> {
     fn control_in_exact(&self, request: VendorControlRequest, len: usize) -> Result<Vec<u8>> {
         let data = self.control.control_in(request)?;
         if data.len() < len {
-            return Err(Error::Status(StatusCode::LibUsb));
+            return Err(Error::status(StatusCode::LibUsb));
         }
         Ok(data)
     }
@@ -507,7 +507,7 @@ impl<C> HydraSdr<C> {
             return Ok(index as u32);
         }
         if hardware_samplerate < MIN_SAMPLERATE_BY_VALUE {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         let mut rate_param = hardware_samplerate;
         if self.sample_type_is_iq() {
@@ -519,15 +519,15 @@ impl<C> HydraSdr<C> {
 
 impl<C: AsyncControlBackend> HydraSdr<C> {
     /// Async counterpart to [`HydraSdr::board_id_read`].
-    pub async fn board_id_read_async(&self) -> Result<BoardId> {
+    pub(crate) async fn board_id_read_async(&self) -> Result<BoardId> {
         let data = self
             .control_in_exact_async(VendorControlRequest::board_id_read(), 1)
             .await?;
-        BoardId::try_from(data[0]).map_err(|_| Error::Status(StatusCode::Other))
+        BoardId::try_from(data[0]).map_err(|_| Error::status(StatusCode::Other))
     }
 
     /// Async counterpart to [`HydraSdr::version_string_read`].
-    pub async fn version_string_read_async(&self) -> Result<String> {
+    pub(crate) async fn version_string_read_async(&self) -> Result<String> {
         let data = self
             .control_in_min_async(
                 VendorControlRequest::version_string_read(VERSION_STRING_SIZE),
@@ -538,7 +538,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::board_partid_serialno_read`].
-    pub async fn board_partid_serialno_read_async(&self) -> Result<PartIdSerialNo> {
+    pub(crate) async fn board_partid_serialno_read_async(&self) -> Result<PartIdSerialNo> {
         let data = self
             .control_in_exact_async(VendorControlRequest::board_partid_serialno_read(), 24)
             .await?;
@@ -546,7 +546,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::get_capabilities`].
-    pub async fn get_capabilities_async(&self) -> Result<u32> {
+    pub(crate) async fn get_capabilities_async(&self) -> Result<u32> {
         match self
             .control_in_exact_async(VendorControlRequest::get_capabilities(0), 4)
             .await
@@ -559,7 +559,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::get_capabilities_reserved`].
-    pub async fn get_capabilities_reserved_async(&self) -> Result<[u32; 3]> {
+    pub(crate) async fn get_capabilities_reserved_async(&self) -> Result<[u32; 3]> {
         let mut reserved = [0; 3];
         for (i, slot) in reserved.iter_mut().enumerate() {
             if let Ok(data) = self
@@ -573,7 +573,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::get_device_info`].
-    pub async fn get_device_info_async(&mut self) -> Result<DeviceInfo> {
+    pub(crate) async fn get_device_info_async(&mut self) -> Result<DeviceInfo> {
         let board_id = self.board_id_read_async().await?;
         let firmware_version = self.version_string_read_async().await?;
         let part_serial = self.board_partid_serialno_read_async().await?;
@@ -590,7 +590,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::get_samplerates`].
-    pub async fn get_samplerates_async(&mut self) -> Result<Vec<u32>> {
+    pub(crate) async fn get_samplerates_async(&mut self) -> Result<Vec<u32>> {
         let count = self
             .read_count_async(VendorControlRequest::get_samplerates_count(false))
             .await?;
@@ -602,7 +602,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_samplerate`].
-    pub async fn set_samplerate_async(&mut self, samplerate: u32) -> Result<()> {
+    pub(crate) async fn set_samplerate_async(&mut self, samplerate: u32) -> Result<()> {
         let (rate_param, hardware_samplerate, decimation_factor) =
             self.sample_rate_config_async(samplerate).await?;
         self.control_in_min_async(VendorControlRequest::set_samplerate(rate_param, 1), 1)
@@ -615,7 +615,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_decimation_mode`].
-    pub async fn set_decimation_mode_async(&mut self, mode: DecimationMode) -> Result<()> {
+    pub(crate) async fn set_decimation_mode_async(&mut self, mode: DecimationMode) -> Result<()> {
         if self.decimation_mode == mode {
             return Ok(());
         }
@@ -632,7 +632,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::get_bandwidths`].
-    pub async fn get_bandwidths_async(&mut self) -> Result<Vec<u32>> {
+    pub(crate) async fn get_bandwidths_async(&mut self) -> Result<Vec<u32>> {
         let count = self
             .read_count_async(VendorControlRequest::get_bandwidths_count())
             .await?;
@@ -644,7 +644,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_bandwidth`].
-    pub async fn set_bandwidth_async(&mut self, bandwidth: u32) -> Result<()> {
+    pub(crate) async fn set_bandwidth_async(&mut self, bandwidth: u32) -> Result<()> {
         let bandwidth_param = self.bandwidth_param_async(bandwidth).await?;
         self.control_in_min_async(VendorControlRequest::set_bandwidth(bandwidth_param), 1)
             .await?;
@@ -653,16 +653,16 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_freq`].
-    pub async fn set_freq_async(&mut self, freq_hz: u64) -> Result<()> {
+    pub(crate) async fn set_freq_async(&mut self, freq_hz: u64) -> Result<()> {
         if freq_hz == 0 || freq_hz > MAX_FREQ_HZ {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         self.control_out_async(VendorControlRequest::set_frequency(freq_hz))
             .await
     }
 
     /// Async counterpart to [`HydraSdr::set_lna_gain`].
-    pub async fn set_lna_gain_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_lna_gain_async(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain_async(
             GainType::Lna,
             VendorRequest::SetLnaGain,
@@ -673,7 +673,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_mixer_gain`].
-    pub async fn set_mixer_gain_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_mixer_gain_async(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain_async(
             GainType::Mixer,
             VendorRequest::SetMixerGain,
@@ -684,7 +684,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_vga_gain`].
-    pub async fn set_vga_gain_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_vga_gain_async(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain_async(
             GainType::Vga,
             VendorRequest::SetVgaGain,
@@ -695,19 +695,19 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_lna_agc`].
-    pub async fn set_lna_agc_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_lna_agc_async(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain_async(GainType::LnaAgc, VendorRequest::SetLnaAgc, value, 1)
             .await
     }
 
     /// Async counterpart to [`HydraSdr::set_mixer_agc`].
-    pub async fn set_mixer_agc_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_mixer_agc_async(&mut self, value: u8) -> Result<()> {
         self.set_legacy_gain_async(GainType::MixerAgc, VendorRequest::SetMixerAgc, value, 1)
             .await
     }
 
     /// Async counterpart to [`HydraSdr::set_gain`].
-    pub async fn set_gain_async(&mut self, gain_type: GainType, value: u8) -> Result<()> {
+    pub(crate) async fn set_gain_async(&mut self, gain_type: GainType, value: u8) -> Result<()> {
         if self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0 {
             self.control_in_min_async(VendorControlRequest::unified_gain(gain_type, value), 1)
                 .await?;
@@ -726,7 +726,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_linearity_gain`].
-    pub async fn set_linearity_gain_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_linearity_gain_async(&mut self, value: u8) -> Result<()> {
         let index = reverse_gain_table_index(value);
         self.set_mixer_agc_async(0).await?;
         self.set_lna_agc_async(0).await?;
@@ -741,7 +741,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_sensitivity_gain`].
-    pub async fn set_sensitivity_gain_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_sensitivity_gain_async(&mut self, value: u8) -> Result<()> {
         let index = reverse_gain_table_index(value);
         self.set_mixer_agc_async(0).await?;
         self.set_lna_agc_async(0).await?;
@@ -756,13 +756,13 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_rf_bias`].
-    pub async fn set_rf_bias_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_rf_bias_async(&mut self, value: u8) -> Result<()> {
         self.control_out_async(VendorControlRequest::set_rf_bias(value))
             .await
     }
 
     /// Async counterpart to [`HydraSdr::set_packing`].
-    pub async fn set_packing_async(&mut self, value: u8) -> Result<()> {
+    pub(crate) async fn set_packing_async(&mut self, value: u8) -> Result<()> {
         self.control_in_min_async(VendorControlRequest::set_packing(value), 1)
             .await?;
         self.packing_enabled = value == 1;
@@ -771,18 +771,18 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 
     /// Async counterpart to [`HydraSdr::set_rf_port`].
-    pub async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
+    pub(crate) async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
         let response = self
             .control_in_min_async(VendorControlRequest::set_rf_port(port), 1)
             .await?;
         if response.first().copied() != Some(1) {
-            return Err(Error::Status(StatusCode::InvalidParam));
+            return Err(Error::status(StatusCode::InvalidParam));
         }
         Ok(())
     }
 
     /// Async counterpart to [`HydraSdr::receiver_mode`].
-    pub async fn receiver_mode_async(&self, mode: ReceiverMode) -> Result<()> {
+    pub(crate) async fn receiver_mode_async(&self, mode: ReceiverMode) -> Result<()> {
         self.control_out_async(VendorControlRequest::receiver_mode(mode))
             .await
     }
@@ -811,7 +811,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         if bandwidth < self.bandwidths.len() as u32 {
             return Ok(bandwidth);
         }
-        Err(Error::Status(StatusCode::InvalidParam))
+        Err(Error::status(StatusCode::InvalidParam))
     }
 
     async fn set_legacy_gain_async(
@@ -874,7 +874,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     ) -> Result<Vec<u8>> {
         let data = self.control.control_in_async(request).await?;
         if data.len() < len {
-            return Err(Error::Status(StatusCode::LibUsb));
+            return Err(Error::status(StatusCode::LibUsb));
         }
         Ok(data)
     }
@@ -897,7 +897,7 @@ where
     C: ControlBackend + StreamingBackend,
 {
     /// Start a persistent synchronous pull RX stream for raw USB blocks.
-    pub fn start_raw_rx_stream(&mut self) -> Result<RawRxStream<C::BulkIn>> {
+    pub(crate) fn start_raw_rx_stream(&mut self) -> Result<RawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off)?;
         self.receiver_mode(ReceiverMode::Rx)?;
 
@@ -919,7 +919,10 @@ where
     }
 
     /// Stop a persistent synchronous raw RX stream and return its accumulated counters.
-    pub fn stop_raw_rx_stream(&mut self, stream: RawRxStream<C::BulkIn>) -> Result<StreamingStats> {
+    pub(crate) fn stop_raw_rx_stream(
+        &mut self,
+        stream: RawRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
         let (stats, stop_result) = self.close_raw_rx_stream(stream);
         stop_result?;
         Ok(stats)
@@ -934,9 +937,9 @@ where
     }
 
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
-    pub fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
+    pub(crate) fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
-            return Err(Error::Status(StatusCode::Unsupported));
+            return Err(Error::status(StatusCode::Unsupported));
         }
 
         self.receiver_mode(ReceiverMode::Off)?;
@@ -960,7 +963,10 @@ where
     }
 
     /// Stop a persistent synchronous pull RX stream and return its accumulated counters.
-    pub fn stop_rx_stream(&mut self, stream: DirectRxStream<C::BulkIn>) -> Result<StreamingStats> {
+    pub(crate) fn stop_rx_stream(
+        &mut self,
+        stream: DirectRxStream<C::BulkIn>,
+    ) -> Result<StreamingStats> {
         let (stats, stop_result) = self.close_rx_stream(stream);
         stop_result?;
         Ok(stats)
@@ -980,7 +986,9 @@ where
     C: AsyncControlBackend + AsyncStreamingBackend,
 {
     /// Start a persistent async pull RX stream for raw USB blocks.
-    pub async fn start_raw_rx_stream_async(&mut self) -> Result<AsyncRawRxStream<C::BulkIn>> {
+    pub(crate) async fn start_raw_rx_stream_async(
+        &mut self,
+    ) -> Result<AsyncRawRxStream<C::BulkIn>> {
         self.receiver_mode_async(ReceiverMode::Off).await?;
         self.receiver_mode_async(ReceiverMode::Rx).await?;
 
@@ -1002,7 +1010,7 @@ where
     }
 
     /// Stop a persistent async raw RX stream and return its accumulated counters.
-    pub async fn stop_raw_rx_stream_async(
+    pub(crate) async fn stop_raw_rx_stream_async(
         &mut self,
         mut stream: AsyncRawRxStream<C::BulkIn>,
     ) -> Result<StreamingStats> {
@@ -1014,22 +1022,22 @@ where
 
 impl HydraSdr<NusbControl> {
     /// Open the first visible HydraSDR RFOne through `nusb`, matching `hydrasdr_open`.
-    pub fn open() -> Result<Self> {
+    pub(crate) fn open() -> Result<Self> {
         Self::open_sn_internal(None)
     }
 
     /// Open a HydraSDR RFOne by parsed serial number, matching `hydrasdr_open_sn`.
-    pub fn open_sn(serial: u64) -> Result<Self> {
+    pub(crate) fn open_sn(serial: u64) -> Result<Self> {
         Self::open_sn_internal(Some(serial))
     }
 
     /// Async counterpart to [`HydraSdr::open`].
-    pub async fn open_async() -> Result<Self> {
+    pub(crate) async fn open_async() -> Result<Self> {
         Self::open_sn_internal_async(None).await
     }
 
     /// Async counterpart to [`HydraSdr::open_sn`].
-    pub async fn open_sn_async(serial: u64) -> Result<Self> {
+    pub(crate) async fn open_sn_async(serial: u64) -> Result<Self> {
         Self::open_sn_internal_async(Some(serial)).await
     }
 
@@ -1048,7 +1056,7 @@ impl HydraSdr<NusbControl> {
         let dev = Self::from_control(NusbControl::new(device, interface));
         let firmware = dev.version_string_read_async().await?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
-            return Err(Error::Status(StatusCode::NotFound));
+            return Err(Error::status(StatusCode::NotFound));
         }
         Ok(dev)
     }
@@ -1068,7 +1076,7 @@ impl HydraSdr<NusbControl> {
         let dev = Self::from_control(NusbControl::new(device, interface));
         let firmware = dev.version_string_read()?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
-            return Err(Error::Status(StatusCode::NotFound));
+            return Err(Error::status(StatusCode::NotFound));
         }
         Ok(dev)
     }

@@ -1,16 +1,7 @@
-use hydrasdr_rs::{
-    Bandwidth, Config, Device, DeviceInfo, DeviceSelector, Error, ErrorKind, FinishRxStreamError,
-    GainPreset, IntoRxStreamError, RfPort, SampleBlock, SampleFormat,
-};
+use hydrasdr_rs::{Bandwidth, Config, DeviceInfo, ErrorKind, GainPreset, RfPort, SampleFormat};
 
 #[test]
 fn public_config_builder_uses_ergonomic_types() {
-    assert_eq!(Device::builder().selector(), DeviceSelector::First);
-    assert_eq!(
-        Device::builder().serial(0x0123_4567_89ab_cdef).selector(),
-        DeviceSelector::Serial(0x0123_4567_89ab_cdef)
-    );
-
     let config = Config::builder()
         .frequency_hz(144_500_000)
         .sample_rate_hz(10_000_000)
@@ -55,27 +46,8 @@ fn public_config_builder_validates_rfone_frequency_range() {
 }
 
 #[test]
-fn public_sample_block_is_raw_view_with_metadata() {
-    let raw = [1, 2, 3, 4];
-    let block = SampleBlock::new(&raw, SampleFormat::RawAdc, 2, 9);
-
-    assert_eq!(block.raw_bytes(), &raw);
-    assert_eq!(block.sample_format(), SampleFormat::RawAdc);
-    assert_eq!(block.sample_count(), 2);
-    assert_eq!(block.dropped_samples(), 9);
-}
-
-#[test]
-fn public_owned_rx_stream_error_is_standard_error() {
-    fn assert_error<T: std::error::Error>() {}
-
-    assert_error::<IntoRxStreamError>();
-    assert_error::<FinishRxStreamError>();
-}
-
-#[test]
 fn public_error_and_metadata_are_ergonomic() {
-    let err = Error::invalid_config("sample_rate_hz", "too low");
+    let err = Config::builder().sample_rate_hz(9_999).build().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidConfig);
 
     let info = DeviceInfo {
