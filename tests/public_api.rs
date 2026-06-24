@@ -48,6 +48,59 @@ fn public_config_builder_validates_rfone_frequency_range() {
 }
 
 #[test]
+fn public_config_builder_validates_vendor_parameter_ranges() {
+    assert!(
+        Config::builder()
+            .sample_format(SampleFormat::RawAdc)
+            .sample_rate_hz(65_535_999)
+            .build()
+            .is_ok()
+    );
+    assert!(
+        Config::builder()
+            .sample_format(SampleFormat::F32Iq)
+            .sample_rate_hz(32_767_999)
+            .build()
+            .is_ok()
+    );
+    assert!(Config::builder().bandwidth_hz(65_535_999).build().is_ok());
+
+    assert!(
+        Config::builder()
+            .sample_format(SampleFormat::RawAdc)
+            .sample_rate_hz(65_536_000)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+    assert!(
+        Config::builder()
+            .sample_format(SampleFormat::F32Iq)
+            .sample_rate_hz(32_768_000)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+    assert!(
+        Config::builder()
+            .sample_format(SampleFormat::RawAdc)
+            .sample_rate_hz(u32::MAX)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+    assert!(
+        Config::builder()
+            .bandwidth_hz(65_536_000)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+    assert!(
+        Config::builder()
+            .bandwidth_hz(u32::MAX)
+            .build()
+            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+    );
+}
+
+#[test]
 fn public_config_builder_validates_manual_gain_ranges() {
     assert!(
         Config::builder()

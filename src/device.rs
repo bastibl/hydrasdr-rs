@@ -321,7 +321,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.receiver_mode(ReceiverMode::Off)
     }
 
-    fn sample_rate_config(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
+    fn sample_rate_config(&mut self, samplerate: u32) -> Result<(u16, u32, u32)> {
         if self.sample_rates.is_empty() {
             let _ = self.get_samplerates();
         }
@@ -332,18 +332,18 @@ impl<C: ControlBackend> HydraSdr<C> {
         Ok((rate_param, hardware_samplerate, decimation_factor))
     }
 
-    fn bandwidth_param(&mut self, bandwidth: u32) -> Result<u32> {
+    fn bandwidth_param(&mut self, bandwidth: u32) -> Result<u16> {
         if self.bandwidths.is_empty() {
             let _ = self.get_bandwidths();
         }
         if let Some(index) = self.bandwidths.iter().position(|value| *value == bandwidth) {
-            return Ok(index as u32);
+            return checked_vendor_param(index);
         }
         if bandwidth >= MIN_BANDWIDTH_BY_VALUE {
-            return Ok(bandwidth / MIN_BANDWIDTH_BY_VALUE);
+            return checked_vendor_param(bandwidth / MIN_BANDWIDTH_BY_VALUE);
         }
         if bandwidth < self.bandwidths.len() as u32 {
-            return Ok(bandwidth);
+            return checked_vendor_param(bandwidth);
         }
         Err(Error::status(StatusCode::InvalidParam))
     }
@@ -498,13 +498,13 @@ impl<C> HydraSdr<C> {
         best
     }
 
-    fn sample_rate_param_for_hardware_rate(&self, hardware_samplerate: u32) -> Result<u32> {
+    fn sample_rate_param_for_hardware_rate(&self, hardware_samplerate: u32) -> Result<u16> {
         if let Some(index) = self
             .sample_rates
             .iter()
             .position(|rate| *rate == hardware_samplerate)
         {
-            return Ok(index as u32);
+            return checked_vendor_param(index);
         }
         if hardware_samplerate < MIN_SAMPLERATE_BY_VALUE {
             return Err(Error::status(StatusCode::InvalidParam));
@@ -513,7 +513,7 @@ impl<C> HydraSdr<C> {
         if self.sample_type_is_iq() {
             rate_param = rate_param.saturating_mul(2);
         }
-        Ok(rate_param / 1000)
+        checked_vendor_param(rate_param / 1000)
     }
 }
 
@@ -787,7 +787,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
             .await
     }
 
-    async fn sample_rate_config_async(&mut self, samplerate: u32) -> Result<(u32, u32, u32)> {
+    async fn sample_rate_config_async(&mut self, samplerate: u32) -> Result<(u16, u32, u32)> {
         if self.sample_rates.is_empty() {
             let _ = self.get_samplerates_async().await;
         }
@@ -798,18 +798,18 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         Ok((rate_param, hardware_samplerate, decimation_factor))
     }
 
-    async fn bandwidth_param_async(&mut self, bandwidth: u32) -> Result<u32> {
+    async fn bandwidth_param_async(&mut self, bandwidth: u32) -> Result<u16> {
         if self.bandwidths.is_empty() {
             let _ = self.get_bandwidths_async().await;
         }
         if let Some(index) = self.bandwidths.iter().position(|value| *value == bandwidth) {
-            return Ok(index as u32);
+            return checked_vendor_param(index);
         }
         if bandwidth >= MIN_BANDWIDTH_BY_VALUE {
-            return Ok(bandwidth / MIN_BANDWIDTH_BY_VALUE);
+            return checked_vendor_param(bandwidth / MIN_BANDWIDTH_BY_VALUE);
         }
         if bandwidth < self.bandwidths.len() as u32 {
-            return Ok(bandwidth);
+            return checked_vendor_param(bandwidth);
         }
         Err(Error::status(StatusCode::InvalidParam))
     }
@@ -1097,6 +1097,12 @@ fn reverse_gain_table_index(value: u8) -> usize {
 fn serial_from_part_id(part_serial: &PartIdSerialNo) -> Option<u64> {
     let serial = ((part_serial.serial_no[2] as u64) << 32) | part_serial.serial_no[3] as u64;
     (serial != 0).then_some(serial)
+}
+
+fn checked_vendor_param(value: impl TryInto<u16>) -> Result<u16> {
+    value
+        .try_into()
+        .map_err(|_| Error::status(StatusCode::InvalidParam))
 }
 
 fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {

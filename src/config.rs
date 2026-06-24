@@ -15,6 +15,10 @@ const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
 const MIN_SAMPLE_RATE_HZ: u32 = 10_000;
 const MIN_BANDWIDTH_HZ: u32 = 1_000;
 const MAX_PRESET_GAIN: u8 = 21;
+const MAX_VENDOR_INDEX_OR_KHZ: u32 = u16::MAX as u32;
+const MAX_RAW_SAMPLE_RATE_HZ: u32 = MAX_VENDOR_INDEX_OR_KHZ * 1_000 + 999;
+const MAX_F32_IQ_SAMPLE_RATE_HZ: u32 = (((MAX_VENDOR_INDEX_OR_KHZ + 1) * 1_000) - 1) / 2;
+const MAX_MANUAL_BANDWIDTH_HZ: u32 = MAX_VENDOR_INDEX_OR_KHZ * 1_000 + 999;
 
 /// Device selection used by [`crate::DeviceBuilder`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,7 +213,7 @@ impl Config {
     /// Validate this configuration without touching USB.
     pub fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
-        validate_sample_rate(self.sample_rate_hz)?;
+        validate_sample_rate(self.sample_rate_hz, self.sample_format)?;
         validate_bandwidth(self.bandwidth)?;
         validate_gain(self.gain)?;
         validate_format_decimation(self.sample_format, self.decimation_mode)?;
@@ -433,11 +437,21 @@ fn validate_frequency(value: u64) -> Result<()> {
     Ok(())
 }
 
-fn validate_sample_rate(value: u32) -> Result<()> {
+fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> Result<()> {
     if value < MIN_SAMPLE_RATE_HZ {
         return Err(Error::invalid_config(
             "sample_rate_hz",
             "must be at least 10_000 Hz",
+        ));
+    }
+    let max_hz = match sample_format {
+        SampleFormat::RawAdc => MAX_RAW_SAMPLE_RATE_HZ,
+        SampleFormat::F32Iq => MAX_F32_IQ_SAMPLE_RATE_HZ,
+    };
+    if value > max_hz {
+        return Err(Error::invalid_config(
+            "sample_rate_hz",
+            "must fit the HydraSDR vendor request parameter",
         ));
     }
     Ok(())
@@ -473,6 +487,14 @@ fn validate_bandwidth(value: Bandwidth) -> Result<()> {
         return Err(Error::invalid_config(
             "bandwidth_hz",
             "manual bandwidth must be at least 1_000 Hz",
+        ));
+    }
+    if let Bandwidth::ManualHz(hz) = value
+        && hz > MAX_MANUAL_BANDWIDTH_HZ
+    {
+        return Err(Error::invalid_config(
+            "bandwidth_hz",
+            "manual bandwidth must fit the HydraSDR vendor request parameter",
         ));
     }
     Ok(())

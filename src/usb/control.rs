@@ -166,13 +166,8 @@ impl VendorControlRequest {
     }
 
     /// Encode samplerate selection by index or kHz-derived value.
-    pub(crate) fn set_samplerate(index_or_khz: u32, response_len: usize) -> Self {
-        Self::in_request(
-            VendorRequest::SetSamplerate,
-            0,
-            index_or_khz as u16,
-            response_len,
-        )
+    pub(crate) fn set_samplerate(index_or_khz: u16, response_len: usize) -> Self {
+        Self::in_request(VendorRequest::SetSamplerate, 0, index_or_khz, response_len)
     }
 
     /// Encode the C bandwidth count query.
@@ -191,8 +186,8 @@ impl VendorControlRequest {
     }
 
     /// Encode bandwidth selection by index or kHz-derived value.
-    pub(crate) fn set_bandwidth(index_or_khz: u32) -> Self {
-        Self::in_request(VendorRequest::SetBandwidth, 0, index_or_khz as u16, 1)
+    pub(crate) fn set_bandwidth(index_or_khz: u16) -> Self {
+        Self::in_request(VendorRequest::SetBandwidth, 0, index_or_khz, 1)
     }
 
     /// Encode one of the legacy gain requests.
