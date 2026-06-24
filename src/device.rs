@@ -139,28 +139,14 @@ impl<C: ControlBackend> HydraSdr<C> {
         let part_serial = self.board_partid_serialno_read()?;
         let features = self.get_capabilities()?;
         self.features = Some(features);
-        Ok(DeviceInfo {
+        let features_reserved = self.get_capabilities_reserved()?;
+        Ok(self.build_device_info(
             board_id,
-            board_name: "HydraSDR RFOne",
             firmware_version,
             part_serial,
             features,
-            features_reserved: self.get_capabilities_reserved()?,
-            gains: self.gains.clone(),
-            components: component_infos(),
-            min_frequency: RFONE_MIN_FREQ_HZ,
-            max_frequency: RFONE_MAX_FREQ_HZ,
-            rf_ports: rf_port_infos(),
-            gpio_count: crate::rfone::RFONE_GPIO_COUNT,
-            sample_types: RFONE_SAMPLE_TYPES,
-            typical_power_mw: RFONE_TYPICAL_POWER_MW,
-            max_power_mw: crate::rfone::RFONE_MAX_POWER_MW,
-            max_safe_temp_celsius: crate::rfone::RFONE_MAX_SAFE_TEMP_C,
-            current_samplerate: self.current_samplerate,
-            current_bandwidth: self.current_bandwidth,
-            current_sample_type: self.sample_type,
-            current_packing: self.packing_enabled,
-        })
+            features_reserved,
+        ))
     }
 
     /// Read supported sample rates with the C count-then-list protocol.
@@ -571,6 +557,38 @@ impl<C: ControlBackend> HydraSdr<C> {
 }
 
 impl<C> HydraSdr<C> {
+    fn build_device_info(
+        &self,
+        board_id: BoardId,
+        firmware_version: String,
+        part_serial: PartIdSerialNo,
+        features: u32,
+        features_reserved: [u32; 3],
+    ) -> DeviceInfo {
+        DeviceInfo {
+            board_id,
+            board_name: "HydraSDR RFOne",
+            firmware_version,
+            part_serial,
+            features,
+            features_reserved,
+            gains: self.gains.clone(),
+            components: component_infos(),
+            min_frequency: RFONE_MIN_FREQ_HZ,
+            max_frequency: RFONE_MAX_FREQ_HZ,
+            rf_ports: rf_port_infos(),
+            gpio_count: crate::rfone::RFONE_GPIO_COUNT,
+            sample_types: RFONE_SAMPLE_TYPES,
+            typical_power_mw: RFONE_TYPICAL_POWER_MW,
+            max_power_mw: crate::rfone::RFONE_MAX_POWER_MW,
+            max_safe_temp_celsius: crate::rfone::RFONE_MAX_SAFE_TEMP_C,
+            current_samplerate: self.current_samplerate,
+            current_bandwidth: self.current_bandwidth,
+            current_sample_type: self.sample_type,
+            current_packing: self.packing_enabled,
+        }
+    }
+
     fn visible_sample_rates(&self) -> Vec<u32> {
         if !self.sample_type_is_iq() {
             return self.sample_rates.clone();
@@ -713,28 +731,14 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         let part_serial = self.board_partid_serialno_read_async().await?;
         let features = self.get_capabilities_async().await?;
         self.features = Some(features);
-        Ok(DeviceInfo {
+        let features_reserved = self.get_capabilities_reserved_async().await?;
+        Ok(self.build_device_info(
             board_id,
-            board_name: "HydraSDR RFOne",
             firmware_version,
             part_serial,
             features,
-            features_reserved: self.get_capabilities_reserved_async().await?,
-            gains: self.gains.clone(),
-            components: component_infos(),
-            min_frequency: RFONE_MIN_FREQ_HZ,
-            max_frequency: RFONE_MAX_FREQ_HZ,
-            rf_ports: rf_port_infos(),
-            gpio_count: crate::rfone::RFONE_GPIO_COUNT,
-            sample_types: RFONE_SAMPLE_TYPES,
-            typical_power_mw: RFONE_TYPICAL_POWER_MW,
-            max_power_mw: crate::rfone::RFONE_MAX_POWER_MW,
-            max_safe_temp_celsius: crate::rfone::RFONE_MAX_SAFE_TEMP_C,
-            current_samplerate: self.current_samplerate,
-            current_bandwidth: self.current_bandwidth,
-            current_sample_type: self.sample_type,
-            current_packing: self.packing_enabled,
-        })
+            features_reserved,
+        ))
     }
 
     /// Async counterpart to [`HydraSdr::get_samplerates`].

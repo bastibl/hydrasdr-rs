@@ -8,7 +8,7 @@ use crate::device::HydraSdr;
 use crate::high_level::DeviceInner as Device;
 use crate::rfone::{RFONE_RX_ENDPOINT, RFONE_TRANSFER_COUNT};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion, Transfer};
-use crate::types::SampleType;
+use crate::types::{BoardId, SampleType};
 use crate::usb::control::{AsyncControlBackend, ControlBackend, VendorControlRequest};
 use crate::{Config, SampleFormat};
 use futures_lite::future::block_on;
@@ -98,6 +98,99 @@ fn async_control_helpers_share_sync_request_encoding_and_update_state() {
 }
 
 #[derive(Debug, Default)]
+struct TrackedAsyncControl {
+    sync_requests: RefCell<Vec<VendorControlRequest>>,
+    async_requests: RefCell<Vec<VendorControlRequest>>,
+    in_responses: RefCell<VecDeque<Vec<u8>>>,
+}
+
+impl TrackedAsyncControl {
+    fn with_info_responses() -> Self {
+        Self {
+            sync_requests: RefCell::new(Vec::new()),
+            async_requests: RefCell::new(Vec::new()),
+            in_responses: RefCell::new(
+                [
+                    vec![BoardId::HydraSdrRfOneOfficial as u8],
+                    b"HydraSDR RFOne async\0".to_vec(),
+                    part_id_serial_response(),
+                    0x007f_ffffu32.to_le_bytes().to_vec(),
+                    0u32.to_le_bytes().to_vec(),
+                    0u32.to_le_bytes().to_vec(),
+                    0u32.to_le_bytes().to_vec(),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        }
+    }
+
+    fn next_response(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
+        let response_len = request.length;
+        if let Some(response) = self.in_responses.borrow_mut().pop_front() {
+            Ok(response)
+        } else {
+            Ok(vec![0; response_len])
+        }
+    }
+}
+
+impl ControlBackend for TrackedAsyncControl {
+    fn control_in(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
+        self.sync_requests.borrow_mut().push(request.clone());
+        self.next_response(request)
+    }
+
+    fn control_out(&self, request: VendorControlRequest) -> crate::Result<()> {
+        self.sync_requests.borrow_mut().push(request);
+        Ok(())
+    }
+}
+
+impl AsyncControlBackend for TrackedAsyncControl {
+    async fn control_in_async(&self, request: VendorControlRequest) -> crate::Result<Vec<u8>> {
+        self.async_requests.borrow_mut().push(request.clone());
+        self.next_response(request)
+    }
+
+    async fn control_out_async(&self, request: VendorControlRequest) -> crate::Result<()> {
+        self.async_requests.borrow_mut().push(request);
+        Ok(())
+    }
+}
+
+#[test]
+fn async_from_direct_queries_metadata_without_sync_control_calls() {
+    block_on(async {
+        let control = TrackedAsyncControl::with_info_responses();
+        let direct = HydraSdr::from_control(control);
+        let device = Device::from_direct_async(direct).await.unwrap();
+
+        assert_eq!(device.info().firmware_version, "HydraSDR RFOne async");
+        assert_eq!(device.info().features, 0x007f_ffff);
+        assert!(device.direct().control().sync_requests.borrow().is_empty());
+
+        let async_requests = device.direct().control().async_requests.borrow();
+        let request_ids: Vec<_> = async_requests
+            .iter()
+            .map(|request| request.request)
+            .collect();
+        assert_eq!(
+            request_ids,
+            vec![
+                VendorRequest::BoardIdRead,
+                VendorRequest::VersionStringRead,
+                VendorRequest::BoardPartIdSerialNoRead,
+                VendorRequest::GetCapabilities,
+                VendorRequest::GetCapabilities,
+                VendorRequest::GetCapabilities,
+                VendorRequest::GetCapabilities,
+            ]
+        );
+    });
+}
+
+#[derive(Debug, Default)]
 struct FakeAsyncState {
     control_requests: Vec<VendorControlRequest>,
     in_responses: VecDeque<Vec<u8>>,
@@ -165,6 +258,20 @@ impl FakeAsyncDevice {
             Ok(response)
         }
     }
+}
+
+fn part_id_serial_response() -> Vec<u8> {
+    [
+        0x1111_1111u32,
+        0x2222_2222,
+        0x3333_3333,
+        0x4444_4444,
+        0x5555_5555,
+        0x6666_6666,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect()
 }
 
 impl ControlBackend for FakeAsyncDevice {

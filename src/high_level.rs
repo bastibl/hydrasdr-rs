@@ -309,6 +309,16 @@ impl<C> DeviceInner<C>
 where
     C: AsyncControlBackend + ControlBackend,
 {
+    /// Wrap an already-open direct handle and query device metadata asynchronously.
+    pub async fn from_direct_async(mut direct: HydraSdr<C>) -> Result<Self> {
+        let info = direct.get_device_info_async().await?;
+        Ok(Self {
+            direct,
+            info: Some(info),
+            sample_format: SampleFormat::F32Iq,
+        })
+    }
+
     /// Apply a high-level receiver configuration through the direct async layer.
     pub async fn configure_async(&mut self, config: &Config) -> Result<()> {
         config.apply_direct_async(&mut self.direct).await?;
@@ -466,7 +476,7 @@ impl DeviceBuilder {
             DeviceSelector::First => HydraSdr::open_async().await?,
             DeviceSelector::Serial(serial) => HydraSdr::open_sn_async(serial).await?,
         };
-        let mut inner = DeviceInner::from_direct(direct)?;
+        let mut inner = DeviceInner::from_direct_async(direct).await?;
         inner.configure_async(&config).await?;
         Ok(Device { inner })
     }
