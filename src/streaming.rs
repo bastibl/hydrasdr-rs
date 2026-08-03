@@ -2,9 +2,8 @@
 
 use std::future::Future;
 use std::ops::Deref;
-use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::converter::Float32IqConverter;
@@ -102,7 +101,6 @@ pub(crate) struct StreamingConfig {
     packed_buffer_size: usize,
     packing_enabled: bool,
     decimation_factor: usize,
-    transfer_timeout: Duration,
 }
 
 impl Default for StreamingConfig {
@@ -113,7 +111,6 @@ impl Default for StreamingConfig {
             packed_buffer_size: PACKED_BUFFER_SIZE,
             packing_enabled: false,
             decimation_factor: 1,
-            transfer_timeout: Duration::MAX,
         }
     }
 }
@@ -194,7 +191,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
     /// Read the next raw transfer block.
     ///
     /// Returns `Ok(None)` when the backend times out before a block is available.
-    pub(crate) fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+    pub(crate) fn next_transfer(&mut self, timeout: Duration) -> Result<Option<Transfer<'_>>> {
         if self.closed {
             return Err(Error::stream_closed("raw RX stream is closed"));
         }
@@ -203,7 +200,6 @@ impl<B: BulkInBackend> RawRxStream<B> {
             self.bulk_in_mut()?.submit(buffer);
         }
 
-        let timeout = self.config.transfer_timeout;
         let Some(completion) = self.bulk_in_mut()?.wait_next_complete(timeout) else {
             return Ok(None);
         };
@@ -798,6 +794,47 @@ mod tests {
 
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug, Default)]
+    struct FakeBulkIn {
+        submitted: VecDeque<Vec<u8>>,
+        last_timeout: Option<Duration>,
+        cancelled: bool,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl BulkInBackend for FakeBulkIn {
+        type Buffer = Vec<u8>;
+
+        fn clear_halt(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn allocate(&self, len: usize) -> Self::Buffer {
+            vec![0; len]
+        }
+
+        fn submit(&mut self, buffer: Self::Buffer) {
+            self.submitted.push_back(buffer);
+        }
+
+        fn pending(&self) -> usize {
+            self.submitted.len()
+        }
+
+        fn wait_next_complete(
+            &mut self,
+            timeout: Duration,
+        ) -> Option<BulkInCompletion<Self::Buffer>> {
+            self.last_timeout = Some(timeout);
+            None
+        }
+
+        fn cancel_all(&mut self) {
+            self.cancelled = true;
+        }
+    }
+
     #[derive(Debug, Default)]
     struct FakeAsyncBulkIn {
         submitted: VecDeque<Vec<u8>>,
@@ -854,6 +891,28 @@ mod tests {
         fn cancel_all(&mut self) {
             self.cancelled = true;
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raw_read_forwards_timeout_without_closing_queue() {
+        let timeout = Duration::from_millis(25);
+        let bulk_in = FakeBulkIn::default();
+        let mut stream = RawRxStream::prepare(bulk_in, StreamingConfig::default())
+            .start_raw()
+            .expect("start fake raw stream");
+
+        assert!(
+            stream
+                .next_transfer(timeout)
+                .expect("timed raw read")
+                .is_none()
+        );
+
+        let bulk_in = stream.bulk_in.as_ref().expect("bulk in");
+        assert_eq!(bulk_in.last_timeout, Some(timeout));
+        assert_eq!(bulk_in.pending(), RFONE_TRANSFER_COUNT as usize);
+        assert!(!bulk_in.cancelled);
     }
 
     #[test]

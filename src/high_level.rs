@@ -29,6 +29,7 @@ use crate::usb::control::{ControlBackend, NusbControl};
 ///
 /// ```no_run
 /// use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+/// use std::time::Duration;
 ///
 /// fn main() -> hydrasdr_rs::Result<()> {
 ///     let mut dev = Device::builder()
@@ -41,7 +42,7 @@ use crate::usb::control::{ControlBackend, NusbControl};
 ///         .wait()?;
 ///
 ///     let mut rx = dev.raw_rx_stream()?;
-///     if let Some(block) = rx.next_block()? {
+///     if let Some(block) = rx.next_block(Duration::from_secs(1))? {
 ///         println!("{} raw bytes", block.raw_bytes().len());
 ///     }
 ///     let stats = rx.finish()?;
@@ -705,13 +706,13 @@ where
     C: ControlBackend + StreamingBackend,
 {
     /// Read the next sample block.
-    pub(crate) fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+    pub(crate) fn next_block(&mut self, timeout: Duration) -> Result<Option<SampleBlock<'_>>> {
         let sample_format = self.device.sample_format()?;
         let Some(stream) = self.stream.as_mut() else {
             return Err(Error::stream_closed("RX stream is closed"));
         };
         Ok(stream
-            .next_transfer()?
+            .next_transfer(timeout)?
             .map(|transfer| SampleBlock::from_transfer(&transfer, sample_format)))
     }
 
@@ -766,8 +767,10 @@ impl RawRxStream<'_> {
     ///
     /// This is a pull API with no background drain task. Call it continuously
     /// while receiving so completed buffers are promptly resubmitted.
-    pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
-        self.inner.next_block()
+    /// Returns `Ok(None)` if no transfer completes within `timeout`; the
+    /// pending transfer remains queued and may complete on a subsequent call.
+    pub fn next_block(&mut self, timeout: Duration) -> Result<Option<SampleBlock<'_>>> {
+        self.inner.next_block(timeout)
     }
 
     /// Request receiver-off cleanup. Repeated calls are no-ops.

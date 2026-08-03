@@ -28,6 +28,7 @@
 //!
 //! ```no_run
 //! use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+//! use std::time::Duration;
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
 //!     let mut dev = Device::builder()
@@ -40,7 +41,7 @@
 //!         .wait()?;
 //!
 //!     let mut rx = dev.raw_rx_stream()?;
-//!     if let Some(block) = rx.next_block()? {
+//!     if let Some(block) = rx.next_block(Duration::from_secs(1))? {
 //!         println!("{} bytes", block.raw_bytes().len());
 //!     }
 //!     let stats = rx.finish()?;

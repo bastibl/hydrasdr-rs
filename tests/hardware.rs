@@ -1,4 +1,5 @@
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
@@ -66,7 +67,7 @@ fn hardware_short_rx_stream_smoke_test() {
     let mut rx = dev.raw_rx_stream().expect("start RX stream");
     {
         let block = rx
-            .next_block()
+            .next_block(Duration::from_secs(1))
             .expect("read RX block")
             .expect("one RX block");
         assert!(!block.raw_bytes().is_empty());
