@@ -706,7 +706,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 impl<C> HydraSdr<C> {
     fn visible_sample_rates(&self) -> Vec<u32> {
         if !self.sample_type_is_iq() {
-            return self.sample_rates.clone();
+            return build_raw_samplerates(&self.sample_rates);
         }
         build_virtual_samplerates(&self.sample_rates)
     }
@@ -1179,6 +1179,21 @@ fn sample_rate_config(
     mode: DecimationMode,
     samplerate: u32,
 ) -> Result<(u16, u32, u32)> {
+    if sample_type == SampleType::Raw {
+        if let Some(index) = rates
+            .iter()
+            .position(|rate| rate.checked_mul(2) == Some(samplerate))
+        {
+            return Ok((checked_vendor_param(index)?, samplerate, 1));
+        }
+
+        return Ok((
+            sample_rate_param(&[], sample_type, samplerate)?,
+            samplerate,
+            1,
+        ));
+    }
+
     let (hardware_rate, decimation) =
         sample_rate_hardware_config(rates, sample_type, mode, samplerate)
             .unwrap_or((samplerate, 1));
@@ -1300,4 +1315,74 @@ fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {
     rates.sort_unstable_by(|a, b| b.cmp(a));
     rates.dedup();
     rates
+}
+
+fn build_raw_samplerates(firmware_iq_rates: &[u32]) -> Vec<u32> {
+    firmware_iq_rates
+        .iter()
+        .filter_map(|rate| rate.checked_mul(2))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIRMWARE_IQ_RATES: [u32; 3] = [10_000_000, 5_000_000, 2_500_000];
+
+    #[test]
+    fn raw_samplerates_are_reported_in_adc_samples_per_second() {
+        assert_eq!(
+            build_raw_samplerates(&FIRMWARE_IQ_RATES),
+            [20_000_000, 10_000_000, 5_000_000]
+        );
+    }
+
+    #[test]
+    fn raw_samplerates_map_back_to_firmware_iq_rate_indices() {
+        assert_eq!(
+            sample_rate_config(
+                &FIRMWARE_IQ_RATES,
+                SampleType::Raw,
+                DecimationMode::LowBandwidth,
+                20_000_000,
+            )
+            .unwrap(),
+            (0, 20_000_000, 1)
+        );
+        assert_eq!(
+            sample_rate_config(
+                &FIRMWARE_IQ_RATES,
+                SampleType::Raw,
+                DecimationMode::LowBandwidth,
+                10_000_000,
+            )
+            .unwrap(),
+            (1, 10_000_000, 1)
+        );
+        assert_eq!(
+            sample_rate_config(
+                &FIRMWARE_IQ_RATES,
+                SampleType::Raw,
+                DecimationMode::LowBandwidth,
+                5_000_000,
+            )
+            .unwrap(),
+            (2, 5_000_000, 1)
+        );
+    }
+
+    #[test]
+    fn non_table_raw_samplerates_use_adc_rate_value_encoding() {
+        assert_eq!(
+            sample_rate_config(
+                &FIRMWARE_IQ_RATES,
+                SampleType::Raw,
+                DecimationMode::LowBandwidth,
+                12_000_000,
+            )
+            .unwrap(),
+            (12_000, 12_000_000, 1)
+        );
+    }
 }
