@@ -67,6 +67,7 @@ mod types;
 mod usb;
 
 pub use config::{Bandwidth, Config, ConfigBuilder, GainConfig, GainPreset, RfPort, SampleFormat};
+pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
 pub use discovery::DeviceDescriptor;
 pub use errors::{Error, ErrorKind, Result};
 pub use high_level::{AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, SampleBlock};
