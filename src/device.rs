@@ -79,6 +79,11 @@ impl<C> HydraSdr<C> {
         self.sample_type = sample_type;
         Ok(())
     }
+
+    /// Return the host-side decimation used by converted receive streams.
+    pub(crate) fn streaming_decimation_factor(&self) -> usize {
+        self.streaming.decimation_factor()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

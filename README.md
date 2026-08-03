@@ -18,7 +18,7 @@ Implemented:
 - USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
 - Internal USB control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
-- Complex float 32-bit sample conversion and downsampling (10MHz, 5MHz, and 2.5MHz).
+- Complex float 32-bit sample conversion with device-reported rates and host-side decimation factors from 1x through 64x.
 - Low-level raw ADC block streaming for applications that need raw USB blocks.
 
 TODO:
@@ -120,7 +120,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         let mut samples = [(0.0, 0.0); 32];
         let count = rx.read(&mut samples).await?;
         println!("async samples: {count}");
-        let stats = rx.finish().await?;
+        let stats = rx.stop().await?;
         let _dev = rx.into_device();
         println!("{stats:?}");
 
@@ -129,7 +129,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-Call `finish().await` to stop the receiver through the async USB path, then `into_device()` to recover the device. Because start and finish borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping an unfinished stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup. WebUSB does not provide transfer cancellation, so explicit async shutdown is especially important in the browser.
+Call `stop().await` to stop the receiver through the async USB path; use `into_device()` afterward if the device handle is still needed. Because start and stop borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping a running stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup. WebUSB does not provide transfer cancellation, so explicit async shutdown is especially important in the browser.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 

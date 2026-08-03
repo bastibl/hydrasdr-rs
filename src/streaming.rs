@@ -29,7 +29,7 @@ pub struct StreamingStats {
     pub buffers_received: u64,
     /// Number of buffers successfully processed by the streaming layer.
     pub buffers_processed: u64,
-    /// Number of buffers dropped because the backend reported an error.
+    /// Number of buffers not delivered because of an error or controlled restart.
     pub buffers_dropped: u64,
 }
 
@@ -122,6 +122,11 @@ impl StreamingState {
         self.config
     }
 
+    /// Return the configured host-side DDC decimation factor.
+    pub(crate) fn decimation_factor(&self) -> usize {
+        self.config.decimation_factor
+    }
+
     /// Enable or disable packed samples before streaming starts.
     pub(crate) fn set_packing(&mut self, enabled: bool) -> Result<()> {
         self.config.packing_enabled = enabled;
@@ -130,12 +135,7 @@ impl StreamingState {
 
     /// Set the DDC decimation factor before streaming starts.
     pub(crate) fn set_decimation(&mut self, factor: usize) -> Result<()> {
-        if !matches!(factor, 1 | 2 | 4 | 8 | 16 | 32 | 64) {
-            return Err(Error::invalid_config(
-                "decimation_factor",
-                "must be one of 1, 2, 4, 8, 16, 32, or 64",
-            ));
-        }
+        validate_decimation_factor(factor)?;
         self.config.decimation_factor = factor;
         Ok(())
     }
@@ -418,6 +418,18 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         Ok(())
     }
 
+    /// Update host-side decimation while preserving the existing WebUSB transfer queue.
+    pub(crate) fn set_decimation_factor(&mut self, factor: usize) -> Result<()> {
+        validate_decimation_factor(factor)?;
+        self.config.decimation_factor = factor;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decimation_factor(&self) -> usize {
+        self.config.decimation_factor
+    }
+
     pub(crate) fn stats(&self) -> StreamingStats {
         self.stats
     }
@@ -692,6 +704,16 @@ fn config_current_buffer_size(config: StreamingConfig) -> usize {
     }
 }
 
+fn validate_decimation_factor(factor: usize) -> Result<()> {
+    if !matches!(factor, 1 | 2 | 4 | 8 | 16 | 32 | 64) {
+        return Err(Error::invalid_config(
+            "decimation_factor",
+            "must be one of 1, 2, 4, 8, 16, 32, or 64",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn remaining_timeout(deadline: Option<Instant>, fallback: Duration) -> Duration {
     deadline.map_or(fallback, |deadline| {
@@ -804,6 +826,27 @@ mod tests {
                 pending
             );
             assert_eq!(stream.stats.buffers_received, 1);
+        });
+    }
+
+    #[test]
+    fn persistent_async_f32_stream_accepts_processing_config_updates() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+                .await
+                .expect("start fake async stream");
+            stream.pause().expect("pause fake async stream");
+
+            stream
+                .set_decimation_factor(4)
+                .expect("update persistent stream decimation");
+
+            assert_eq!(stream.config.decimation_factor, 4);
+            assert_eq!(
+                stream.bulk_in.as_ref().expect("bulk in").pending(),
+                RFONE_TRANSFER_COUNT as usize
+            );
         });
     }
 }
