@@ -90,7 +90,7 @@ pub(crate) trait AsyncBulkInBackend: std::fmt::Debug {
 pub(crate) trait AsyncStreamingBackend: std::fmt::Debug {
     type BulkIn: AsyncBulkInBackend;
 
-    fn bulk_in_async(&self, endpoint: u8) -> impl Future<Output = Result<Self::BulkIn>> + '_;
+    fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn>;
 }
 
 /// C-parity streaming buffer configuration.
@@ -145,9 +145,8 @@ impl StreamingState {
     }
 
     /// Enable or disable packed samples before streaming starts.
-    pub(crate) fn set_packing(&mut self, enabled: bool) -> Result<()> {
+    pub(crate) fn set_packing(&mut self, enabled: bool) {
         self.config.packing_enabled = enabled;
-        Ok(())
     }
 
     /// Set the DDC decimation factor before streaming starts.

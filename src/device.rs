@@ -46,11 +46,7 @@ pub(crate) struct HydraSdr<C = NusbControl> {
     bandwidths: Vec<u32>,
     features: Option<u32>,
     gains: Vec<GainInfo>,
-    current_samplerate: u32,
-    hardware_samplerate: u32,
-    decimation_factor: u32,
     decimation_mode: DecimationMode,
-    current_bandwidth: u32,
     packing_enabled: bool,
     streaming: StreamingState,
 }
@@ -60,9 +56,7 @@ struct AppliedConfig {
     decimation_mode: DecimationMode,
     bandwidth: Bandwidth,
     bandwidths: Vec<u32>,
-    sample_rate: u32,
     rates: SampleRateTable,
-    hardware_rate: u32,
     decimation: u32,
     packing: bool,
     gain_updates: Vec<GainUpdate>,
@@ -129,11 +123,7 @@ impl<C> HydraSdr<C> {
             bandwidths: Vec::new(),
             features: None,
             gains: default_gain_infos(),
-            current_samplerate: 0,
-            hardware_samplerate: 0,
-            decimation_factor: 1,
             decimation_mode: DecimationMode::LowBandwidth,
-            current_bandwidth: 0,
             packing_enabled: false,
             streaming: StreamingState::new(),
         }
@@ -352,12 +342,7 @@ impl<C: ControlBackend> HydraSdr<C> {
                         )
                         .map(move |result| {
                             validate_samplerate_response(&selected, &result?)?;
-                            Ok((
-                                bandwidths,
-                                rates,
-                                selected.hardware_rate,
-                                selected.decimation,
-                            ))
+                            Ok((bandwidths, rates, selected.decimation))
                         })
                     })
                 }
@@ -419,15 +404,13 @@ impl<C: ControlBackend> HydraSdr<C> {
                 .map_ok(move |_| state)
             })
             .map(move |result| {
-                let (bandwidths, rates, hardware_rate, decimation) = result?;
+                let (bandwidths, rates, decimation) = result?;
                 Ok(AppliedConfig {
                     sample_type,
                     decimation_mode,
                     bandwidth,
                     bandwidths,
-                    sample_rate,
                     rates,
-                    hardware_rate,
                     decimation,
                     packing,
                     gain_updates,
@@ -439,20 +422,14 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.sample_type = state.sample_type;
         self.decimation_mode = state.decimation_mode;
         self.sample_rates = state.rates;
-        if let Bandwidth::ManualHz(hz) = state.bandwidth {
+        if matches!(state.bandwidth, Bandwidth::ManualHz(_)) {
             self.bandwidths = state.bandwidths;
-            self.current_bandwidth = hz;
         }
-        self.current_samplerate = state.sample_rate;
-        self.hardware_samplerate = state.hardware_rate;
-        self.decimation_factor = state.decimation;
         self.streaming
             .set_decimation(state.decimation as usize)
             .expect("validated HydraSDR decimation factor");
         self.packing_enabled = state.packing;
-        self.streaming
-            .set_packing(state.packing)
-            .expect("validated HydraSDR packing state");
+        self.streaming.set_packing(state.packing);
         for (gain_type, value, max_value) in state.gain_updates {
             self.update_gain_cache(gain_type, value, max_value);
         }
@@ -510,11 +487,7 @@ impl<C: ControlBackend> HydraSdr<C> {
                     )
                 })
             })
-            .map(move |result| {
-                result?;
-                self.current_bandwidth = bandwidth;
-                Ok(())
-            })
+            .map(|result| result.map(|_| ()))
     }
 
     /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
@@ -613,16 +586,13 @@ impl<C: ControlBackend> HydraSdr<C> {
                     )
                     .map(move |result| {
                         validate_samplerate_response(&selected, &result?)?;
-                        Ok((selected.hardware_rate, selected.decimation))
+                        Ok(selected.decimation)
                     })
                 })
             })
             .map(move |result| {
-                let (hardware_rate, decimation) = result?;
+                let decimation = result?;
                 self.streaming.set_decimation(decimation as usize)?;
-                self.current_samplerate = samplerate;
-                self.hardware_samplerate = hardware_rate;
-                self.decimation_factor = decimation;
                 self.decimation_mode = mode;
                 Ok(())
             })
@@ -915,7 +885,7 @@ where
         &mut self,
     ) -> Result<AsyncRawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off).await?;
-        let bulk_in = match self.control.as_ref().bulk_in_async(RFONE_RX_ENDPOINT).await {
+        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).await;
@@ -944,7 +914,7 @@ where
         }
 
         self.receiver_mode(ReceiverMode::Off).await?;
-        let bulk_in = match self.control.as_ref().bulk_in_async(RFONE_RX_ENDPOINT).await {
+        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).await;

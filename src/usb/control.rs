@@ -330,7 +330,7 @@ impl StreamingBackend for NusbControl {
 impl AsyncStreamingBackend for NusbControl {
     type BulkIn = NusbBulkIn;
 
-    async fn bulk_in_async(&self, endpoint: u8) -> Result<Self::BulkIn> {
+    fn bulk_in(&self, endpoint: u8) -> Result<Self::BulkIn> {
         Ok(NusbBulkIn {
             endpoint: self
                 .interface

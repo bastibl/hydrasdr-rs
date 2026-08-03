@@ -9,9 +9,8 @@
 //! transfers are natively async in `nusb`; async device discovery/open and
 //! endpoint `clear_halt` follow the support exposed by `nusb`, so applications
 //! that await those paths can enable exactly one of this crate's `tokio` or
-//! `smol` features for `nusb` IO thread integration. No async runtime is forced
-//! on native targets. WebUSB does not need either runtime feature. No async
-//! runtime is forced by default.
+//! `smol` features for `nusb` IO thread integration. WebUSB does not need either
+//! runtime feature. No async runtime is forced by default.
 //!
 //! WebUSB builds must enable `web_sys_unstable_apis` as described in the
 //! [WebUSB section of the README](https://github.com/bastibl/hydrasdr-rs#webusb).

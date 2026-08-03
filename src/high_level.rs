@@ -54,7 +54,7 @@ use crate::usb::control::{ControlBackend, NusbControl};
 #[derive(Debug)]
 pub(crate) struct DeviceInner<C = NusbControl> {
     direct: HydraSdr<C>,
-    info: Option<DeviceInfo>,
+    info: DeviceInfo,
     sample_format: SampleFormat,
 }
 
@@ -184,12 +184,8 @@ impl Device {
 
 impl<C> DeviceInner<C> {
     /// Return cached device metadata.
-    ///
-    /// Handles opened through `Device` constructors always have this populated.
     pub(crate) fn info(&self) -> &DeviceInfo {
-        self.info
-            .as_ref()
-            .expect("device info not available; call refresh_info first")
+        &self.info
     }
 
     fn ensure_raw_adc_stream_format(&self) -> Result<()> {
@@ -261,9 +257,7 @@ where
         operation.map(move |result| {
             result?;
             *sample_format = config.sample_format();
-            if let Some(info) = info {
-                info.current_config = Some(config);
-            }
+            info.current_config = Some(config);
             Ok(())
         })
     }
@@ -286,7 +280,7 @@ where
             .and_then(move |()| operation)
             .map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
+                if let Some(config) = info.current_config.as_mut() {
                     config.update_frequency_hz(frequency_hz);
                 }
                 Ok(())
@@ -304,7 +298,7 @@ where
             .and_then(move |()| operation)
             .map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
+                if let Some(config) = info.current_config.as_mut() {
                     config.update_sample_rate_hz(sample_rate_hz);
                 }
                 Ok(())
@@ -322,7 +316,7 @@ where
             .and_then(move |()| operation)
             .map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
+                if let Some(config) = info.current_config.as_mut() {
                     config.update_bandwidth(bandwidth);
                 }
                 Ok(())
@@ -334,7 +328,7 @@ where
         let info = &mut self.info;
         operation.map(move |result| {
             result?;
-            if let Some(config) = current_config_mut(info) {
+            if let Some(config) = info.current_config.as_mut() {
                 config.update_rf_port(port);
             }
             Ok(())
@@ -348,7 +342,7 @@ where
             .and_then(move |()| operation)
             .map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
+                if let Some(config) = info.current_config.as_mut() {
                     config.update_gain(gain);
                 }
                 Ok(())
@@ -359,23 +353,16 @@ where
     pub(crate) fn refresh_info(
         &mut self,
     ) -> impl MaybeFuture<Output = Result<&DeviceInfo>> + use<'_, C> {
-        let current_config = self
-            .info
-            .as_ref()
-            .and_then(|info| info.current_config.clone());
+        let current_config = self.info.current_config.clone();
         let operation = self.direct.get_device_info();
         let info_slot = &mut self.info;
         operation.map(move |result| {
             let mut info = result?;
             info.current_config = current_config;
-            *info_slot = Some(info);
-            Ok(info_slot.as_ref().expect("just populated"))
+            *info_slot = info;
+            Ok(&*info_slot)
         })
     }
-}
-
-fn current_config_mut(info: &mut Option<DeviceInfo>) -> Option<&mut Config> {
-    info.as_mut().and_then(|info| info.current_config.as_mut())
 }
 
 /// Builder that selects, opens, and initially configures a high-level `nusb` device.
@@ -546,7 +533,7 @@ impl DeviceBuilder {
                                 Ok(Device {
                                     inner: DeviceInner {
                                         direct,
-                                        info: Some(info),
+                                        info,
                                         sample_format,
                                     },
                                 })
@@ -1266,7 +1253,7 @@ mod tests {
     impl AsyncStreamingBackend for FakeControl {
         type BulkIn = FakeAsyncBulkIn;
 
-        async fn bulk_in_async(&self, _endpoint: u8) -> Result<Self::BulkIn> {
+        fn bulk_in(&self, _endpoint: u8) -> Result<Self::BulkIn> {
             self.state.bulk_in_count.fetch_add(1, Ordering::SeqCst);
             Ok(FakeAsyncBulkIn {
                 state: Arc::clone(&self.state),
@@ -1320,7 +1307,15 @@ mod tests {
     fn fake_device(control: FakeControl, sample_format: SampleFormat) -> DeviceInner<FakeControl> {
         DeviceInner {
             direct: HydraSdr::from_control(control),
-            info: None,
+            info: DeviceInfo {
+                board_name: "fake HydraSDR",
+                firmware_version: "fake firmware".to_owned(),
+                serial: None,
+                min_frequency: 24_000_000,
+                max_frequency: 1_800_000_000,
+                rf_ports: Vec::new(),
+                current_config: None,
+            },
             sample_format,
         }
     }
