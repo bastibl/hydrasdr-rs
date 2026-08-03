@@ -132,7 +132,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-Call `stop().await` to stop the receiver through the async USB path; use `into_device()` afterward if the device handle is still needed. Because start and stop borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping a running stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup. WebUSB does not provide transfer cancellation, so explicit async shutdown is especially important in the browser.
+Call `stop().await` to stop the receiver through the async USB path; use `into_device()` afterward if the device handle is still needed. Because start and stop borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping a running stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up. Explicit async shutdown is especially important in the browser.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 

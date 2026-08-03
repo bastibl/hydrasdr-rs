@@ -38,6 +38,12 @@ pub struct StreamingStats {
     ///
     /// This does not include device-side loss that happened before USB completion.
     pub buffers_dropped: u64,
+    /// Number of dropped buffers that belonged to the queue retained across a restart.
+    ///
+    /// This is a subset of [`StreamingStats::buffers_dropped`]. On backends without
+    /// transfer cancellation, including WebUSB, consuming these old submissions may
+    /// delay the first fresh block after restarting.
+    pub buffers_discarded_on_restart: u64,
 }
 
 /// Completed bulk-IN transfer from a backend.
@@ -298,6 +304,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
                 self.discard_remaining -= 1;
                 self.stats.buffers_received += 1;
                 self.stats.buffers_dropped += 1;
+                self.stats.buffers_discarded_on_restart += 1;
                 self.bulk_in_mut()?.submit(completion.buffer);
                 continue;
             }
@@ -330,11 +337,12 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         if let Some(buffer) = self.current.take() {
             self.bulk_in_mut()?.submit(buffer);
         }
-        self.discard_remaining = self
+        let bulk_in = self
             .bulk_in
-            .as_ref()
-            .ok_or(Error::stream_closed("async raw RX stream is closed"))?
-            .pending();
+            .as_mut()
+            .ok_or(Error::stream_closed("async raw RX stream is closed"))?;
+        self.discard_remaining = bulk_in.pending();
+        bulk_in.cancel_all();
         Ok(())
     }
 
@@ -378,11 +386,12 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         self.converter = Float32IqConverter::default();
         self.converted.clear();
         self.converted_start = 0;
-        self.discard_remaining = self
+        let bulk_in = self
             .bulk_in
-            .as_ref()
-            .ok_or(Error::stream_closed("async direct RX stream is closed"))?
-            .pending();
+            .as_mut()
+            .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+        self.discard_remaining = bulk_in.pending();
+        bulk_in.cancel_all();
         Ok(())
     }
 
@@ -445,6 +454,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
                 self.discard_remaining -= 1;
                 self.stats.buffers_received += 1;
                 self.stats.buffers_dropped += 1;
+                self.stats.buffers_discarded_on_restart += 1;
                 let bulk_in = self
                     .bulk_in
                     .as_mut()
@@ -844,7 +854,6 @@ mod tests {
 
         fn cancel_all(&mut self) {
             self.cancelled = true;
-            self.submitted.clear();
         }
     }
 

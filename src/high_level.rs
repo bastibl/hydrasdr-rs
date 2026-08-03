@@ -1288,7 +1288,6 @@ mod tests {
 
         fn cancel_all(&mut self) {
             self.state.cancel_count.fetch_add(1, Ordering::SeqCst);
-            self.submitted.clear();
         }
     }
 
@@ -1319,7 +1318,7 @@ mod tests {
             let _device = stream.into_device();
             assert_eq!(stats.buffers_received, 1);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 2);
         });
     }
 
@@ -1336,7 +1335,7 @@ mod tests {
             assert_eq!(stream.read(&mut first).await.expect("first read"), 1);
             stream.stop().await.expect("stop owned async F32 stream");
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
             assert!(
                 stream
                     .read(&mut first)
@@ -1352,12 +1351,16 @@ mod tests {
                 .expect("restart owned async F32 stream");
             let mut second = [(0.0, 0.0); 1];
             assert_eq!(stream.read(&mut second).await.expect("second read"), 1);
-            stream.stop().await.expect("stop owned async F32 stream");
+            let stats = stream.stop().await.expect("stop owned async F32 stream");
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                stats.buffers_discarded_on_restart,
+                crate::rfone::RFONE_TRANSFER_COUNT as u64
+            );
 
             let _device = stream.into_device();
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 3);
         });
     }
 
@@ -1393,7 +1396,7 @@ mod tests {
                 1
             );
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
 
             stream
@@ -1411,7 +1414,7 @@ mod tests {
             stream.stop().await.expect("stop owned async F32 stream");
             let _device = stream.into_device();
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
-            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 3);
         });
     }
 
