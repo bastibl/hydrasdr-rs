@@ -50,6 +50,7 @@ pub(crate) enum Capability {
     RfPortSelect = 13,
     Bandwidth = 18,
     Rx = 20,
+    ExtendedSamplerates = 21,
     ExtendedGain = 22,
 }
 

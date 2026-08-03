@@ -29,6 +29,8 @@ const VERSION_STRING_SIZE: usize = 255;
 const MIN_SAMPLERATE_BY_VALUE: u32 = 10_000;
 const MIN_BANDWIDTH_BY_VALUE: u32 = 1_000;
 const MAX_FREQ_HZ: u64 = 10_000_000_000;
+const LEGACY_ADC_BITS: u8 = 12;
+const DATA_FORMAT_RAW_ADC: u8 = 0;
 const DECIMATION_FACTORS_ASC: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
 const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 
@@ -40,7 +42,7 @@ const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 pub(crate) struct HydraSdr<C = NusbControl> {
     control: Arc<C>,
     sample_type: SampleType,
-    sample_rates: Vec<u32>,
+    sample_rates: SampleRateTable,
     bandwidths: Vec<u32>,
     features: Option<u32>,
     gains: Vec<GainInfo>,
@@ -59,11 +61,62 @@ struct AppliedConfig {
     bandwidth: Bandwidth,
     bandwidths: Vec<u32>,
     sample_rate: u32,
-    rates: Vec<u32>,
+    rates: SampleRateTable,
     hardware_rate: u32,
     decimation: u32,
     packing: bool,
     gain_updates: Vec<GainUpdate>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SampleRateInfo {
+    rate_hz: u32,
+    adc_bits: u8,
+    data_format: u8,
+    firmware_index: usize,
+}
+
+impl SampleRateInfo {
+    fn legacy(rate_hz: u32, firmware_index: usize) -> Self {
+        Self {
+            rate_hz,
+            adc_bits: LEGACY_ADC_BITS,
+            data_format: DATA_FORMAT_RAW_ADC,
+            firmware_index,
+        }
+    }
+
+    fn supported_by_converter(self) -> bool {
+        self.adc_bits == LEGACY_ADC_BITS && self.data_format == DATA_FORMAT_RAW_ADC
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SampleRateTable {
+    entries: Vec<SampleRateInfo>,
+    extended: bool,
+}
+
+impl SampleRateTable {
+    fn legacy(rates: Vec<u32>) -> Self {
+        Self {
+            entries: rates
+                .into_iter()
+                .enumerate()
+                .map(|(index, rate_hz)| SampleRateInfo::legacy(rate_hz, index))
+                .collect(),
+            extended: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectedSampleRate {
+    param: u16,
+    hardware_rate: u32,
+    decimation: u32,
+    response_len: usize,
+    expected_encoding: Option<(u8, u8)>,
 }
 
 impl<C> HydraSdr<C> {
@@ -72,7 +125,7 @@ impl<C> HydraSdr<C> {
         Self {
             control: Arc::new(control),
             sample_type: SampleType::Float32Iq,
-            sample_rates: Vec::new(),
+            sample_rates: SampleRateTable::legacy(Vec::new()),
             bandwidths: Vec::new(),
             features: None,
             gains: default_gain_infos(),
@@ -126,11 +179,12 @@ impl<C: ControlBackend> HydraSdr<C> {
     /// If firmware does not support the request, the RFOne hard-coded C capability mask is used.
     pub(crate) fn get_capabilities(&self) -> impl MaybeFuture<Output = Result<u32>> + use<C> {
         self.control_in_exact(VendorControlRequest::get_capabilities(0), 4)
-            .map(|result| {
-                Ok(match result {
-                    Ok(data) => u32::from_le_bytes(data[0..4].try_into().expect("four bytes")),
-                    Err(_) => RFONE_HARDCODED_CAPS,
-                })
+            .map(|result| match result {
+                Ok(data) => Ok(u32::from_le_bytes(
+                    data[0..4].try_into().expect("four bytes"),
+                )),
+                Err(error) if is_unsupported_request(&error) => Ok(RFONE_HARDCODED_CAPS),
+                Err(error) => Err(error),
             })
     }
 
@@ -287,13 +341,24 @@ impl<C: ControlBackend> HydraSdr<C> {
                 move |(bandwidths, rates)| {
                     let rate_config =
                         sample_rate_config(&rates, sample_type, decimation_mode, sample_rate);
-                    ready(rate_config).and_then(move |(param, hardware_rate, decimation)| {
+                    ready(rate_config).and_then(move |selected| {
                         Self::control_in_exact_with(
                             control,
-                            VendorControlRequest::set_samplerate(param, 1),
-                            1,
+                            VendorControlRequest::set_samplerate(
+                                selected.param,
+                                selected.response_len,
+                            ),
+                            selected.response_len,
                         )
-                        .map_ok(move |_| (bandwidths, rates, hardware_rate, decimation))
+                        .map(move |result| {
+                            validate_samplerate_response(&selected, &result?)?;
+                            Ok((
+                                bandwidths,
+                                rates,
+                                selected.hardware_rate,
+                                selected.decimation,
+                            ))
+                        })
                     })
                 }
             })
@@ -402,7 +467,8 @@ impl<C: ControlBackend> HydraSdr<C> {
     ) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
         let fetch = self.fetch_samplerates();
         fetch.map(move |result| {
-            self.sample_rates = result?;
+            let table = result?;
+            self.sample_rates = table;
             Ok(self.visible_sample_rates())
         })
     }
@@ -539,13 +605,16 @@ impl<C: ControlBackend> HydraSdr<C> {
         rates
             .and_then(move |rates| {
                 let config = sample_rate_config(&rates, sample_type, mode, samplerate);
-                ready(config).and_then(move |(rate_param, hardware_rate, decimation)| {
+                ready(config).and_then(move |selected| {
                     Self::control_in_exact_with(
                         control,
-                        VendorControlRequest::set_samplerate(rate_param, 1),
-                        1,
+                        VendorControlRequest::set_samplerate(selected.param, selected.response_len),
+                        selected.response_len,
                     )
-                    .map_ok(move |_| (hardware_rate, decimation))
+                    .map(move |result| {
+                        validate_samplerate_response(&selected, &result?)?;
+                        Ok((selected.hardware_rate, selected.decimation))
+                    })
                 })
             })
             .map(move |result| {
@@ -559,8 +628,11 @@ impl<C: ControlBackend> HydraSdr<C> {
             })
     }
 
-    fn fetch_samplerates(&self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<C> {
+    fn fetch_samplerates(&self) -> impl MaybeFuture<Output = Result<SampleRateTable>> + use<C> {
         let control = Arc::clone(&self.control);
+        let extended = self
+            .features
+            .is_some_and(|features| features & Capability::ExtendedSamplerates.bits() != 0);
         Self::control_in_exact_with(
             Arc::clone(&control),
             VendorControlRequest::get_samplerates_count(false),
@@ -570,17 +642,39 @@ impl<C: ControlBackend> HydraSdr<C> {
             result.map(|data| u32::from_le_bytes(data[0..4].try_into().expect("four bytes")))
         })
         .and_then(move |count| {
+            let extended_control = Arc::clone(&control);
             Self::control_in_exact_with(
                 control,
                 VendorControlRequest::get_samplerates(count, false),
                 count as usize * 4,
             )
             .map(|result| result.and_then(|data| decode_u32_le_words(&data)))
+            .and_then(move |rates| {
+                if !extended {
+                    return Either::left(ready(Ok(SampleRateTable::legacy(rates))));
+                }
+
+                let expected_len = count as usize * 8;
+                Either::right(
+                    Self::control_in_exact_with(
+                        extended_control,
+                        VendorControlRequest::get_samplerates(count, true),
+                        expected_len,
+                    )
+                    .map(move |result| match result {
+                        Ok(data) => decode_extended_samplerates(&data, &rates),
+                        Err(error) if is_unsupported_request(&error) => {
+                            Ok(SampleRateTable::legacy(rates))
+                        }
+                        Err(error) => Err(error),
+                    }),
+                )
+            })
         })
     }
 
-    fn available_samplerates(&self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<C> {
-        if self.sample_rates.is_empty() {
+    fn available_samplerates(&self) -> impl MaybeFuture<Output = Result<SampleRateTable>> + use<C> {
+        if self.sample_rates.entries.is_empty() {
             Either::left(self.fetch_samplerates())
         } else {
             Either::right(ready(Ok(self.sample_rates.clone())))
@@ -706,9 +800,9 @@ impl<C: ControlBackend> HydraSdr<C> {
 impl<C> HydraSdr<C> {
     fn visible_sample_rates(&self) -> Vec<u32> {
         if !self.sample_type_is_iq() {
-            return build_raw_samplerates(&self.sample_rates);
+            return build_raw_samplerates(&self.sample_rates.entries);
         }
-        build_virtual_samplerates(&self.sample_rates)
+        build_virtual_samplerates(&self.sample_rates.entries)
     }
 
     fn sample_type_is_iq(&self) -> bool {
@@ -933,11 +1027,13 @@ fn capability_word<F>(
 where
     F: MaybeFuture<Output = Result<Vec<u8>>>,
 {
-    operation.map(move |result| {
-        if let Ok(data) = result {
+    operation.map(move |result| match result {
+        Ok(data) => {
             reserved[index] = u32::from_le_bytes(data[0..4].try_into().expect("four bytes"));
+            Ok(reserved)
         }
-        Ok(reserved)
+        Err(error) if is_unsupported_request(&error) => Ok(reserved),
+        Err(error) => Err(error),
     })
 }
 
@@ -1174,43 +1270,58 @@ fn gain_plan(gain_type: GainType, value: u8) -> (Vec<VendorControlRequest>, Vec<
 }
 
 fn sample_rate_config(
-    rates: &[u32],
+    rates: &SampleRateTable,
     sample_type: SampleType,
     mode: DecimationMode,
     samplerate: u32,
-) -> Result<(u16, u32, u32)> {
+) -> Result<SelectedSampleRate> {
     if sample_type == SampleType::Raw {
-        if let Some(index) = rates
+        if let Some(rate) = rates
+            .entries
             .iter()
-            .position(|rate| rate.checked_mul(2) == Some(samplerate))
+            .find(|rate| rate.rate_hz.checked_mul(2) == Some(samplerate))
         {
-            return Ok((checked_vendor_param(index)?, samplerate, 1));
+            return selected_table_rate(rates.extended, *rate, samplerate, 1);
         }
 
-        return Ok((
-            sample_rate_param(&[], sample_type, samplerate)?,
-            samplerate,
-            1,
-        ));
+        return Ok(SelectedSampleRate {
+            param: sample_rate_param(&[], sample_type, samplerate)?,
+            hardware_rate: samplerate,
+            decimation: 1,
+            response_len: if rates.extended { 4 } else { 1 },
+            expected_encoding: None,
+        });
     }
 
     let (hardware_rate, decimation) =
-        sample_rate_hardware_config(rates, sample_type, mode, samplerate)
-            .unwrap_or((samplerate, 1));
-    let rate_param = sample_rate_param(rates, sample_type, hardware_rate)?;
-    Ok((rate_param, hardware_rate, decimation))
+        sample_rate_hardware_config(rates, mode, samplerate).unwrap_or((samplerate, 1));
+    if let Some(rate) = rates
+        .entries
+        .iter()
+        .find(|rate| rate.rate_hz == hardware_rate)
+    {
+        return selected_table_rate(rates.extended, *rate, hardware_rate, decimation);
+    }
+    Ok(SelectedSampleRate {
+        param: sample_rate_param(&[], sample_type, hardware_rate)?,
+        hardware_rate,
+        decimation,
+        response_len: if rates.extended { 4 } else { 1 },
+        expected_encoding: None,
+    })
 }
 
 fn sample_rate_hardware_config(
-    rates: &[u32],
-    sample_type: SampleType,
+    rates: &SampleRateTable,
     mode: DecimationMode,
     samplerate: u32,
 ) -> Option<(u32, u32)> {
-    let direct_rate = rates.iter().find(|rate| **rate == samplerate).copied();
-    if sample_type != SampleType::Float32Iq {
-        return direct_rate.map(|rate| (rate, 1));
-    }
+    let direct_rate = rates
+        .entries
+        .iter()
+        .filter(|rate| rate.supported_by_converter())
+        .find(|rate| rate.rate_hz == samplerate)
+        .map(|rate| rate.rate_hz);
     if mode == DecimationMode::LowBandwidth
         && let Some(rate) = direct_rate
     {
@@ -1218,24 +1329,29 @@ fn sample_rate_hardware_config(
     }
 
     let mut best = None;
-    for hardware_rate in rates {
+    for hardware_rate in rates
+        .entries
+        .iter()
+        .filter(|rate| rate.supported_by_converter())
+        .map(|rate| rate.rate_hz)
+    {
         for decimation in DECIMATION_FACTORS_DESC {
             if hardware_rate / decimation == samplerate {
                 best = match best {
-                    None => Some((*hardware_rate, decimation)),
+                    None => Some((hardware_rate, decimation)),
                     Some((best_hw, best_decimation))
                         if mode == DecimationMode::HighDefinition
-                            && (*hardware_rate > best_hw
-                                || (*hardware_rate == best_hw && decimation > best_decimation)) =>
+                            && (hardware_rate > best_hw
+                                || (hardware_rate == best_hw && decimation > best_decimation)) =>
                     {
-                        Some((*hardware_rate, decimation))
+                        Some((hardware_rate, decimation))
                     }
                     Some((best_hw, best_decimation))
                         if mode == DecimationMode::LowBandwidth
-                            && (*hardware_rate < best_hw
-                                || (*hardware_rate == best_hw && decimation > best_decimation)) =>
+                            && (hardware_rate < best_hw
+                                || (hardware_rate == best_hw && decimation > best_decimation)) =>
                     {
-                        Some((*hardware_rate, decimation))
+                        Some((hardware_rate, decimation))
                     }
                     Some(existing) => Some(existing),
                 };
@@ -1245,9 +1361,34 @@ fn sample_rate_hardware_config(
     best
 }
 
-fn sample_rate_param(rates: &[u32], sample_type: SampleType, hardware_rate: u32) -> Result<u16> {
-    if let Some(index) = rates.iter().position(|rate| *rate == hardware_rate) {
-        return checked_vendor_param(index);
+fn selected_table_rate(
+    extended: bool,
+    rate: SampleRateInfo,
+    hardware_rate: u32,
+    decimation: u32,
+) -> Result<SelectedSampleRate> {
+    if !rate.supported_by_converter() {
+        return Err(Error::Unsupported);
+    }
+    Ok(SelectedSampleRate {
+        param: checked_vendor_param(rate.firmware_index)?,
+        hardware_rate,
+        decimation,
+        response_len: if extended { 4 } else { 1 },
+        expected_encoding: extended.then_some((rate.adc_bits, rate.data_format)),
+    })
+}
+
+fn sample_rate_param(
+    rates: &[SampleRateInfo],
+    sample_type: SampleType,
+    hardware_rate: u32,
+) -> Result<u16> {
+    if let Some(rate) = rates.iter().find(|rate| rate.rate_hz == hardware_rate) {
+        if !rate.supported_by_converter() {
+            return Err(Error::Unsupported);
+        }
+        return checked_vendor_param(rate.firmware_index);
     }
     if hardware_rate < MIN_SAMPLERATE_BY_VALUE {
         return Err(Error::invalid_config(
@@ -1261,6 +1402,33 @@ fn sample_rate_param(rates: &[u32], sample_type: SampleType, hardware_rate: u32)
         hardware_rate
     };
     checked_vendor_param(rate / 1000)
+}
+
+fn validate_samplerate_response(selected: &SelectedSampleRate, response: &[u8]) -> Result<()> {
+    if response.first().copied() != Some(1) {
+        return Err(Error::protocol(
+            "set sample rate",
+            "firmware rejected the selected sample rate",
+        ));
+    }
+    if selected.response_len == 1 {
+        return Ok(());
+    }
+
+    let encoding = (response[1], response[2]);
+    if selected
+        .expected_encoding
+        .is_some_and(|expected| expected != encoding)
+    {
+        return Err(Error::protocol(
+            "set sample rate",
+            "firmware response does not match extended sample-rate metadata",
+        ));
+    }
+    if encoding != (LEGACY_ADC_BITS, DATA_FORMAT_RAW_ADC) {
+        return Err(Error::Unsupported);
+    }
+    Ok(())
 }
 
 fn bandwidth_param(bandwidths: &[u32], bandwidth: u32) -> Result<u16> {
@@ -1277,6 +1445,47 @@ fn bandwidth_param(bandwidths: &[u32], bandwidth: u32) -> Result<u16> {
         "bandwidth_hz",
         "cannot be encoded as a firmware bandwidth index or kHz value",
     ))
+}
+
+fn decode_extended_samplerates(data: &[u8], basic_rates: &[u32]) -> Result<SampleRateTable> {
+    let (entries, remainder) = data.as_chunks::<8>();
+    if !remainder.is_empty() || entries.len() != basic_rates.len() {
+        return Err(Error::protocol(
+            "decode extended sample rates",
+            "response length does not match the basic sample-rate table",
+        ));
+    }
+
+    let mut decoded = Vec::with_capacity(entries.len());
+    for (firmware_index, (entry, basic_rate)) in entries.iter().zip(basic_rates.iter()).enumerate()
+    {
+        let rate_hz = u32::from_le_bytes(entry[0..4].try_into().expect("four bytes"));
+        if rate_hz != *basic_rate {
+            return Err(Error::protocol(
+                "decode extended sample rates",
+                "extended and basic sample-rate tables disagree",
+            ));
+        }
+        decoded.push(SampleRateInfo {
+            rate_hz,
+            adc_bits: entry[4],
+            data_format: entry[5],
+            firmware_index,
+        });
+    }
+
+    Ok(SampleRateTable {
+        entries: decoded,
+        extended: true,
+    })
+}
+
+fn is_unsupported_request(error: &Error) -> bool {
+    match error {
+        Error::Transfer(nusb::transfer::TransferError::Stall) => true,
+        Error::Operation { source, .. } => is_unsupported_request(source),
+        _ => false,
+    }
 }
 
 fn decode_c_string(bytes: &[u8]) -> String {
@@ -1302,9 +1511,13 @@ fn checked_vendor_param(value: impl TryInto<u16>) -> Result<u16> {
         .map_err(|_| Error::protocol("encode vendor request", "parameter exceeds 16 bits"))
 }
 
-fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {
+fn build_virtual_samplerates(hardware_rates: &[SampleRateInfo]) -> Vec<u32> {
     let mut rates = Vec::with_capacity(hardware_rates.len() * DECIMATION_FACTORS_ASC.len());
-    for hardware_rate in hardware_rates {
+    for hardware_rate in hardware_rates
+        .iter()
+        .filter(|rate| rate.supported_by_converter())
+        .map(|rate| rate.rate_hz)
+    {
         for decimation in DECIMATION_FACTORS_ASC {
             let effective = hardware_rate / decimation;
             if effective >= MIN_SAMPLERATE_BY_VALUE {
@@ -1317,10 +1530,11 @@ fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {
     rates
 }
 
-fn build_raw_samplerates(firmware_iq_rates: &[u32]) -> Vec<u32> {
+fn build_raw_samplerates(firmware_iq_rates: &[SampleRateInfo]) -> Vec<u32> {
     firmware_iq_rates
         .iter()
-        .filter_map(|rate| rate.checked_mul(2))
+        .filter(|rate| rate.supported_by_converter())
+        .filter_map(|rate| rate.rate_hz.checked_mul(2))
         .collect()
 }
 
@@ -1330,10 +1544,43 @@ mod tests {
 
     const FIRMWARE_IQ_RATES: [u32; 3] = [10_000_000, 5_000_000, 2_500_000];
 
+    #[derive(Clone, Copy, Debug)]
+    struct FailingControl(nusb::transfer::TransferError);
+
+    impl ControlBackend for FailingControl {
+        fn control_in(
+            &self,
+            _request: VendorControlRequest,
+        ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<> {
+            ready(Err(Error::from(self.0)))
+        }
+
+        fn control_out(
+            &self,
+            _request: VendorControlRequest,
+        ) -> impl MaybeFuture<Output = Result<()>> + use<> {
+            ready(Ok(()))
+        }
+    }
+
+    fn legacy_rates() -> SampleRateTable {
+        SampleRateTable::legacy(FIRMWARE_IQ_RATES.to_vec())
+    }
+
+    fn legacy_selection(param: u16, hardware_rate: u32) -> SelectedSampleRate {
+        SelectedSampleRate {
+            param,
+            hardware_rate,
+            decimation: 1,
+            response_len: 1,
+            expected_encoding: None,
+        }
+    }
+
     #[test]
     fn raw_samplerates_are_reported_in_adc_samples_per_second() {
         assert_eq!(
-            build_raw_samplerates(&FIRMWARE_IQ_RATES),
+            build_raw_samplerates(&legacy_rates().entries),
             [20_000_000, 10_000_000, 5_000_000]
         );
     }
@@ -1342,33 +1589,33 @@ mod tests {
     fn raw_samplerates_map_back_to_firmware_iq_rate_indices() {
         assert_eq!(
             sample_rate_config(
-                &FIRMWARE_IQ_RATES,
+                &legacy_rates(),
                 SampleType::Raw,
                 DecimationMode::LowBandwidth,
                 20_000_000,
             )
             .unwrap(),
-            (0, 20_000_000, 1)
+            legacy_selection(0, 20_000_000)
         );
         assert_eq!(
             sample_rate_config(
-                &FIRMWARE_IQ_RATES,
+                &legacy_rates(),
                 SampleType::Raw,
                 DecimationMode::LowBandwidth,
                 10_000_000,
             )
             .unwrap(),
-            (1, 10_000_000, 1)
+            legacy_selection(1, 10_000_000)
         );
         assert_eq!(
             sample_rate_config(
-                &FIRMWARE_IQ_RATES,
+                &legacy_rates(),
                 SampleType::Raw,
                 DecimationMode::LowBandwidth,
                 5_000_000,
             )
             .unwrap(),
-            (2, 5_000_000, 1)
+            legacy_selection(2, 5_000_000)
         );
     }
 
@@ -1376,13 +1623,68 @@ mod tests {
     fn non_table_raw_samplerates_use_adc_rate_value_encoding() {
         assert_eq!(
             sample_rate_config(
-                &FIRMWARE_IQ_RATES,
+                &legacy_rates(),
                 SampleType::Raw,
                 DecimationMode::LowBandwidth,
                 12_000_000,
             )
             .unwrap(),
-            (12_000, 12_000_000, 1)
+            legacy_selection(12_000, 12_000_000)
+        );
+    }
+
+    #[test]
+    fn extended_samplerates_reject_unsupported_adc_encodings() {
+        let rates = SampleRateTable {
+            entries: vec![SampleRateInfo {
+                rate_hz: 10_000_000,
+                adc_bits: 8,
+                data_format: DATA_FORMAT_RAW_ADC,
+                firmware_index: 0,
+            }],
+            extended: true,
+        };
+
+        assert!(matches!(
+            sample_rate_config(
+                &rates,
+                SampleType::Float32Iq,
+                DecimationMode::LowBandwidth,
+                10_000_000,
+            ),
+            Err(Error::Unsupported)
+        ));
+        assert!(build_virtual_samplerates(&rates.entries).is_empty());
+    }
+
+    #[test]
+    fn extended_samplerate_response_must_match_queried_metadata() {
+        let selected = SelectedSampleRate {
+            param: 0,
+            hardware_rate: 10_000_000,
+            decimation: 1,
+            response_len: 4,
+            expected_encoding: Some((12, DATA_FORMAT_RAW_ADC)),
+        };
+
+        assert!(validate_samplerate_response(&selected, &[1, 12, 0, 0]).is_ok());
+        assert!(validate_samplerate_response(&selected, &[1, 8, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn capabilities_only_fall_back_for_an_unsupported_request() {
+        assert_eq!(
+            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Stall))
+                .get_capabilities()
+                .wait()
+                .unwrap(),
+            RFONE_HARDCODED_CAPS
+        );
+        assert!(
+            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Fault))
+                .get_capabilities()
+                .wait()
+                .is_err()
         );
     }
 }

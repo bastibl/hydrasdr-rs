@@ -144,11 +144,12 @@ impl VendorControlRequest {
 
     /// Encode the C samplerate list query.
     pub(crate) fn get_samplerates(count: u32, extended: bool) -> Self {
+        let entry_size = if extended { 8 } else { 4 };
         Self::in_request(
             VendorRequest::GetSamplerates,
             u16::from(extended),
             count as u16,
-            count as usize * 4,
+            count as usize * entry_size,
         )
     }
 
