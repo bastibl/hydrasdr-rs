@@ -1004,7 +1004,7 @@ mod tests {
         async fn control_out_async(&self, _request: VendorControlRequest) -> Result<()> {
             self.state.control_out_count.fetch_add(1, Ordering::SeqCst);
             if self.state.fail_control_out.load(Ordering::SeqCst) {
-                Err(Error::status(crate::errors::StatusCode::LibUsb))
+                Err(nusb::transfer::TransferError::Fault.into())
             } else {
                 Ok(())
             }

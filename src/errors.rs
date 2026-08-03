@@ -1,57 +1,43 @@
-//! Error/status mapping for the HydraSDR API.
+//! Errors returned by the HydraSDR API.
 
 use core::fmt;
 
-/// Status codes mirrored from the C driver.
+/// Error returned by a HydraSDR operation.
 ///
-/// Negative values intentionally match `hydrasdr_error` constants where present.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(i32)]
-pub(crate) enum StatusCode {
-    InvalidParam = -2,
-    NotFound = -5,
-    Busy = -6,
-    Unsupported = -12,
-    LibUsb = -1000,
-    StreamingStopped = -1003,
-    Other = -9999,
-}
-
-impl StatusCode {
-    /// Return the C status/error macro name for this code.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::InvalidParam => "HYDRASDR_ERROR_INVALID_PARAM",
-            Self::NotFound => "HYDRASDR_ERROR_NOT_FOUND",
-            Self::Busy => "HYDRASDR_ERROR_BUSY",
-            Self::Unsupported => "HYDRASDR_ERROR_UNSUPPORTED",
-            Self::LibUsb => "HYDRASDR_ERROR_LIBUSB",
-            Self::StreamingStopped => "HYDRASDR_ERROR_STREAMING_STOPPED",
-            Self::Other => "HYDRASDR_ERROR_OTHER",
-        }
-    }
-}
-
-/// Error type used by the HydraSDR API.
-///
-/// USB errors preserve the backend message while exposing a stable high-level [`ErrorKind`].
+/// The variants preserve structured driver errors and the original `nusb` error values. Use
+/// [`Error::kind`] when only a broad, backend-independent category is needed.
 #[derive(Debug)]
-pub struct Error {
-    repr: ErrorRepr,
-}
-
-#[derive(Debug)]
-enum ErrorRepr {
-    Status(StatusCode),
-    Usb {
-        status: StatusCode,
-        message: String,
-    },
+#[non_exhaustive]
+pub enum Error {
+    /// A receiver configuration value failed validation.
     InvalidConfig {
+        /// Name of the invalid configuration field.
         field: &'static str,
+        /// Reason the value is invalid.
         reason: &'static str,
     },
-    StreamClosed(&'static str),
+    /// No matching HydraSDR device was found.
+    DeviceNotFound,
+    /// The device or USB resource is already in use.
+    Busy,
+    /// The requested operation is not supported by the backend or device.
+    Unsupported,
+    /// The stream was already stopped, finished, or otherwise closed.
+    StreamClosed {
+        /// Reason the stream is no longer usable.
+        reason: &'static str,
+    },
+    /// The USB backend returned an error outside an individual transfer.
+    Usb(nusb::Error),
+    /// An individual USB transfer failed.
+    Transfer(nusb::transfer::TransferError),
+    /// The device or driver violated the expected HydraSDR protocol.
+    Protocol {
+        /// Operation that failed.
+        operation: &'static str,
+        /// Protocol violation or unexpected response.
+        reason: &'static str,
+    },
 }
 
 /// Stable high-level error category.
@@ -74,110 +60,112 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    /// Build a high-level configuration validation error.
+    /// Build a receiver configuration validation error.
     pub(crate) const fn invalid_config(field: &'static str, reason: &'static str) -> Self {
-        Self {
-            repr: ErrorRepr::InvalidConfig { field, reason },
-        }
+        Self::InvalidConfig { field, reason }
     }
 
-    /// Build a high-level stream lifecycle error.
+    /// Build a stream lifecycle error.
     pub(crate) const fn stream_closed(reason: &'static str) -> Self {
-        Self {
-            repr: ErrorRepr::StreamClosed(reason),
-        }
+        Self::StreamClosed { reason }
     }
 
-    /// Build an error from an internal direct-driver status code.
-    pub(crate) const fn status(status: StatusCode) -> Self {
-        Self {
-            repr: ErrorRepr::Status(status),
-        }
+    /// Build a HydraSDR protocol error.
+    pub(crate) const fn protocol(operation: &'static str, reason: &'static str) -> Self {
+        Self::Protocol { operation, reason }
     }
 
-    /// Return the high-level error category.
-    pub const fn kind(&self) -> ErrorKind {
-        match self.status_code() {
-            StatusCode::InvalidParam => ErrorKind::InvalidConfig,
-            StatusCode::NotFound => ErrorKind::NotFound,
-            StatusCode::Busy => ErrorKind::Busy,
-            StatusCode::Unsupported => ErrorKind::Unsupported,
-            StatusCode::LibUsb => ErrorKind::Usb,
-            StatusCode::StreamingStopped => ErrorKind::StreamClosed,
-            _ => ErrorKind::Other,
-        }
-    }
-
-    /// Return the C-style status code represented by this error.
-    pub(crate) const fn status_code(&self) -> StatusCode {
-        match &self.repr {
-            ErrorRepr::Status(code) => *code,
-            ErrorRepr::Usb { status, .. } => *status,
-            ErrorRepr::InvalidConfig { .. } => StatusCode::InvalidParam,
-            ErrorRepr::StreamClosed(_) => StatusCode::StreamingStopped,
+    /// Return a broad, backend-independent error category.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::InvalidConfig { .. } => ErrorKind::InvalidConfig,
+            Self::DeviceNotFound => ErrorKind::NotFound,
+            Self::Busy => ErrorKind::Busy,
+            Self::Unsupported => ErrorKind::Unsupported,
+            Self::StreamClosed { .. } => ErrorKind::StreamClosed,
+            Self::Usb(err) => match err.kind() {
+                nusb::ErrorKind::Busy => ErrorKind::Busy,
+                nusb::ErrorKind::NotFound => ErrorKind::NotFound,
+                nusb::ErrorKind::Unsupported => ErrorKind::Unsupported,
+                _ => ErrorKind::Usb,
+            },
+            Self::Transfer(_) => ErrorKind::Usb,
+            Self::Protocol { .. } => ErrorKind::Other,
         }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.repr {
-            ErrorRepr::Status(code) => f.write_str(code.name()),
-            ErrorRepr::Usb { status, message } => write!(f, "{}: {message}", status.name()),
-            ErrorRepr::InvalidConfig { field, reason } => {
+        match self {
+            Self::InvalidConfig { field, reason } => {
                 write!(f, "invalid configuration for {field}: {reason}")
             }
-            ErrorRepr::StreamClosed(reason) => write!(f, "stream closed: {reason}"),
+            Self::DeviceNotFound => f.write_str("no matching HydraSDR device found"),
+            Self::Busy => f.write_str("HydraSDR device or USB resource is busy"),
+            Self::Unsupported => f.write_str("operation is unsupported"),
+            Self::StreamClosed { reason } => write!(f, "stream closed: {reason}"),
+            Self::Usb(err) => write!(f, "USB error: {err}"),
+            Self::Transfer(err) => write!(f, "USB transfer error: {err}"),
+            Self::Protocol { operation, reason } => write!(f, "{operation}: {reason}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
-
-impl From<StatusCode> for Error {
-    fn from(value: StatusCode) -> Self {
-        Self::status(value)
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Usb(err) => Some(err),
+            Self::Transfer(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
 impl From<nusb::Error> for Error {
     fn from(value: nusb::Error) -> Self {
-        let status = match value.kind() {
-            nusb::ErrorKind::Busy => StatusCode::Busy,
-            nusb::ErrorKind::NotFound => StatusCode::NotFound,
-            nusb::ErrorKind::Unsupported => StatusCode::Unsupported,
-            nusb::ErrorKind::PermissionDenied
-            | nusb::ErrorKind::Disconnected
-            | nusb::ErrorKind::Other => StatusCode::LibUsb,
-            _ => StatusCode::LibUsb,
-        };
-        Self {
-            repr: ErrorRepr::Usb {
-                status,
-                message: value.to_string(),
-            },
-        }
+        Self::Usb(value)
     }
 }
 
 impl From<nusb::transfer::TransferError> for Error {
     fn from(value: nusb::transfer::TransferError) -> Self {
-        let status = match value {
-            nusb::transfer::TransferError::InvalidArgument => StatusCode::InvalidParam,
-            nusb::transfer::TransferError::Disconnected
-            | nusb::transfer::TransferError::Cancelled
-            | nusb::transfer::TransferError::Stall
-            | nusb::transfer::TransferError::Fault
-            | nusb::transfer::TransferError::Unknown(_) => StatusCode::LibUsb,
-        };
-        Self {
-            repr: ErrorRepr::Usb {
-                status,
-                message: value.to_string(),
-            },
-        }
+        Self::Transfer(value)
     }
 }
 
 /// Crate result alias using [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::{Error, ErrorKind};
+
+    #[test]
+    fn transfer_errors_preserve_their_source_and_are_not_configuration_errors() {
+        let err = Error::from(nusb::transfer::TransferError::InvalidArgument);
+
+        assert!(matches!(
+            &err,
+            Error::Transfer(nusb::transfer::TransferError::InvalidArgument)
+        ));
+        assert_eq!(err.kind(), ErrorKind::Usb);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn configuration_errors_expose_the_field_and_reason() {
+        let err = Error::invalid_config("frequency_hz", "must be nonzero");
+
+        assert!(matches!(
+            &err,
+            Error::InvalidConfig {
+                field: "frequency_hz",
+                reason: "must be nonzero"
+            }
+        ));
+        assert_eq!(err.kind(), ErrorKind::InvalidConfig);
+    }
+}

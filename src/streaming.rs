@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::converter::Float32IqConverter;
-use crate::errors::{Error, Result, StatusCode};
+use crate::errors::{Error, Result};
 use crate::rfone::RFONE_TRANSFER_COUNT;
 
 /// Transfer view passed to a receive callback.
@@ -131,7 +131,10 @@ impl StreamingState {
     /// Set the DDC decimation factor before streaming starts.
     pub(crate) fn set_decimation(&mut self, factor: usize) -> Result<()> {
         if !matches!(factor, 1 | 2 | 4 | 8 | 16 | 32 | 64) {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::invalid_config(
+                "decimation_factor",
+                "must be one of 1, 2, 4, 8, 16, 32, or 64",
+            ));
         }
         self.config.decimation_factor = factor;
         Ok(())
@@ -203,7 +206,10 @@ impl<B: BulkInBackend> RawRxStream<B> {
         let actual_len = completion.actual_len;
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
-            return Err(Error::status(StatusCode::LibUsb));
+            return Err(Error::protocol(
+                "receive transfer",
+                "completed with an unexpected length",
+            ));
         }
 
         self.stats.buffers_received += 1;
@@ -303,7 +309,10 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         let actual_len = completion.actual_len;
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
-            return Err(Error::status(StatusCode::LibUsb));
+            return Err(Error::protocol(
+                "receive transfer",
+                "completed with an unexpected length",
+            ));
         }
 
         self.stats.buffers_received += 1;
@@ -410,7 +419,10 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         let actual_len = completion.actual_len;
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
-            return Err(Error::status(StatusCode::LibUsb));
+            return Err(Error::protocol(
+                "receive transfer",
+                "completed with an unexpected length",
+            ));
         }
 
         self.stats.buffers_received += 1;
@@ -541,7 +553,10 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             let actual_len = completion.actual_len;
             if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
                 self.stats.buffers_dropped += 1;
-                return Err(Error::status(StatusCode::LibUsb));
+                return Err(Error::protocol(
+                    "receive transfer",
+                    "completed with an unexpected length",
+                ));
             }
 
             self.stats.buffers_received += 1;

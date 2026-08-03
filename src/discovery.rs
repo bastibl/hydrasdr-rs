@@ -3,7 +3,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 
-use crate::errors::{Error, Result, StatusCode};
+use crate::errors::{Error, Result};
 /// Known HydraSDR USB VID/PID pair and its board identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UsbDeviceId {
@@ -93,7 +93,7 @@ pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo
         }
         return Ok(device);
     }
-    Err(Error::status(StatusCode::NotFound))
+    Err(Error::DeviceNotFound)
 }
 
 pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
@@ -114,7 +114,7 @@ pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb
         return Ok(device);
     }
 
-    Err(Error::status(StatusCode::NotFound))
+    Err(Error::DeviceNotFound)
 }
 
 #[cfg(target_arch = "wasm32")]

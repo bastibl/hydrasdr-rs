@@ -4,7 +4,7 @@ use nusb::MaybeFuture;
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
 use crate::config::RfPort;
 use crate::discovery;
-use crate::errors::{Error, Result, StatusCode};
+use crate::errors::{Error, Result};
 use crate::rfone::{
     RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
     RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
@@ -86,7 +86,8 @@ impl<C: ControlBackend> HydraSdr<C> {
     /// Read the board ID, matching `hydrasdr_board_id_read`.
     pub(crate) fn board_id_read(&self) -> Result<BoardId> {
         let data = self.control_in_exact(VendorControlRequest::board_id_read(), 1)?;
-        BoardId::try_from(data[0]).map_err(|_| Error::status(StatusCode::Other))
+        BoardId::try_from(data[0])
+            .map_err(|_| Error::protocol("read board ID", "firmware returned an unknown board ID"))
     }
 
     /// Read the firmware version C string, matching `hydrasdr_version_string_read`.
@@ -189,7 +190,10 @@ impl<C: ControlBackend> HydraSdr<C> {
     /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
     pub(crate) fn set_freq(&mut self, freq_hz: u64) -> Result<()> {
         if freq_hz == 0 || freq_hz > MAX_FREQ_HZ {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::invalid_config(
+                "frequency_hz",
+                "must be nonzero and at most 10 GHz",
+            ));
         }
         self.control_out(VendorControlRequest::set_frequency(freq_hz))
     }
@@ -293,7 +297,10 @@ impl<C: ControlBackend> HydraSdr<C> {
     pub(crate) fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
         let response = self.control_in_min(VendorControlRequest::set_rf_port(port), 1)?;
         if response.first().copied() != Some(1) {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::protocol(
+                "set RF port",
+                "firmware rejected the requested RF port",
+            ));
         }
         Ok(())
     }
@@ -347,7 +354,10 @@ impl<C: ControlBackend> HydraSdr<C> {
         if bandwidth < self.bandwidths.len() as u32 {
             return checked_vendor_param(bandwidth);
         }
-        Err(Error::status(StatusCode::InvalidParam))
+        Err(Error::invalid_config(
+            "bandwidth_hz",
+            "cannot be encoded as a firmware bandwidth index or kHz value",
+        ))
     }
 
     fn set_legacy_gain(
@@ -399,7 +409,10 @@ impl<C: ControlBackend> HydraSdr<C> {
     fn control_in_exact(&self, request: VendorControlRequest, len: usize) -> Result<Vec<u8>> {
         let data = self.control.control_in(request)?;
         if data.len() < len {
-            return Err(Error::status(StatusCode::LibUsb));
+            return Err(Error::protocol(
+                "control transfer",
+                "response is shorter than requested",
+            ));
         }
         Ok(data)
     }
@@ -505,7 +518,10 @@ impl<C> HydraSdr<C> {
             return checked_vendor_param(index);
         }
         if hardware_samplerate < MIN_SAMPLERATE_BY_VALUE {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::invalid_config(
+                "sample_rate_hz",
+                "cannot be encoded for the firmware",
+            ));
         }
         let mut rate_param = hardware_samplerate;
         if self.sample_type_is_iq() {
@@ -521,7 +537,8 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         let data = self
             .control_in_exact_async(VendorControlRequest::board_id_read(), 1)
             .await?;
-        BoardId::try_from(data[0]).map_err(|_| Error::status(StatusCode::Other))
+        BoardId::try_from(data[0])
+            .map_err(|_| Error::protocol("read board ID", "firmware returned an unknown board ID"))
     }
 
     /// Async counterpart to [`HydraSdr::version_string_read`].
@@ -653,7 +670,10 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     /// Async counterpart to [`HydraSdr::set_freq`].
     pub(crate) async fn set_freq_async(&mut self, freq_hz: u64) -> Result<()> {
         if freq_hz == 0 || freq_hz > MAX_FREQ_HZ {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::invalid_config(
+                "frequency_hz",
+                "must be nonzero and at most 10 GHz",
+            ));
         }
         self.control_out_async(VendorControlRequest::set_frequency(freq_hz))
             .await
@@ -774,7 +794,10 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
             .control_in_min_async(VendorControlRequest::set_rf_port(port), 1)
             .await?;
         if response.first().copied() != Some(1) {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::protocol(
+                "set RF port",
+                "firmware rejected the requested RF port",
+            ));
         }
         Ok(())
     }
@@ -809,7 +832,10 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
         if bandwidth < self.bandwidths.len() as u32 {
             return checked_vendor_param(bandwidth);
         }
-        Err(Error::status(StatusCode::InvalidParam))
+        Err(Error::invalid_config(
+            "bandwidth_hz",
+            "cannot be encoded as a firmware bandwidth index or kHz value",
+        ))
     }
 
     async fn set_legacy_gain_async(
@@ -872,7 +898,10 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     ) -> Result<Vec<u8>> {
         let data = self.control.control_in_async(request).await?;
         if data.len() < len {
-            return Err(Error::status(StatusCode::LibUsb));
+            return Err(Error::protocol(
+                "control transfer",
+                "response is shorter than requested",
+            ));
         }
         Ok(data)
     }
@@ -938,7 +967,7 @@ where
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
     pub(crate) fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
-            return Err(Error::status(StatusCode::Unsupported));
+            return Err(Error::Unsupported);
         }
 
         self.receiver_mode(ReceiverMode::Off)?;
@@ -1011,7 +1040,7 @@ where
     /// Start a persistent async pull RX stream for unpacked float32 IQ samples.
     pub(crate) async fn start_rx_stream_async(&mut self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
-            return Err(Error::status(StatusCode::Unsupported));
+            return Err(Error::Unsupported);
         }
 
         self.receiver_mode_async(ReceiverMode::Off).await?;
@@ -1073,7 +1102,7 @@ impl HydraSdr<NusbControl> {
         let dev = Self::from_control(NusbControl::new(device, interface));
         let firmware = dev.version_string_read_async().await?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
-            return Err(Error::status(StatusCode::NotFound));
+            return Err(Error::DeviceNotFound);
         }
         Ok(dev)
     }
@@ -1094,7 +1123,7 @@ impl HydraSdr<NusbControl> {
         let dev = Self::from_control(NusbControl::new(device, interface));
         let firmware = dev.version_string_read()?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
-            return Err(Error::status(StatusCode::NotFound));
+            return Err(Error::DeviceNotFound);
         }
         Ok(dev)
     }
@@ -1120,7 +1149,7 @@ fn serial_from_part_id(part_serial: &PartIdSerialNo) -> Option<u64> {
 fn checked_vendor_param(value: impl TryInto<u16>) -> Result<u16> {
     value
         .try_into()
-        .map_err(|_| Error::status(StatusCode::InvalidParam))
+        .map_err(|_| Error::protocol("encode vendor request", "parameter exceeds 16 bits"))
 }
 
 fn build_virtual_samplerates(hardware_rates: &[u32]) -> Vec<u32> {

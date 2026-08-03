@@ -13,7 +13,7 @@ use nusb::transfer::{
 use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::config::RfPort;
 use crate::constants::CTRL_TIMEOUT_MS;
-use crate::errors::{Error, Result, StatusCode};
+use crate::errors::{Error, Result};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::streaming::{BulkInBackend, StreamingBackend};
@@ -114,7 +114,10 @@ impl VendorControlRequest {
     /// Convert this direct request into a `nusb` IN control transfer.
     pub(crate) fn nusb_control_in(&self) -> Result<ControlIn> {
         if self.direction != ControlDirection::In || self.length > u16::MAX as usize {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::protocol(
+                "encode control IN request",
+                "request direction or length is invalid",
+            ));
         }
         Ok(ControlIn {
             control_type: ControlType::Vendor,
@@ -129,7 +132,10 @@ impl VendorControlRequest {
     /// Convert this direct request into a `nusb` OUT control transfer.
     pub(crate) fn nusb_control_out(&self) -> Result<ControlOut<'_>> {
         if self.direction != ControlDirection::Out {
-            return Err(Error::status(StatusCode::InvalidParam));
+            return Err(Error::protocol(
+                "encode control OUT request",
+                "request direction is invalid",
+            ));
         }
         Ok(ControlOut {
             control_type: ControlType::Vendor,
@@ -416,7 +422,10 @@ impl AsyncBulkInBackend for NusbBulkIn {
 pub(crate) fn decode_u32_le_words(bytes: &[u8]) -> Result<Vec<u32>> {
     let chunks = bytes.chunks_exact(4);
     if !chunks.remainder().is_empty() {
-        return Err(Error::status(StatusCode::LibUsb));
+        return Err(Error::protocol(
+            "decode control response",
+            "response length is not a multiple of four bytes",
+        ));
     }
     Ok(chunks
         .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk has four bytes")))
@@ -426,7 +435,10 @@ pub(crate) fn decode_u32_le_words(bytes: &[u8]) -> Result<Vec<u32>> {
 pub(crate) fn decode_part_id_serial(bytes: &[u8]) -> Result<PartIdSerialNo> {
     let words = decode_u32_le_words(bytes)?;
     if words.len() < 6 {
-        return Err(Error::status(StatusCode::LibUsb));
+        return Err(Error::protocol(
+            "decode part ID and serial number",
+            "response contains fewer than six words",
+        ));
     }
     Ok(PartIdSerialNo {
         part_id: [words[0], words[1]],

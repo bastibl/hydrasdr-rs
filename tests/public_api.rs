@@ -1,5 +1,5 @@
 use hydrasdr_rs::{
-    Bandwidth, Config, DeviceInfo, ErrorKind, GainConfig, GainPreset, RfPort, SampleFormat,
+    Bandwidth, Config, DeviceInfo, Error, ErrorKind, GainConfig, GainPreset, RfPort, SampleFormat,
 };
 
 #[test]
@@ -152,6 +152,13 @@ fn public_config_builder_validates_manual_gain_ranges() {
 fn public_error_and_metadata_are_ergonomic() {
     let err = Config::builder().sample_rate_hz(9_999).build().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidConfig);
+    assert!(matches!(
+        err,
+        Error::InvalidConfig {
+            field: "sample_rate_hz",
+            ..
+        }
+    ));
 
     let info = DeviceInfo {
         board_name: "HydraSDR RFOne",
