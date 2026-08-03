@@ -23,13 +23,20 @@ pub(crate) struct Transfer<'a> {
 }
 
 /// Counters collected during a direct streaming run.
+///
+/// These counters describe USB completions observed by the host. RFOne bulk data
+/// has no sequence number, so the driver cannot detect samples lost in the device
+/// before a USB transfer completes (for example, when the application stops
+/// polling long enough to exhaust the host transfer queue).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StreamingStats {
-    /// Number of USB buffers completed by the backend.
+    /// Number of USB completions consumed by the driver.
     pub buffers_received: u64,
     /// Number of buffers successfully processed by the streaming layer.
     pub buffers_processed: u64,
-    /// Number of buffers not delivered because of an error or controlled restart.
+    /// Number of observed completions not delivered because of an error or controlled restart.
+    ///
+    /// This does not include device-side loss that happened before USB completion.
     pub buffers_dropped: u64,
 }
 

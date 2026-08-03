@@ -34,6 +34,8 @@ One-shot operations implement `nusb::MaybeFuture`: call `.wait()` for synchronou
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
+Receive streams are deliberately pull-based and do not spawn a background drain task. The default unpacked queue contains 16 transfers of 256 KiB (4 MiB total). Applications must keep `next_block` or `read` moving while RX is enabled; once that queue is exhausted, samples may be lost in the device. RFOne bulk transfers do not carry sequence numbers, so `StreamingStats` can count rejected host completions but cannot detect that device-side loss. Queue headroom is `4 MiB / raw USB byte rate` (about 105 ms at 20 Msamples/s with 16-bit unpacked samples).
+
 For awaited USB operations on native targets, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Native applications that await `open`, `configure`, or owned async RX streams should normally enable one of this crate's forwarding features:
 
 ```sh

@@ -596,7 +596,10 @@ impl<'a> SampleBlock<'a> {
         self.sample_count
     }
 
-    /// Dropped sample count reported by the streaming layer.
+    /// Estimated sample count represented by USB buffers the driver discarded.
+    ///
+    /// RFOne transfers have no sequence numbers, so this cannot include samples
+    /// lost inside the device while the host transfer queue was exhausted.
     pub const fn dropped_samples(&self) -> u64 {
         self.dropped_samples
     }
@@ -676,6 +679,9 @@ pub struct RawRxStream<'dev> {
 #[cfg(not(target_arch = "wasm32"))]
 impl RawRxStream<'_> {
     /// Read the next sample block.
+    ///
+    /// This is a pull API with no background drain task. Call it continuously
+    /// while receiving so completed buffers are promptly resubmitted.
     pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         self.inner.next_block()
     }
@@ -764,7 +770,8 @@ impl F32RxStream<'_> {
     /// Read converted `(I, Q)` samples into `out`.
     ///
     /// `timeout` bounds the whole read call, including any additional USB
-    /// completions needed to fill `out`.
+    /// completions needed to fill `out`. This is a pull API with no background
+    /// drain task; call it continuously while receiving.
     pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
         self.inner.read(out, timeout)
     }
@@ -913,6 +920,9 @@ impl AsyncRawRxStream {
     }
 
     /// Read the next sample block.
+    ///
+    /// This future directly drains the fixed USB transfer queue. Poll it
+    /// continuously while receiving; there is no background drain task.
     pub async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         self.inner.next_block().await
     }
@@ -1091,6 +1101,9 @@ impl AsyncF32RxStream {
     }
 
     /// Read converted `(I, Q)` samples into `out`.
+    ///
+    /// This future directly drains the fixed USB transfer queue. Poll it
+    /// continuously while receiving; there is no background drain task.
     pub async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
         self.inner.read(out).await
     }
