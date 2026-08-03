@@ -4,11 +4,9 @@
 
 This is mainly an experiment for using [`nusb`](https://crates.io/crates/nusb) for a real Rust-native driver that does *not* require `libusb`.
 There are only a few Rust SDR drivers and the ones I know of are based on `rusb`, which wraps `libusb`.
-Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://github.com/futuresdr/futuresdr), but the [Seify](https://github.com/FutureSDR/seify) SDR hardware abstraction library has only a sync interface at the moment.
-Using this driver, I want to explore an async implementation for Seify.
-In the near future, `nusb` might also support cross-compilation to `WebUSB`, which would allow using the same driver for native and web, which would be awesome.
+Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://github.com/futuresdr/futuresdr) and Seify's async API. `nusb` now supports WebUSB, so the async driver can use the same API on native and web targets.
 
-Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and receive-stream types.
+Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and receive-stream types on native targets; WebUSB builds expose only the async USB operations and owned async streams.
 
 Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
 
@@ -17,7 +15,7 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 Implemented:
 
 - Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and pull-style receive streams.
-- USB discovery/open for HydraSDR RFOne VID/PID pairs.
+- USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
 - Internal USB control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
 - Complex float 32-bit sample conversion and downsampling (10MHz, 5MHz, and 2.5MHz).
@@ -36,7 +34,7 @@ The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Applications that call `open_async`, `configure_async`, or async RX streams should normally enable one of this crate's forwarding features:
+For async USB operations on native targets, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Native applications that call `open_async`, `configure_async`, or async RX streams should normally enable one of this crate's forwarding features:
 
 ```sh
 cargo check --features tokio
@@ -44,6 +42,23 @@ cargo check --features smol
 ```
 
 Use `tokio` if the application already runs on Tokio; use `smol` for smaller examples or applications using the smol/async-io ecosystem.
+
+## WebUSB
+
+`wasm32-unknown-unknown` uses `nusb`'s WebUSB backend and only supports async USB operations. No `tokio` or `smol` feature is needed. Because `web-sys` still marks its WebUSB bindings as unstable, the final application crate must opt in. This repository includes the required target configuration in `.cargo/config.toml`:
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
+```
+
+If `hydrasdr-rs` is consumed as a dependency, put the same target configuration in the application's Cargo configuration. Browser WebUSB access also requires a secure context, browser support, and user-granted permission for one of the RFOne VID/PID pairs. `Device::list_async` only returns devices already authorized for the page. If `Device::open_async` finds no authorized match, it requests permission; browsers require that first open to run from a transient user activation such as a click handler.
+
+Check the WebUSB build with:
+
+```sh
+cargo check --target wasm32-unknown-unknown
+```
 
 ## Configuration validation
 
@@ -114,7 +129,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-Call `finish().await` to stop the receiver through the async USB path, then `into_device()` to recover the device. Because start and finish borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping an unfinished stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup.
+Call `finish().await` to stop the receiver through the async USB path, then `into_device()` to recover the device. Because start and finish borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Dropping an unfinished stream closes its transfer queue and device handle, but cannot perform asynchronous receiver-off cleanup. WebUSB does not provide transfer cancellation, so explicit async shutdown is especially important in the browser.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 

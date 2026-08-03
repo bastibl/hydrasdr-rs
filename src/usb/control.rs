@@ -4,6 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use nusb::Endpoint;
+#[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 use nusb::transfer::{
     Buffer as NusbBuffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient,
@@ -13,9 +14,9 @@ use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::config::RfPort;
 use crate::constants::CTRL_TIMEOUT_MS;
 use crate::errors::{Error, Result, StatusCode};
-use crate::streaming::{
-    AsyncBulkInBackend, AsyncStreamingBackend, BulkInBackend, BulkInCompletion, StreamingBackend,
-};
+use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::streaming::{BulkInBackend, StreamingBackend};
 use crate::types::PartIdSerialNo;
 
 /// Direction of a C-style vendor control transfer.
@@ -237,6 +238,7 @@ impl VendorControlRequest {
 }
 
 /// Synchronous control-transfer backend for the direct API.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait ControlBackend: std::fmt::Debug {
     fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>>;
     fn control_out(&self, request: VendorControlRequest) -> Result<()>;
@@ -278,6 +280,7 @@ impl NusbControl {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ControlBackend for NusbControl {
     fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
         let control = request.nusb_control_in()?;
@@ -314,6 +317,7 @@ impl AsyncControlBackend for NusbControl {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl StreamingBackend for NusbControl {
     type BulkIn = NusbBulkIn;
 
@@ -340,6 +344,7 @@ impl AsyncStreamingBackend for NusbControl {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BulkInBackend for NusbBulkIn {
     type Buffer = NusbBuffer;
 
@@ -403,6 +408,7 @@ impl AsyncBulkInBackend for NusbBulkIn {
     }
 
     fn cancel_all(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         self.endpoint.cancel_all();
     }
 }

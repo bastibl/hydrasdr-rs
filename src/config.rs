@@ -8,7 +8,9 @@ use crate::rfone::{
     RFONE_VGA_MAX_GAIN,
 };
 use crate::types::{DecimationMode, SampleType};
-use crate::usb::control::{AsyncControlBackend, ControlBackend};
+use crate::usb::control::AsyncControlBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb::control::ControlBackend;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -241,6 +243,7 @@ impl Config {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_direct<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
     where
         C: ControlBackend,
@@ -266,7 +269,7 @@ impl Config {
 
     pub(crate) async fn apply_direct_async<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
     where
-        C: AsyncControlBackend + ControlBackend,
+        C: AsyncControlBackend,
     {
         self.validate()?;
         direct.set_freq_async(self.frequency_hz).await?;
@@ -403,6 +406,7 @@ impl ConfigBuilder {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_gain_direct<C>(direct: &mut HydraSdr<C>, gain: GainConfig) -> Result<()>
 where
     C: ControlBackend,
@@ -444,7 +448,7 @@ where
 
 async fn apply_gain_direct_async<C>(direct: &mut HydraSdr<C>, gain: GainConfig) -> Result<()>
 where
-    C: AsyncControlBackend + ControlBackend,
+    C: AsyncControlBackend,
 {
     match gain {
         GainConfig::Unchanged => Ok(()),

@@ -2,7 +2,9 @@
 
 use std::future::Future;
 use std::ops::Deref;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::converter::Float32IqConverter;
@@ -40,6 +42,7 @@ pub(crate) struct BulkInCompletion<B> {
 }
 
 /// Minimal synchronous bulk-IN backend used by direct streaming tests and `nusb`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait BulkInBackend: std::fmt::Debug {
     type Buffer: Deref<Target = [u8]>;
 
@@ -52,6 +55,7 @@ pub(crate) trait BulkInBackend: std::fmt::Debug {
 }
 
 /// Provider of synchronous bulk-IN endpoints.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait StreamingBackend: std::fmt::Debug {
     type BulkIn: BulkInBackend;
 
@@ -136,6 +140,7 @@ impl StreamingState {
 
 /// Persistent synchronous pull stream for unpacked F32 IQ RX.
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct DirectRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
@@ -149,6 +154,7 @@ pub(crate) struct DirectRxStream<B: BulkInBackend> {
 
 /// Persistent synchronous pull stream that yields raw USB transfer blocks.
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RawRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
@@ -157,6 +163,7 @@ pub(crate) struct RawRxStream<B: BulkInBackend> {
     closed: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> RawRxStream<B> {
     pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
         bulk_in.clear_halt()?;
@@ -213,7 +220,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
         }))
     }
 
-    /// Close the USB queue by cancelling pending transfers.
+    /// Close the USB queue, cancelling pending transfers where supported.
     pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
@@ -233,6 +240,7 @@ impl<B: BulkInBackend> RawRxStream<B> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> Drop for RawRxStream<B> {
     fn drop(&mut self) {
         let _ = self.close();
@@ -312,7 +320,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         }))
     }
 
-    /// Close the USB queue by cancelling pending transfers.
+    /// Close the USB queue, cancelling pending transfers where supported.
     pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
@@ -358,7 +366,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         })
     }
 
-    /// Close the USB queue by cancelling pending transfers.
+    /// Close the USB queue, cancelling pending transfers where supported.
     pub(crate) fn close(&mut self) -> StreamingStats {
         if !self.closed {
             if let Some(bulk_in) = self.bulk_in.as_mut() {
@@ -459,6 +467,7 @@ impl<B: AsyncBulkInBackend> Drop for AsyncDirectRxStream<B> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> DirectRxStream<B> {
     pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
         bulk_in.clear_halt()?;
@@ -586,6 +595,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> Drop for DirectRxStream<B> {
     fn drop(&mut self) {
         let _ = self.close();
@@ -608,6 +618,7 @@ fn config_current_buffer_size(config: StreamingConfig) -> usize {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn remaining_timeout(deadline: Option<Instant>, fallback: Duration) -> Duration {
     deadline.map_or(fallback, |deadline| {
         deadline.saturating_duration_since(Instant::now())

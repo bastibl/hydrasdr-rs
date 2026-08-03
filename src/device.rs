@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
@@ -12,12 +13,15 @@ use crate::rfone::{
     default_gain_infos, rf_port_infos,
 };
 use crate::streaming::{
-    AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, DirectRxStream, RawRxStream,
-    StreamingBackend, StreamingState, StreamingStats,
+    AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, StreamingState,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::streaming::{DirectRxStream, RawRxStream, StreamingBackend, StreamingStats};
 use crate::types::{BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb::control::ControlBackend;
 use crate::usb::control::{
-    AsyncControlBackend, ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
+    AsyncControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
     decode_u32_le_words,
 };
 
@@ -50,7 +54,7 @@ pub(crate) struct HydraSdr<C = NusbControl> {
     streaming: StreamingState,
 }
 
-impl<C: ControlBackend> HydraSdr<C> {
+impl<C> HydraSdr<C> {
     /// Build a direct device handle from a control backend.
     pub(crate) fn from_control(control: C) -> Self {
         Self {
@@ -70,6 +74,15 @@ impl<C: ControlBackend> HydraSdr<C> {
         }
     }
 
+    /// Set the sample type tracked by the direct streaming path.
+    pub(crate) fn set_sample_type(&mut self, sample_type: SampleType) -> Result<()> {
+        self.sample_type = sample_type;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<C: ControlBackend> HydraSdr<C> {
     /// Read the board ID, matching `hydrasdr_board_id_read`.
     pub(crate) fn board_id_read(&self) -> Result<BoardId> {
         let data = self.control_in_exact(VendorControlRequest::board_id_read(), 1)?;
@@ -282,12 +295,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         if response.first().copied() != Some(1) {
             return Err(Error::status(StatusCode::InvalidParam));
         }
-        Ok(())
-    }
-
-    /// Set the sample type tracked by the direct streaming path.
-    pub(crate) fn set_sample_type(&mut self, sample_type: SampleType) -> Result<()> {
-        self.sample_type = sample_type;
         Ok(())
     }
 
@@ -883,6 +890,7 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> HydraSdr<C>
 where
     C: ControlBackend + StreamingBackend,
@@ -1029,11 +1037,13 @@ where
 
 impl HydraSdr<NusbControl> {
     /// Open the first visible HydraSDR RFOne through `nusb`, matching `hydrasdr_open`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn open() -> Result<Self> {
         Self::open_sn_internal(None)
     }
 
     /// Open a HydraSDR RFOne by parsed serial number, matching `hydrasdr_open_sn`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn open_sn(serial: u64) -> Result<Self> {
         Self::open_sn_internal(Some(serial))
     }
@@ -1068,6 +1078,7 @@ impl HydraSdr<NusbControl> {
         Ok(dev)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_sn_internal(serial: Option<u64>) -> Result<Self> {
         let info = discovery::select_nusb_device(serial)?;
         let device = info.open().wait().map_err(Error::from)?;

@@ -4,14 +4,19 @@ use crate::commands::ReceiverMode;
 use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use crate::streaming::{
     AsyncDirectRxStream, AsyncRawRxStream as DirectAsyncRawRxStream, AsyncStreamingBackend,
-    DirectRxStream, RawRxStream as DirectRawRxStream, StreamingBackend, StreamingStats, Transfer,
+    StreamingStats, Transfer,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::streaming::{DirectRxStream, RawRxStream as DirectRawRxStream, StreamingBackend};
 use crate::types::DeviceInfo;
-use crate::usb::control::{AsyncControlBackend, ControlBackend, NusbControl};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::usb::control::ControlBackend;
+use crate::usb::control::{AsyncControlBackend, NusbControl};
 
 /// High-level owned HydraSDR RFOne device handle.
 ///
@@ -55,6 +60,7 @@ pub struct Device {
 
 impl Device {
     /// List visible HydraSDR RFOne USB devices without opening them.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn list() -> Result<Vec<crate::DeviceDescriptor>> {
         crate::discovery::list_devices()
     }
@@ -70,11 +76,13 @@ impl Device {
     }
 
     /// Open the first visible HydraSDR RFOne with default high-level configuration.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open() -> Result<Self> {
         Self::builder().open()
     }
 
     /// Open one visible HydraSDR RFOne by serial with default high-level configuration.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_serial(serial: u64) -> Result<Self> {
         Self::builder().serial(serial).open()
     }
@@ -95,21 +103,25 @@ impl Device {
     }
 
     /// Refresh and return device metadata.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn refresh_info(&mut self) -> Result<&DeviceInfo> {
         self.inner.refresh_info()
     }
 
     /// Query supported sample rates.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sample_rates(&mut self) -> Result<Vec<u32>> {
         self.inner.direct.get_samplerates()
     }
 
     /// Query supported analog bandwidths.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn bandwidths(&mut self) -> Result<Vec<u32>> {
         self.inner.direct.get_bandwidths()
     }
 
     /// Apply a high-level receiver configuration.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn configure(&mut self, config: &Config) -> Result<()> {
         self.inner.configure(config)
     }
@@ -135,6 +147,7 @@ impl Device {
     }
 
     /// Start a synchronous receive stream for raw ADC USB blocks.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn raw_rx_stream(&mut self) -> Result<RawRxStream<'_>> {
         Ok(RawRxStream {
             inner: self.inner.raw_rx_stream()?,
@@ -142,6 +155,7 @@ impl Device {
     }
 
     /// Start a synchronous receive stream for converted `F32Iq` samples.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn f32_rx_stream(&mut self) -> Result<F32RxStream<'_>> {
         Ok(F32RxStream {
             inner: self.inner.f32_rx_stream()?,
@@ -167,6 +181,38 @@ impl Device {
     }
 }
 
+impl<C> DeviceInner<C> {
+    /// Return cached device metadata.
+    ///
+    /// Handles opened through `Device` constructors always have this populated.
+    pub(crate) fn info(&self) -> &DeviceInfo {
+        self.info
+            .as_ref()
+            .expect("device info not available; call refresh_info first")
+    }
+
+    fn ensure_raw_adc_stream_format(&self) -> Result<()> {
+        if self.sample_format != SampleFormat::RawAdc {
+            return Err(Error::invalid_config(
+                "sample_format",
+                "raw block streams require SampleFormat::RawAdc",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_f32_iq_stream_format(&self) -> Result<()> {
+        if self.sample_format != SampleFormat::F32Iq {
+            return Err(Error::invalid_config(
+                "sample_format",
+                "F32 IQ streams require SampleFormat::F32Iq",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> DeviceInner<C>
 where
     C: ControlBackend,
@@ -179,15 +225,6 @@ where
             info: Some(info),
             sample_format: SampleFormat::F32Iq,
         })
-    }
-
-    /// Return cached device metadata.
-    ///
-    /// Handles opened through `Device` constructors always have this populated.
-    pub(crate) fn info(&self) -> &DeviceInfo {
-        self.info
-            .as_ref()
-            .expect("device info not available; call refresh_info first")
     }
 
     /// Refresh and return direct device metadata.
@@ -212,28 +249,9 @@ where
         }
         Ok(())
     }
-
-    fn ensure_raw_adc_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::RawAdc {
-            return Err(Error::invalid_config(
-                "sample_format",
-                "raw block streams require SampleFormat::RawAdc",
-            ));
-        }
-        Ok(())
-    }
-
-    fn ensure_f32_iq_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::F32Iq {
-            return Err(Error::invalid_config(
-                "sample_format",
-                "F32 IQ streams require SampleFormat::F32Iq",
-            ));
-        }
-        Ok(())
-    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> DeviceInner<C>
 where
     C: ControlBackend + StreamingBackend,
@@ -267,7 +285,7 @@ where
 
 impl<C> DeviceInner<C>
 where
-    C: AsyncControlBackend + ControlBackend,
+    C: AsyncControlBackend,
 {
     /// Wrap an already-open direct handle and query device metadata asynchronously.
     pub(crate) async fn from_direct_async(mut direct: HydraSdr<C>) -> Result<Self> {
@@ -433,6 +451,7 @@ impl DeviceBuilder {
     }
 
     /// Open and configure the selected device synchronously.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(self) -> Result<Device> {
         let selector = self.selector;
         let config = self.config.build()?;
@@ -514,6 +533,7 @@ impl<'a> SampleBlock<'a> {
 }
 
 /// Idle synchronous stream guard for explicit stop/finish lifecycle control.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RawRxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     device: &'dev mut DeviceInner<C>,
     stream: Option<DirectRawRxStream<C::BulkIn>>,
@@ -522,6 +542,7 @@ pub(crate) struct RawRxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     finished: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> RawRxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
@@ -560,6 +581,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> Drop for RawRxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
@@ -576,10 +598,12 @@ where
 
 /// Raw ADC block stream guard for explicit stop/finish lifecycle control.
 #[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RawRxStream<'dev> {
     inner: RawRxStreamInner<'dev, NusbControl>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RawRxStream<'_> {
     /// Read the next sample block.
     pub fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
@@ -598,6 +622,7 @@ impl RawRxStream<'_> {
 }
 
 /// Idle synchronous converted `F32Iq` stream guard.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct F32RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     device: &'dev mut DeviceInner<C>,
     stream: Option<DirectRxStream<C::BulkIn>>,
@@ -606,6 +631,7 @@ pub(crate) struct F32RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     finished: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> F32RxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
@@ -641,6 +667,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<C> Drop for F32RxStreamInner<'_, C>
 where
     C: ControlBackend + StreamingBackend,
@@ -657,10 +684,12 @@ where
 
 /// Converted `F32Iq` stream guard for explicit stop/finish lifecycle control.
 #[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct F32RxStream<'dev> {
     inner: F32RxStreamInner<'dev, NusbControl>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl F32RxStream<'_> {
     /// Read converted `(I, Q)` samples into `out`.
     ///
@@ -682,9 +711,7 @@ impl F32RxStream<'_> {
 }
 
 /// Owned async stream state for raw ADC blocks.
-pub(crate) struct AsyncRawRxStreamInner<
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
-> {
+pub(crate) struct AsyncRawRxStreamInner<C: AsyncControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -693,7 +720,7 @@ pub(crate) struct AsyncRawRxStreamInner<
 
 impl<C> AsyncRawRxStreamInner<C>
 where
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+    C: AsyncControlBackend + AsyncStreamingBackend,
 {
     fn new(device: DeviceInner<C>) -> Self {
         Self {
@@ -737,9 +764,6 @@ where
     }
 
     async fn finish(&mut self) -> Result<StreamingStats> {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
         if self.receiver_active {
             self.device
                 .as_ref()
@@ -748,6 +772,9 @@ where
                 .receiver_mode_async(ReceiverMode::Off)
                 .await?;
             self.receiver_active = false;
+        }
+        if let Some(mut stream) = self.stream.take() {
+            self.stats = stream.close();
         }
         Ok(self.stats)
     }
@@ -764,7 +791,7 @@ where
 
 impl<C> Drop for AsyncRawRxStreamInner<C>
 where
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+    C: AsyncControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
         if let Some(mut stream) = self.stream.take() {
@@ -779,7 +806,8 @@ where
 /// [`AsyncRawRxStream::finish`] to stop the receiver asynchronously, then
 /// [`AsyncRawRxStream::into_device`] to recover the device. Dropping an unfinished
 /// stream closes the transfer queue and device handle, but cannot perform asynchronous
-/// receiver-off cleanup.
+/// receiver-off cleanup. WebUSB cannot cancel pending transfers, so explicit shutdown
+/// is especially important in the browser.
 #[must_use = "call finish().await, then into_device(), to stop RX and recover the device"]
 pub struct AsyncRawRxStream {
     inner: AsyncRawRxStreamInner<NusbControl>,
@@ -818,9 +846,7 @@ impl AsyncRawRxStream {
 }
 
 /// Owned async stream state for converted `F32Iq` samples.
-pub(crate) struct AsyncF32RxStreamInner<
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
-> {
+pub(crate) struct AsyncF32RxStreamInner<C: AsyncControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -829,7 +855,7 @@ pub(crate) struct AsyncF32RxStreamInner<
 
 impl<C> AsyncF32RxStreamInner<C>
 where
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+    C: AsyncControlBackend + AsyncStreamingBackend,
 {
     fn new(device: DeviceInner<C>) -> Self {
         Self {
@@ -865,9 +891,6 @@ where
     }
 
     async fn finish(&mut self) -> Result<StreamingStats> {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
         if self.receiver_active {
             self.device
                 .as_ref()
@@ -876,6 +899,9 @@ where
                 .receiver_mode_async(ReceiverMode::Off)
                 .await?;
             self.receiver_active = false;
+        }
+        if let Some(mut stream) = self.stream.take() {
+            self.stats = stream.close();
         }
         Ok(self.stats)
     }
@@ -892,7 +918,7 @@ where
 
 impl<C> Drop for AsyncF32RxStreamInner<C>
 where
-    C: AsyncControlBackend + ControlBackend + AsyncStreamingBackend,
+    C: AsyncControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
         if let Some(mut stream) = self.stream.take() {
@@ -907,7 +933,8 @@ where
 /// [`AsyncF32RxStream::finish`] to stop the receiver asynchronously, then
 /// [`AsyncF32RxStream::into_device`] to recover the device. Dropping an unfinished
 /// stream closes the transfer queue and device handle, but cannot perform asynchronous
-/// receiver-off cleanup.
+/// receiver-off cleanup. WebUSB cannot cancel pending transfers, so explicit shutdown
+/// is especially important in the browser.
 #[must_use = "call finish().await, then into_device(), to stop RX and recover the device"]
 pub struct AsyncF32RxStream {
     inner: AsyncF32RxStreamInner<NusbControl>,
@@ -967,16 +994,6 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct FakeControl {
         state: Arc<FakeState>,
-    }
-
-    impl ControlBackend for FakeControl {
-        fn control_in(&self, _request: VendorControlRequest) -> Result<Vec<u8>> {
-            Ok(Vec::new())
-        }
-
-        fn control_out(&self, _request: VendorControlRequest) -> Result<()> {
-            Ok(())
-        }
     }
 
     impl AsyncControlBackend for FakeControl {

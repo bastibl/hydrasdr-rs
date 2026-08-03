@@ -1,5 +1,6 @@
 //! USB discovery helpers for HydraSDR RFOne devices.
 
+#[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 
 use crate::errors::{Error, Result, StatusCode};
@@ -63,6 +64,7 @@ pub(crate) fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
 }
 
 /// List visible HydraSDR devices synchronously using `nusb::MaybeFuture::wait()`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn list_devices() -> Result<Vec<DeviceDescriptor>> {
     let devices = nusb::list_devices().wait().map_err(Error::from)?;
     Ok(devices
@@ -78,6 +80,7 @@ pub(crate) async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
         .collect())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
     for device in nusb::list_devices().wait().map_err(Error::from)? {
         if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
@@ -105,7 +108,30 @@ pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb
         }
         return Ok(device);
     }
+
+    #[cfg(target_arch = "wasm32")]
+    if let Some(device) = request_nusb_device_async(serial).await? {
+        return Ok(device);
+    }
+
     Err(Error::status(StatusCode::NotFound))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_nusb_device_async(serial: Option<u64>) -> Result<Option<nusb::DeviceInfo>> {
+    let selectors = USB_DEVICE_IDS
+        .iter()
+        .map(|device_id| {
+            let selector = nusb::DeviceSelector::all().with_vid_pid(device_id.vid, device_id.pid);
+            if let Some(serial) = serial {
+                selector.with_serial_number(format!("HYDRASDR SN:{serial:016X}"))
+            } else {
+                selector
+            }
+        })
+        .collect::<Vec<_>>();
+
+    nusb::request_device(&selectors).await.map_err(Error::from)
 }
 
 /// Parse the C firmware serial string format `HYDRASDR SN:<16 hex digits>`.
