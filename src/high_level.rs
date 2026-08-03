@@ -54,7 +54,7 @@ use crate::usb::control::{ControlBackend, NusbControl};
 pub(crate) struct DeviceInner<C = NusbControl> {
     direct: HydraSdr<C>,
     info: Option<DeviceInfo>,
-    sample_format: SampleFormat,
+    applied_config: Option<Config>,
 }
 
 /// High-level owned HydraSDR RFOne device handle.
@@ -105,15 +105,18 @@ impl Device {
 
     /// Query supported sample rates.
     pub fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
-        self.inner.direct.get_samplerates()
+        self.inner.sample_rates()
     }
 
     /// Query supported analog bandwidths.
     pub fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
-        self.inner.direct.get_bandwidths()
+        self.inner.bandwidths()
     }
 
     /// Apply a high-level receiver configuration.
+    ///
+    /// If this operation fails or is cancelled after it starts, the device rejects
+    /// focused setters and stream creation until a complete configuration succeeds.
     pub fn configure(&mut self, config: &Config) -> impl MaybeFuture<Output = Result<()>> {
         self.inner.configure(config)
     }
@@ -192,7 +195,7 @@ impl<C> DeviceInner<C> {
     }
 
     fn ensure_raw_adc_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::RawAdc {
+        if self.sample_format()? != SampleFormat::RawAdc {
             return Err(Error::invalid_config(
                 "sample_format",
                 "raw block streams require SampleFormat::RawAdc",
@@ -202,13 +205,28 @@ impl<C> DeviceInner<C> {
     }
 
     fn ensure_f32_iq_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::F32Iq {
+        if self.sample_format()? != SampleFormat::F32Iq {
             return Err(Error::invalid_config(
                 "sample_format",
                 "F32 IQ streams require SampleFormat::F32Iq",
             ));
         }
         Ok(())
+    }
+
+    fn ensure_configuration_valid(&self) -> Result<()> {
+        if self.applied_config.is_some() {
+            Ok(())
+        } else {
+            Err(Error::ConfigurationUnknown)
+        }
+    }
+
+    fn sample_format(&self) -> Result<SampleFormat> {
+        self.applied_config
+            .as_ref()
+            .map(Config::sample_format)
+            .ok_or(Error::ConfigurationUnknown)
     }
 }
 
@@ -253,53 +271,86 @@ where
         &mut self,
         config: &Config,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let operation = self.direct.configure(config);
-        let sample_format = &mut self.sample_format;
+        let validation = config.validate();
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
         let config = config.clone();
-        operation.map(move |result| {
-            result?;
-            *sample_format = config.sample_format();
-            if let Some(info) = info {
-                info.current_config = Some(config);
+        ready(validation).and_then(move |()| {
+            *applied_config = None;
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
             }
-            Ok(())
+            direct.configure(&config).map(move |result| {
+                result?;
+                restore_current_config(applied_config, info, config);
+                Ok(())
+            })
         })
+    }
+
+    fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
+        let validation = self.ensure_configuration_valid();
+        let operation = self.direct.get_samplerates();
+        ready(validation).and_then(move |()| operation)
+    }
+
+    fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
+        let validation = self.ensure_configuration_valid();
+        let operation = self.direct.get_bandwidths();
+        ready(validation).and_then(move |()| operation)
     }
 
     fn set_frequency_hz(
         &mut self,
         frequency_hz: u64,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let operation = self.direct.set_freq(frequency_hz);
+        let validation = self
+            .ensure_configuration_valid()
+            .and_then(|()| validate_frequency(frequency_hz));
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
-        ready(validate_frequency(frequency_hz))
-            .and_then(move |()| operation)
-            .map(move |result| {
+        ready(validation).and_then(move |()| {
+            let mut config = applied_config
+                .take()
+                .expect("validated applied configuration");
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
+            }
+            direct.set_freq(frequency_hz).map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
-                    config.update_frequency_hz(frequency_hz);
-                }
+                config.update_frequency_hz(frequency_hz);
+                restore_current_config(applied_config, info, config);
                 Ok(())
             })
+        })
     }
 
     fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let validation = validate_sample_rate(sample_rate_hz, self.sample_format);
-        let operation = self.direct.set_samplerate(sample_rate_hz);
+        let validation = self
+            .ensure_configuration_valid()
+            .and_then(|()| validate_sample_rate(sample_rate_hz, self.sample_format()?));
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
-        ready(validation)
-            .and_then(move |()| operation)
-            .map(move |result| {
+        ready(validation).and_then(move |()| {
+            let mut config = applied_config
+                .take()
+                .expect("validated applied configuration");
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
+            }
+            direct.set_samplerate(sample_rate_hz).map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
-                    config.update_sample_rate_hz(sample_rate_hz);
-                }
+                config.update_sample_rate_hz(sample_rate_hz);
+                restore_current_config(applied_config, info, config);
                 Ok(())
             })
+        })
     }
 
     fn set_bandwidth_hz(
@@ -307,43 +358,70 @@ where
         bandwidth_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
-        let operation = self.direct.set_bandwidth(bandwidth_hz);
+        let validation = self
+            .ensure_configuration_valid()
+            .and_then(|()| validate_bandwidth(bandwidth));
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
-        ready(validate_bandwidth(bandwidth))
-            .and_then(move |()| operation)
-            .map(move |result| {
+        ready(validation).and_then(move |()| {
+            let mut config = applied_config
+                .take()
+                .expect("validated applied configuration");
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
+            }
+            direct.set_bandwidth(bandwidth_hz).map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
-                    config.update_bandwidth(bandwidth);
-                }
+                config.update_bandwidth(bandwidth);
+                restore_current_config(applied_config, info, config);
                 Ok(())
             })
+        })
     }
 
     fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let operation = self.direct.set_rf_port(port);
+        let validation = self.ensure_configuration_valid();
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
-        operation.map(move |result| {
-            result?;
-            if let Some(config) = current_config_mut(info) {
-                config.update_rf_port(port);
+        ready(validation).and_then(move |()| {
+            let mut config = applied_config
+                .take()
+                .expect("validated applied configuration");
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
             }
-            Ok(())
+            direct.set_rf_port(port).map(move |result| {
+                result?;
+                config.update_rf_port(port);
+                restore_current_config(applied_config, info, config);
+                Ok(())
+            })
         })
     }
 
     fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let operation = self.direct.set_gain_config(gain);
+        let validation = self
+            .ensure_configuration_valid()
+            .and_then(|()| validate_gain(gain));
+        let direct = &mut self.direct;
+        let applied_config = &mut self.applied_config;
         let info = &mut self.info;
-        ready(validate_gain(gain))
-            .and_then(move |()| operation)
-            .map(move |result| {
+        ready(validation).and_then(move |()| {
+            let mut config = applied_config
+                .take()
+                .expect("validated applied configuration");
+            if let Some(info) = info.as_mut() {
+                info.current_config = None;
+            }
+            direct.set_gain_config(gain).map(move |result| {
                 result?;
-                if let Some(config) = current_config_mut(info) {
-                    config.update_gain(gain);
-                }
+                config.update_gain(gain);
+                restore_current_config(applied_config, info, config);
                 Ok(())
             })
+        })
     }
 
     /// Refresh and return direct device metadata.
@@ -365,8 +443,15 @@ where
     }
 }
 
-fn current_config_mut(info: &mut Option<DeviceInfo>) -> Option<&mut Config> {
-    info.as_mut().and_then(|info| info.current_config.as_mut())
+fn restore_current_config(
+    applied_config: &mut Option<Config>,
+    info: &mut Option<DeviceInfo>,
+    config: Config,
+) {
+    if let Some(info) = info {
+        info.current_config = Some(config.clone());
+    }
+    *applied_config = Some(config);
 }
 
 /// Builder that selects, opens, and initially configures a high-level `nusb` device.
@@ -526,19 +611,18 @@ impl DeviceBuilder {
                     .into_device_info()
                     .map_err(|error| error.at("reading HydraSDR device metadata"))
                     .and_then(move |(direct, mut info)| {
-                        let sample_format = config.sample_format();
                         let saved_config = config.clone();
                         direct
                             .into_configured(config)
                             .map_err(|error| error.at("applying initial HydraSDR configuration"))
                             .map(move |result| {
                                 let direct = result?;
-                                info.current_config = Some(saved_config);
+                                info.current_config = Some(saved_config.clone());
                                 Ok(Device {
                                     inner: DeviceInner {
                                         direct,
                                         info: Some(info),
-                                        sample_format,
+                                        applied_config: Some(saved_config),
                                     },
                                 })
                             })
@@ -622,7 +706,7 @@ where
 {
     /// Read the next sample block.
     pub(crate) fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
-        let sample_format = self.device.sample_format;
+        let sample_format = self.device.sample_format()?;
         let Some(stream) = self.stream.as_mut() else {
             return Err(Error::stream_closed("RX stream is closed"));
         };
@@ -845,7 +929,7 @@ where
             .device
             .as_ref()
             .expect("owned async stream retains its device")
-            .sample_format;
+            .sample_format()?;
         let stream = self
             .stream
             .as_mut()
@@ -1292,11 +1376,70 @@ mod tests {
     }
 
     fn fake_device(control: FakeControl, sample_format: SampleFormat) -> DeviceInner<FakeControl> {
+        let config = Config::builder()
+            .sample_format(sample_format)
+            .build()
+            .expect("valid fake-device configuration");
         DeviceInner {
             direct: HydraSdr::from_control(control),
             info: None,
-            sample_format,
+            applied_config: Some(config),
         }
+    }
+
+    #[test]
+    fn cancelled_configuration_requires_complete_reconfiguration() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            state.pause_control_out_at.store(1, Ordering::SeqCst);
+            let mut device = fake_device(control, SampleFormat::RawAdc);
+            let config = Config::builder().build().expect("valid configuration");
+
+            let mut configure = Box::pin(std::future::IntoFuture::into_future(
+                device.configure(&config),
+            ));
+            assert!(
+                futures_lite::future::poll_once(&mut configure)
+                    .await
+                    .is_none()
+            );
+            drop(configure);
+
+            assert!(matches!(
+                device.ensure_raw_adc_stream_format(),
+                Err(Error::ConfigurationUnknown)
+            ));
+            state.pause_control_out_at.store(0, Ordering::SeqCst);
+            device
+                .configure(&config)
+                .await
+                .expect("complete reconfiguration");
+            assert!(device.ensure_raw_adc_stream_format().is_ok());
+        });
+    }
+
+    #[test]
+    fn failed_focused_update_requires_complete_reconfiguration() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            let mut device = fake_device(control, SampleFormat::RawAdc);
+            let config = Config::builder().build().expect("valid configuration");
+            state.fail_control_out.store(true, Ordering::SeqCst);
+
+            assert!(device.set_frequency_hz(915_000_000).await.is_err());
+            assert!(matches!(
+                device.ensure_raw_adc_stream_format(),
+                Err(Error::ConfigurationUnknown)
+            ));
+            state.fail_control_out.store(false, Ordering::SeqCst);
+            device
+                .configure(&config)
+                .await
+                .expect("complete reconfiguration");
+            assert!(device.ensure_raw_adc_stream_format().is_ok());
+        });
     }
 
     #[test]
@@ -1431,7 +1574,7 @@ mod tests {
                 .expect_err("F32 stream must reject raw ADC configuration");
             let device = stream.into_device();
             assert_eq!(error.kind(), crate::ErrorKind::InvalidConfig);
-            assert_eq!(device.sample_format, SampleFormat::RawAdc);
+            assert_eq!(device.sample_format().unwrap(), SampleFormat::RawAdc);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
         });
     }
@@ -1499,7 +1642,7 @@ mod tests {
                     .is_err_and(|error| error.kind() == crate::ErrorKind::Usb)
             );
             let device = stream.into_device();
-            assert_eq!(device.sample_format, SampleFormat::F32Iq);
+            assert_eq!(device.sample_format().unwrap(), SampleFormat::F32Iq);
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
         });
     }
