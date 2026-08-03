@@ -232,6 +232,26 @@ impl Config {
         self.packing
     }
 
+    pub(crate) fn update_frequency_hz(&mut self, value: u64) {
+        self.frequency_hz = value;
+    }
+
+    pub(crate) fn update_sample_rate_hz(&mut self, value: u32) {
+        self.sample_rate_hz = value;
+    }
+
+    pub(crate) fn update_bandwidth(&mut self, value: Bandwidth) {
+        self.bandwidth = value;
+    }
+
+    pub(crate) fn update_rf_port(&mut self, value: RfPort) {
+        self.rf_port = Some(value);
+    }
+
+    pub(crate) fn update_gain(&mut self, value: GainConfig) {
+        self.gain = value;
+    }
+
     /// Validate this configuration without touching USB.
     pub fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
@@ -446,7 +466,10 @@ where
     }
 }
 
-async fn apply_gain_direct_async<C>(direct: &mut HydraSdr<C>, gain: GainConfig) -> Result<()>
+pub(crate) async fn apply_gain_direct_async<C>(
+    direct: &mut HydraSdr<C>,
+    gain: GainConfig,
+) -> Result<()>
 where
     C: AsyncControlBackend,
 {
@@ -485,7 +508,7 @@ where
     }
 }
 
-fn validate_frequency(value: u64) -> Result<()> {
+pub(crate) fn validate_frequency(value: u64) -> Result<()> {
     if !(RFONE_MIN_FREQ_HZ..=RFONE_MAX_FREQ_HZ).contains(&value) {
         return Err(Error::invalid_config(
             "frequency_hz",
@@ -495,7 +518,7 @@ fn validate_frequency(value: u64) -> Result<()> {
     Ok(())
 }
 
-fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> Result<()> {
+pub(crate) fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> Result<()> {
     if value < MIN_SAMPLE_RATE_HZ {
         return Err(Error::invalid_config(
             "sample_rate_hz",
@@ -538,7 +561,7 @@ fn validate_format_packing(sample_format: SampleFormat, packing: bool) -> Result
     Ok(())
 }
 
-fn validate_bandwidth(value: Bandwidth) -> Result<()> {
+pub(crate) fn validate_bandwidth(value: Bandwidth) -> Result<()> {
     if let Bandwidth::ManualHz(hz) = value
         && hz < MIN_BANDWIDTH_HZ
     {
@@ -558,7 +581,7 @@ fn validate_bandwidth(value: Bandwidth) -> Result<()> {
     Ok(())
 }
 
-fn validate_gain(gain: GainConfig) -> Result<()> {
+pub(crate) fn validate_gain(gain: GainConfig) -> Result<()> {
     match gain {
         GainConfig::Preset(GainPreset::Linearity(value) | GainPreset::Sensitivity(value))
             if value > MAX_PRESET_GAIN =>

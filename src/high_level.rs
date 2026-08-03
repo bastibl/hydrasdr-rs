@@ -1,7 +1,11 @@
 //! HydraSDR RFOne sync and async APIs.
 
 use crate::commands::ReceiverMode;
-use crate::config::{Config, ConfigBuilder, DeviceSelector, SampleFormat};
+use crate::config::{
+    Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, RfPort, SampleFormat,
+    apply_gain_direct_async, validate_bandwidth, validate_frequency, validate_gain,
+    validate_sample_rate,
+};
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 #[cfg(not(target_arch = "wasm32"))]
@@ -129,6 +133,31 @@ impl Device {
     /// Apply a high-level receiver configuration through async control requests.
     pub async fn configure_async(&mut self, config: &Config) -> Result<()> {
         self.inner.configure_async(config).await
+    }
+
+    /// Set only the tuned center frequency through an async control request.
+    pub async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
+        self.inner.set_frequency_hz_async(frequency_hz).await
+    }
+
+    /// Set only the sample rate through async control requests.
+    pub async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.inner.set_sample_rate_hz_async(sample_rate_hz).await
+    }
+
+    /// Set only the manual analog bandwidth through async control requests.
+    pub async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.inner.set_bandwidth_hz_async(bandwidth_hz).await
+    }
+
+    /// Set only the selected RF input port through an async control request.
+    pub async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
+        self.inner.set_rf_port_async(port).await
+    }
+
+    /// Apply only the supplied gain update through async control requests.
+    pub async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
+        self.inner.set_gain_async(gain).await
     }
 
     /// Refresh and return device metadata through async control requests.
@@ -304,6 +333,71 @@ where
         if let Some(info) = &mut self.info {
             self.direct.update_cached_device_info(info);
             info.current_config = Some(config.clone());
+        }
+        Ok(())
+    }
+
+    async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
+        validate_frequency(frequency_hz)?;
+        self.direct.set_freq_async(frequency_hz).await?;
+        if let Some(config) = self
+            .info
+            .as_mut()
+            .and_then(|info| info.current_config.as_mut())
+        {
+            config.update_frequency_hz(frequency_hz);
+        }
+        Ok(())
+    }
+
+    async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
+        validate_sample_rate(sample_rate_hz, self.sample_format)?;
+        self.direct.set_samplerate_async(sample_rate_hz).await?;
+        if let Some(config) = self
+            .info
+            .as_mut()
+            .and_then(|info| info.current_config.as_mut())
+        {
+            config.update_sample_rate_hz(sample_rate_hz);
+        }
+        Ok(())
+    }
+
+    async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+        let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
+        validate_bandwidth(bandwidth)?;
+        self.direct.set_bandwidth_async(bandwidth_hz).await?;
+        if let Some(config) = self
+            .info
+            .as_mut()
+            .and_then(|info| info.current_config.as_mut())
+        {
+            config.update_bandwidth(bandwidth);
+        }
+        Ok(())
+    }
+
+    async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
+        self.direct.set_rf_port_async(port).await?;
+        if let Some(config) = self
+            .info
+            .as_mut()
+            .and_then(|info| info.current_config.as_mut())
+        {
+            config.update_rf_port(port);
+        }
+        Ok(())
+    }
+
+    async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
+        validate_gain(gain)?;
+        apply_gain_direct_async(&mut self.direct, gain).await?;
+        if let Some(config) = self
+            .info
+            .as_mut()
+            .and_then(|info| info.current_config.as_mut())
+        {
+            config.update_gain(gain);
         }
         Ok(())
     }
@@ -910,6 +1004,42 @@ where
             .await
     }
 
+    fn stopped_device_mut(&mut self) -> Result<&mut DeviceInner<C>> {
+        if self.active || self.receiver_needs_stop {
+            return Err(Error::Busy);
+        }
+        Ok(self
+            .device
+            .as_mut()
+            .expect("owned async stream retains its device"))
+    }
+
+    async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_frequency_hz_async(frequency_hz)
+            .await
+    }
+
+    async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_sample_rate_hz_async(sample_rate_hz)
+            .await
+    }
+
+    async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_bandwidth_hz_async(bandwidth_hz)
+            .await
+    }
+
+    async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
+        self.stopped_device_mut()?.set_rf_port_async(port).await
+    }
+
+    async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
+        self.stopped_device_mut()?.set_gain_async(gain).await
+    }
+
     async fn finish(&mut self) -> Result<StreamingStats> {
         if self.receiver_needs_stop {
             self.device
@@ -976,6 +1106,31 @@ impl AsyncF32RxStream {
     /// Read converted `(I, Q)` samples into `out`.
     pub async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
         self.inner.read(out).await
+    }
+
+    /// Set only the tuned center frequency while the receiver is stopped.
+    pub async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
+        self.inner.set_frequency_hz_async(frequency_hz).await
+    }
+
+    /// Set only the sample rate while the receiver is stopped.
+    pub async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.inner.set_sample_rate_hz_async(sample_rate_hz).await
+    }
+
+    /// Set only the manual analog bandwidth while the receiver is stopped.
+    pub async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.inner.set_bandwidth_hz_async(bandwidth_hz).await
+    }
+
+    /// Set only the RF input port while the receiver is stopped.
+    pub async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
+        self.inner.set_rf_port_async(port).await
+    }
+
+    /// Apply only the supplied gain update while the receiver is stopped.
+    pub async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
+        self.inner.set_gain_async(gain).await
     }
 
     /// Stop the receiver, retain the transfer queue for restart, and return counters.
@@ -1155,6 +1310,40 @@ mod tests {
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
 
             let _device = stream.into_device();
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn stopped_owned_async_stream_accepts_focused_updates() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            let device = fake_device(control, SampleFormat::F32Iq);
+            let mut stream = AsyncF32RxStreamInner::new(device);
+
+            stream.start().await.expect("start owned async F32 stream");
+            assert!(matches!(
+                stream.set_frequency_hz_async(915_000_000).await,
+                Err(Error::Busy)
+            ));
+            stream.finish().await.expect("pause owned async F32 stream");
+
+            stream
+                .set_frequency_hz_async(915_000_000)
+                .await
+                .expect("set focused frequency while stopped");
+            assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
+
+            stream
+                .start()
+                .await
+                .expect("restart updated owned async F32 stream");
+            stream.finish().await.expect("stop owned async F32 stream");
+            let _device = stream.into_device();
+            assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
         });
     }
