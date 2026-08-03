@@ -200,18 +200,17 @@ impl<B: BulkInBackend> RawRxStream<B> {
             return Ok(None);
         };
 
-        completion.status?;
-        let buffer = completion.buffer;
-        let actual_len = completion.actual_len;
-        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
-            self.stats.buffers_dropped += 1;
-            return Err(Error::protocol(
-                "receive transfer",
-                "completed with an unexpected length",
-            ));
-        }
-
         self.stats.buffers_received += 1;
+        let (buffer, actual_len) =
+            match checked_completion(completion, config_current_buffer_size(self.config)) {
+                Ok(completion) => completion,
+                Err((buffer, error)) => {
+                    self.stats.buffers_dropped += 1;
+                    self.bulk_in_mut()?.submit(buffer);
+                    return Err(error);
+                }
+            };
+
         self.stats.buffers_processed += 1;
         let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
         let dropped_samples = self.stats.buffers_dropped * sample_count as u64;
@@ -313,18 +312,17 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
                 self.bulk_in_mut()?.submit(completion.buffer);
                 continue;
             }
-            completion.status?;
-            break (completion.buffer, completion.actual_len);
+            self.stats.buffers_received += 1;
+            match checked_completion(completion, config_current_buffer_size(self.config)) {
+                Ok(completion) => break completion,
+                Err((buffer, error)) => {
+                    self.stats.buffers_dropped += 1;
+                    self.bulk_in_mut()?.submit(buffer);
+                    return Err(error);
+                }
+            }
         };
-        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
-            self.stats.buffers_dropped += 1;
-            return Err(Error::protocol(
-                "receive transfer",
-                "completed with an unexpected length",
-            ));
-        }
 
-        self.stats.buffers_received += 1;
         self.stats.buffers_processed += 1;
         let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
         let dropped_samples = self.stats.buffers_dropped * sample_count as u64;
@@ -480,18 +478,21 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
                 bulk_in.submit(completion.buffer);
                 continue;
             }
-            completion.status?;
-            break (completion.buffer, completion.actual_len);
+            self.stats.buffers_received += 1;
+            match checked_completion(completion, config_current_buffer_size(self.config)) {
+                Ok(completion) => break completion,
+                Err((buffer, error)) => {
+                    self.stats.buffers_dropped += 1;
+                    let bulk_in = self
+                        .bulk_in
+                        .as_mut()
+                        .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+                    bulk_in.submit(buffer);
+                    return Err(error);
+                }
+            }
         };
-        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
-            self.stats.buffers_dropped += 1;
-            return Err(Error::protocol(
-                "receive transfer",
-                "completed with an unexpected length",
-            ));
-        }
 
-        self.stats.buffers_received += 1;
         self.converted.clear();
         self.converted_start = 0;
         self.converter.process_u16le_to_f32iq(
@@ -601,18 +602,21 @@ impl<B: BulkInBackend> DirectRxStream<B> {
                 return Ok(written);
             };
 
-            completion.status?;
-            let buffer = completion.buffer;
-            let actual_len = completion.actual_len;
-            if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
-                self.stats.buffers_dropped += 1;
-                return Err(Error::protocol(
-                    "receive transfer",
-                    "completed with an unexpected length",
-                ));
-            }
-
             self.stats.buffers_received += 1;
+            let (buffer, actual_len) =
+                match checked_completion(completion, config_current_buffer_size(self.config)) {
+                    Ok(completion) => completion,
+                    Err((buffer, error)) => {
+                        self.stats.buffers_dropped += 1;
+                        let bulk_in = self
+                            .bulk_in
+                            .as_mut()
+                            .ok_or(Error::stream_closed("direct RX stream is closed"))?;
+                        bulk_in.submit(buffer);
+                        return Err(error);
+                    }
+                };
+
             self.converted.clear();
             self.converted_start = 0;
             self.converter.process_u16le_to_f32iq(
@@ -667,6 +671,27 @@ fn sample_count_for_buffer(buffer_len: usize, packing_enabled: bool) -> i32 {
     }
 }
 
+fn checked_completion<B: Deref<Target = [u8]>>(
+    completion: BulkInCompletion<B>,
+    expected_len: usize,
+) -> core::result::Result<(B, usize), (B, Error)> {
+    let BulkInCompletion {
+        buffer,
+        actual_len,
+        status,
+    } = completion;
+    if let Err(error) = status {
+        return Err((buffer, error));
+    }
+    if actual_len != expected_len || actual_len > buffer.len() {
+        return Err((
+            buffer,
+            Error::protocol("receive transfer", "completed with an unexpected length"),
+        ));
+    }
+    Ok((buffer, actual_len))
+}
+
 fn config_current_buffer_size(config: StreamingConfig) -> usize {
     if config.packing_enabled {
         config.packed_buffer_size
@@ -704,6 +729,8 @@ mod tests {
     struct FakeAsyncBulkIn {
         submitted: VecDeque<Vec<u8>>,
         submit_count: usize,
+        fail_next: bool,
+        short_next: bool,
         cancelled: bool,
     }
 
@@ -732,10 +759,22 @@ mod tests {
                 .submitted
                 .pop_front()
                 .expect("fake async bulk queue should contain a submitted buffer");
+            let status = if self.fail_next {
+                self.fail_next = false;
+                Err(Error::from(nusb::transfer::TransferError::Fault))
+            } else {
+                Ok(())
+            };
+            let actual_len = if self.short_next {
+                self.short_next = false;
+                buffer.len() - 2
+            } else {
+                buffer.len()
+            };
             BulkInCompletion {
-                actual_len: buffer.len(),
+                actual_len,
                 buffer,
-                status: Ok(()),
+                status,
             }
         }
 
@@ -797,6 +836,54 @@ mod tests {
                 buffered
             );
             assert_eq!(stream.stats.buffers_received, 1);
+        });
+    }
+
+    #[test]
+    fn async_f32_read_replenishes_queue_after_failed_completion() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+                .await
+                .expect("start fake async stream");
+            stream.bulk_in.as_mut().expect("bulk in").fail_next = true;
+
+            let error = stream
+                .read_float32_iq(&mut [(0.0, 0.0); 1])
+                .await
+                .expect_err("failed completion must be reported");
+
+            assert!(matches!(error, Error::Transfer(_)));
+            assert_eq!(stream.stats.buffers_received, 1);
+            assert_eq!(stream.stats.buffers_dropped, 1);
+            assert_eq!(
+                stream.bulk_in.as_ref().expect("bulk in").pending(),
+                RFONE_TRANSFER_COUNT as usize
+            );
+        });
+    }
+
+    #[test]
+    fn async_f32_read_replenishes_queue_after_short_completion() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+                .await
+                .expect("start fake async stream");
+            stream.bulk_in.as_mut().expect("bulk in").short_next = true;
+
+            let error = stream
+                .read_float32_iq(&mut [(0.0, 0.0); 1])
+                .await
+                .expect_err("short completion must be reported");
+
+            assert!(matches!(error, Error::Protocol { .. }));
+            assert_eq!(stream.stats.buffers_received, 1);
+            assert_eq!(stream.stats.buffers_dropped, 1);
+            assert_eq!(
+                stream.bulk_in.as_ref().expect("bulk in").pending(),
+                RFONE_TRANSFER_COUNT as usize
+            );
         });
     }
 
