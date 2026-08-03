@@ -155,12 +155,14 @@ impl Device {
         })
     }
 
-    /// Start a synchronous receive stream for converted `F32Iq` samples.
+    /// Consume this device and create an owned synchronous converted `F32Iq` receive stream.
+    ///
+    /// Call [`F32RxStream::start`] to start the receiver and transfer queue.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn f32_rx_stream(&mut self) -> Result<F32RxStream<'_>> {
-        Ok(F32RxStream {
-            inner: self.inner.f32_rx_stream()?,
-        })
+    pub fn into_f32_rx_stream(self) -> F32RxStream {
+        F32RxStream {
+            inner: F32RxStreamInner::new(self.inner),
+        }
     }
 
     /// Consume this device and create an owned async raw ADC receive stream.
@@ -219,19 +221,6 @@ where
         self.ensure_raw_adc_stream_format()?;
         let stream = self.direct.start_raw_rx_stream()?;
         Ok(RawRxStreamInner {
-            device: self,
-            stream: Some(stream),
-            stats: StreamingStats::default(),
-            stopped: false,
-            finished: false,
-        })
-    }
-
-    /// Start a synchronous receive stream for converted `F32Iq` samples.
-    pub(crate) fn f32_rx_stream(&mut self) -> Result<F32RxStreamInner<'_, C>> {
-        self.ensure_f32_iq_stream_format()?;
-        let stream = self.direct.start_rx_stream()?;
-        Ok(F32RxStreamInner {
             device: self,
             stream: Some(stream),
             stats: StreamingStats::default(),
@@ -601,7 +590,7 @@ impl<'a> SampleBlock<'a> {
     }
 }
 
-/// Idle synchronous stream guard for explicit stop/finish lifecycle control.
+/// Borrowed synchronous stream guard for explicit stop/finish lifecycle control.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RawRxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
     device: &'dev mut DeviceInner<C>,
@@ -695,76 +684,168 @@ impl RawRxStream<'_> {
     }
 }
 
-/// Idle synchronous converted `F32Iq` stream guard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct F32RxStreamInner<'dev, C: ControlBackend + StreamingBackend> {
-    device: &'dev mut DeviceInner<C>,
+enum SyncReceiverState {
+    Stopped,
+    StopRequired,
+    Running,
+}
+
+/// Owned synchronous converted `F32Iq` stream state.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct F32RxStreamInner<C: ControlBackend + StreamingBackend> {
+    device: Option<DeviceInner<C>>,
     stream: Option<DirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
-    stopped: bool,
-    finished: bool,
+    state: SyncReceiverState,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<C> F32RxStreamInner<'_, C>
+impl<C> F32RxStreamInner<C>
 where
     C: ControlBackend + StreamingBackend,
 {
-    /// Read converted `(I, Q)` samples into `out`.
-    pub(crate) fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
-        self.stream
-            .as_mut()
-            .ok_or(Error::stream_closed("F32 RX stream is closed"))?
-            .read_float32_iq(out, timeout)
+    fn new(device: DeviceInner<C>) -> Self {
+        Self {
+            device: Some(device),
+            stream: None,
+            stats: StreamingStats::default(),
+            state: SyncReceiverState::Stopped,
+        }
     }
 
-    /// Request receiver-off cleanup. Repeated calls are no-ops.
-    pub(crate) fn stop(&mut self) -> Result<()> {
-        if !self.stopped {
-            let stream = self
-                .stream
-                .take()
-                .ok_or(Error::stream_closed("F32 RX stream is closed"))?;
-            self.stats = self.device.direct.stop_rx_stream(stream)?;
-            self.stopped = true;
+    fn start(&mut self) -> Result<()> {
+        if self.state == SyncReceiverState::Running {
+            return Ok(());
         }
+        let device = self
+            .device
+            .as_mut()
+            .expect("owned synchronous stream retains its device");
+        device.ensure_f32_iq_stream_format()?;
+        self.state = SyncReceiverState::StopRequired;
+        self.stream = Some(device.direct.start_rx_stream()?);
+        self.state = SyncReceiverState::Running;
         Ok(())
     }
 
-    /// Finish this stream guard and return current direct streaming counters.
-    pub(crate) fn finish(mut self) -> Result<StreamingStats> {
-        if !self.stopped {
-            self.stop()?;
+    /// Read converted `(I, Q)` samples into `out`.
+    pub(crate) fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+        if self.state != SyncReceiverState::Running {
+            return Err(Error::stream_closed("synchronous F32 RX stream is stopped"));
         }
-        self.finished = true;
-        Ok(self.stats)
+        let result = self
+            .stream
+            .as_mut()
+            .ok_or(Error::stream_closed("F32 RX stream is closed"))?
+            .read_float32_iq(out, timeout);
+        if result.is_err() {
+            self.state = SyncReceiverState::StopRequired;
+        }
+        result
+    }
+
+    fn stopped_device_mut(&mut self) -> Result<&mut DeviceInner<C>> {
+        if self.state != SyncReceiverState::Stopped {
+            return Err(Error::Busy);
+        }
+        Ok(self
+            .device
+            .as_mut()
+            .expect("owned synchronous stream retains its device"))
+    }
+
+    fn set_frequency_hz(&mut self, frequency_hz: u64) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_frequency_hz(frequency_hz)
+            .wait()
+    }
+
+    fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_sample_rate_hz(sample_rate_hz)
+            .wait()
+    }
+
+    fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.stopped_device_mut()?
+            .set_bandwidth_hz(bandwidth_hz)
+            .wait()
+    }
+
+    fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
+        self.stopped_device_mut()?.set_rf_port(port).wait()
+    }
+
+    fn set_gain(&mut self, gain: GainConfig) -> Result<()> {
+        self.stopped_device_mut()?.set_gain(gain).wait()
+    }
+
+    /// Request receiver-off cleanup. Repeated calls are no-ops.
+    pub(crate) fn stop(&mut self) -> Result<StreamingStats> {
+        if self.state == SyncReceiverState::Stopped {
+            return Ok(self.stats);
+        }
+        let device = self
+            .device
+            .as_mut()
+            .expect("owned synchronous stream retains its device");
+        let result = if let Some(stream) = self.stream.take() {
+            let (stats, result) = device.direct.close_rx_stream(stream);
+            self.stats = stats;
+            result
+        } else {
+            device.direct.receiver_mode(ReceiverMode::Off).wait()
+        };
+        match result {
+            Ok(()) => {
+                self.state = SyncReceiverState::Stopped;
+                Ok(self.stats)
+            }
+            Err(error) => {
+                self.state = SyncReceiverState::StopRequired;
+                Err(error)
+            }
+        }
+    }
+
+    fn into_device(mut self) -> DeviceInner<C> {
+        let _ = self.stop();
+        self.device
+            .take()
+            .expect("owned synchronous stream retains its device")
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<C> Drop for F32RxStreamInner<'_, C>
+impl<C> Drop for F32RxStreamInner<C>
 where
     C: ControlBackend + StreamingBackend,
 {
     fn drop(&mut self) {
-        if !self.stopped && !self.finished {
-            if let Some(stream) = self.stream.take() {
-                let _ = self.device.direct.stop_rx_stream(stream);
-            }
-            self.stopped = true;
-        }
+        let _ = self.stop();
     }
 }
 
-/// Converted `F32Iq` stream guard for explicit stop/finish lifecycle control.
-#[must_use = "RX streams keep hardware running until dropped, stopped, or finished"]
+/// Owned synchronous converted `F32Iq` stream.
+///
+/// The stream retains the device and keeps one USB transfer queue alive between
+/// reads. Call [`F32RxStream::stop`] before changing receiver settings or recovering
+/// the device with [`F32RxStream::into_device`].
+#[must_use = "RX streams own the device; call stop() for receiver-off cleanup"]
 #[cfg(not(target_arch = "wasm32"))]
-pub struct F32RxStream<'dev> {
-    inner: F32RxStreamInner<'dev, NusbControl>,
+pub struct F32RxStream {
+    inner: F32RxStreamInner<NusbControl>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl F32RxStream<'_> {
+impl F32RxStream {
+    /// Start the receiver and USB transfer queue.
+    pub fn start(&mut self) -> Result<()> {
+        self.inner.start()
+    }
+
     /// Read converted `(I, Q)` samples into `out`.
     ///
     /// `timeout` bounds the whole read call, including any additional USB
@@ -774,14 +855,41 @@ impl F32RxStream<'_> {
         self.inner.read(out, timeout)
     }
 
-    /// Request receiver-off cleanup. Repeated calls are no-ops.
-    pub fn stop(&mut self) -> Result<()> {
+    /// Set only the tuned center frequency while the receiver is stopped.
+    pub fn set_frequency_hz(&mut self, frequency_hz: u64) -> Result<()> {
+        self.inner.set_frequency_hz(frequency_hz)
+    }
+
+    /// Set only the sample rate while the receiver is stopped.
+    pub fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.inner.set_sample_rate_hz(sample_rate_hz)
+    }
+
+    /// Set only the manual analog bandwidth while the receiver is stopped.
+    pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.inner.set_bandwidth_hz(bandwidth_hz)
+    }
+
+    /// Set only the RF input port while the receiver is stopped.
+    pub fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
+        self.inner.set_rf_port(port)
+    }
+
+    /// Apply only the supplied gain update while the receiver is stopped.
+    pub fn set_gain(&mut self, gain: GainConfig) -> Result<()> {
+        self.inner.set_gain(gain)
+    }
+
+    /// Stop the receiver, close the transfer queue, and return counters.
+    pub fn stop(&mut self) -> Result<StreamingStats> {
         self.inner.stop()
     }
 
-    /// Finish this stream guard and return current streaming counters.
-    pub fn finish(self) -> Result<StreamingStats> {
-        self.inner.finish()
+    /// Consume this stream and recover its device.
+    pub fn into_device(self) -> Device {
+        Device {
+            inner: self.inner.into_device(),
+        }
     }
 }
 
@@ -1174,6 +1282,8 @@ mod tests {
 
     use super::*;
     use crate::streaming::{AsyncBulkInBackend, BulkInCompletion};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::streaming::{BulkInBackend, StreamingBackend};
     use crate::usb::control::VendorControlRequest;
 
     #[derive(Debug, Default)]
@@ -1262,6 +1372,66 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    impl StreamingBackend for FakeControl {
+        type BulkIn = FakeBulkIn;
+
+        fn bulk_in(&self, _endpoint: u8) -> Result<Self::BulkIn> {
+            self.state.bulk_in_count.fetch_add(1, Ordering::SeqCst);
+            Ok(FakeBulkIn {
+                state: Arc::clone(&self.state),
+                submitted: VecDeque::new(),
+            })
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug)]
+    struct FakeBulkIn {
+        state: Arc<FakeState>,
+        submitted: VecDeque<Vec<u8>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl BulkInBackend for FakeBulkIn {
+        type Buffer = Vec<u8>;
+
+        fn clear_halt(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn allocate(&self, len: usize) -> Self::Buffer {
+            vec![0; len]
+        }
+
+        fn submit(&mut self, buffer: Self::Buffer) {
+            self.submitted.push_back(buffer);
+        }
+
+        fn pending(&self) -> usize {
+            self.submitted.len()
+        }
+
+        fn wait_next_complete(
+            &mut self,
+            _timeout: Duration,
+        ) -> Option<BulkInCompletion<Self::Buffer>> {
+            let buffer = self
+                .submitted
+                .pop_front()
+                .expect("fake synchronous bulk queue contains submitted buffers");
+            Some(BulkInCompletion {
+                actual_len: buffer.len(),
+                buffer,
+                status: Ok(()),
+            })
+        }
+
+        fn cancel_all(&mut self) {
+            self.state.cancel_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     #[derive(Debug)]
     struct FakeAsyncBulkIn {
         state: Arc<FakeState>,
@@ -1318,6 +1488,68 @@ mod tests {
             },
             sample_format,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_synchronous_f32_stream_keeps_queue_between_reads() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let device = fake_device(control, SampleFormat::F32Iq);
+        let mut stream = F32RxStreamInner::new(device);
+        stream.start().expect("start owned synchronous F32 stream");
+
+        let mut first = [(0.0, 0.0); 1];
+        let mut second = [(0.0, 0.0); 1];
+        assert_eq!(
+            stream
+                .read(&mut first, Duration::from_secs(1))
+                .expect("first read"),
+            1
+        );
+        assert_eq!(
+            stream
+                .read(&mut second, Duration::from_secs(1))
+                .expect("second read"),
+            1
+        );
+        assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+
+        let stats = stream.stop().expect("stop owned synchronous F32 stream");
+        assert_eq!(stats.buffers_received, 1);
+        assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stopped_owned_synchronous_stream_accepts_focused_updates() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let device = fake_device(control, SampleFormat::F32Iq);
+        let mut stream = F32RxStreamInner::new(device);
+
+        stream.start().expect("start owned synchronous F32 stream");
+        assert!(matches!(
+            stream.set_frequency_hz(915_000_000),
+            Err(Error::Busy)
+        ));
+        stream.stop().expect("stop owned synchronous F32 stream");
+        stream
+            .set_frequency_hz(915_000_000)
+            .expect("set focused frequency while stopped");
+        stream
+            .set_sample_rate_hz(2_500_000)
+            .expect("set focused sample rate while stopped");
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
+
+        stream
+            .start()
+            .expect("restart updated owned synchronous F32 stream");
+        assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 2);
+        stream.stop().expect("stop restarted stream");
+        let _device = stream.into_device();
     }
 
     #[test]

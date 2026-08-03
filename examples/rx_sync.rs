@@ -20,7 +20,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let run_rx = args.iter().any(|arg| arg == "--rx");
     // DeviceBuilder validates the receiver configuration before opening and
     // applying it to the hardware.
-    let mut dev = Device::builder()
+    let dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
         .sample_format(SampleFormat::F32Iq)
@@ -41,10 +41,11 @@ fn main() -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut rx = dev.f32_rx_stream()?;
+        let mut rx = dev.into_f32_rx_stream();
+        rx.start()?;
         let mut samples = [(0.0, 0.0); 32];
         let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
-        let stats = rx.finish()?;
+        let stats = rx.stop()?;
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short RX complete: {stats:?}");
     } else {

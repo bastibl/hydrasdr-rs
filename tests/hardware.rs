@@ -82,7 +82,7 @@ fn hardware_short_rx_stream_smoke_test() {
 #[ignore = "requires a connected HydraSDR RFOne and USB permissions; run with `cargo test --test hardware -- --ignored --nocapture`"]
 fn hardware_f32_rx_stream_smoke_test() {
     let _lock = hardware_test_lock();
-    let mut dev = Device::builder()
+    let dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
         .sample_format(SampleFormat::F32Iq)
@@ -92,12 +92,13 @@ fn hardware_f32_rx_stream_smoke_test() {
         .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    let mut rx = dev.f32_rx_stream().expect("start F32 IQ stream");
+    let mut rx = dev.into_f32_rx_stream();
+    rx.start().expect("start F32 IQ stream");
     let mut samples = [(0.0, 0.0); 32];
     let count = rx
         .read(&mut samples, std::time::Duration::from_secs(1))
         .expect("read F32 IQ samples");
-    let stats = rx.finish().expect("finish F32 IQ stream");
+    let stats = rx.stop().expect("stop F32 IQ stream");
 
     assert!(count > 0);
     assert!(

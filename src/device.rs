@@ -857,16 +857,6 @@ where
         }
     }
 
-    /// Stop a persistent synchronous pull RX stream and return its accumulated counters.
-    pub(crate) fn stop_rx_stream(
-        &mut self,
-        stream: DirectRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
-        let (stats, stop_result) = self.close_rx_stream(stream);
-        stop_result?;
-        Ok(stats)
-    }
-
     pub(crate) fn close_rx_stream(
         &mut self,
         mut stream: DirectRxStream<C::BulkIn>,

@@ -76,7 +76,7 @@ The builder opens the selected RFOne, applies the receiver configuration, and ca
 use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
-    let mut dev = Device::builder()
+    let dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
         .sample_format(SampleFormat::F32Iq)
@@ -88,11 +88,12 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let mut rx = dev.f32_rx_stream()?;
+    let mut rx = dev.into_f32_rx_stream();
+    rx.start()?;
     let mut samples = [(0.0, 0.0); 32];
     let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
     println!("read {count} IQ samples");
-    let stats = rx.finish()?;
+    let stats = rx.stop()?;
     println!("{stats:?}");
 
     Ok(())
