@@ -105,6 +105,13 @@ impl Default for StreamingConfig {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedBulkIn<B, T> {
+    bulk_in: B,
+    buffers: Vec<T>,
+    config: StreamingConfig,
+}
+
 /// Mutable streaming configuration.
 #[derive(Debug, Default)]
 pub(crate) struct StreamingState {
@@ -167,20 +174,8 @@ pub(crate) struct RawRxStream<B: BulkInBackend> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> RawRxStream<B> {
-    pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
-        bulk_in.clear_halt()?;
-        while bulk_in.pending() < config.transfer_count {
-            let buffer = bulk_in.allocate(config_current_buffer_size(config));
-            bulk_in.submit(buffer);
-        }
-
-        Ok(Self {
-            bulk_in: Some(bulk_in),
-            config,
-            stats: StreamingStats::default(),
-            current: None,
-            closed: false,
-        })
+    pub(crate) fn prepare(bulk_in: B, config: StreamingConfig) -> PreparedBulkIn<B, B::Buffer> {
+        prepare_bulk_in(bulk_in, config)
     }
 
     /// Read the next raw transfer block.
@@ -276,21 +271,8 @@ pub(crate) struct AsyncDirectRxStream<B: AsyncBulkInBackend> {
 }
 
 impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
-    pub(crate) async fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
-        bulk_in.clear_halt_async().await?;
-        while bulk_in.pending() < config.transfer_count {
-            let buffer = bulk_in.allocate(config_current_buffer_size(config));
-            bulk_in.submit(buffer);
-        }
-
-        Ok(Self {
-            bulk_in: Some(bulk_in),
-            config,
-            stats: StreamingStats::default(),
-            current: None,
-            discard_remaining: 0,
-            closed: false,
-        })
+    pub(crate) fn prepare(bulk_in: B, config: StreamingConfig) -> PreparedBulkIn<B, B::Buffer> {
+        prepare_async_bulk_in(bulk_in, config)
     }
 
     /// Read the next raw transfer block.
@@ -380,23 +362,8 @@ impl<B: AsyncBulkInBackend> Drop for AsyncRawRxStream<B> {
 }
 
 impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
-    pub(crate) async fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
-        bulk_in.clear_halt_async().await?;
-        while bulk_in.pending() < config.transfer_count {
-            let buffer = bulk_in.allocate(config_current_buffer_size(config));
-            bulk_in.submit(buffer);
-        }
-
-        Ok(Self {
-            bulk_in: Some(bulk_in),
-            config,
-            converter: Float32IqConverter::default(),
-            converted: Vec::new(),
-            converted_start: 0,
-            stats: StreamingStats::default(),
-            discard_remaining: 0,
-            closed: false,
-        })
+    pub(crate) fn prepare(bulk_in: B, config: StreamingConfig) -> PreparedBulkIn<B, B::Buffer> {
+        prepare_async_bulk_in(bulk_in, config)
     }
 
     /// Preserve the endpoint queue while discarding data from before the next restart.
@@ -537,22 +504,8 @@ impl<B: AsyncBulkInBackend> Drop for AsyncDirectRxStream<B> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<B: BulkInBackend> DirectRxStream<B> {
-    pub(crate) fn start(mut bulk_in: B, config: StreamingConfig) -> Result<Self> {
-        bulk_in.clear_halt()?;
-        while bulk_in.pending() < config.transfer_count {
-            let buffer = bulk_in.allocate(config_current_buffer_size(config));
-            bulk_in.submit(buffer);
-        }
-
-        Ok(Self {
-            bulk_in: Some(bulk_in),
-            config,
-            converter: Float32IqConverter::default(),
-            converted: Vec::new(),
-            converted_start: 0,
-            stats: StreamingStats::default(),
-            closed: false,
-        })
+    pub(crate) fn prepare(bulk_in: B, config: StreamingConfig) -> PreparedBulkIn<B, B::Buffer> {
+        prepare_bulk_in(bulk_in, config)
     }
 
     /// Close the USB queue by cancelling pending transfers.
@@ -660,6 +613,110 @@ impl<B: BulkInBackend> DirectRxStream<B> {
 impl<B: BulkInBackend> Drop for DirectRxStream<B> {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<B: BulkInBackend> PreparedBulkIn<B, B::Buffer> {
+    pub(crate) fn start_raw(mut self) -> Result<RawRxStream<B>> {
+        self.bulk_in.clear_halt()?;
+        for buffer in self.buffers {
+            self.bulk_in.submit(buffer);
+        }
+
+        Ok(RawRxStream {
+            bulk_in: Some(self.bulk_in),
+            config: self.config,
+            stats: StreamingStats::default(),
+            current: None,
+            closed: false,
+        })
+    }
+
+    pub(crate) fn start_direct(mut self) -> Result<DirectRxStream<B>> {
+        self.bulk_in.clear_halt()?;
+        for buffer in self.buffers {
+            self.bulk_in.submit(buffer);
+        }
+
+        Ok(DirectRxStream {
+            bulk_in: Some(self.bulk_in),
+            config: self.config,
+            converter: Float32IqConverter::default(),
+            converted: Vec::new(),
+            converted_start: 0,
+            stats: StreamingStats::default(),
+            closed: false,
+        })
+    }
+}
+
+impl<B: AsyncBulkInBackend> PreparedBulkIn<B, B::Buffer> {
+    pub(crate) async fn start_async_raw(mut self) -> Result<AsyncRawRxStream<B>> {
+        self.bulk_in.clear_halt_async().await?;
+        for buffer in self.buffers {
+            self.bulk_in.submit(buffer);
+        }
+
+        Ok(AsyncRawRxStream {
+            bulk_in: Some(self.bulk_in),
+            config: self.config,
+            stats: StreamingStats::default(),
+            current: None,
+            discard_remaining: 0,
+            closed: false,
+        })
+    }
+
+    pub(crate) async fn start_async_direct(mut self) -> Result<AsyncDirectRxStream<B>> {
+        self.bulk_in.clear_halt_async().await?;
+        for buffer in self.buffers {
+            self.bulk_in.submit(buffer);
+        }
+
+        Ok(AsyncDirectRxStream {
+            bulk_in: Some(self.bulk_in),
+            config: self.config,
+            converter: Float32IqConverter::default(),
+            converted: Vec::new(),
+            converted_start: 0,
+            stats: StreamingStats::default(),
+            discard_remaining: 0,
+            closed: false,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_bulk_in<B: BulkInBackend>(
+    bulk_in: B,
+    config: StreamingConfig,
+) -> PreparedBulkIn<B, B::Buffer> {
+    let missing = config.transfer_count.saturating_sub(bulk_in.pending());
+    let buffer_size = config_current_buffer_size(config);
+    let buffers = (0..missing)
+        .map(|_| bulk_in.allocate(buffer_size))
+        .collect();
+    PreparedBulkIn {
+        bulk_in,
+        buffers,
+        config,
+    }
+}
+
+fn prepare_async_bulk_in<B: AsyncBulkInBackend>(
+    bulk_in: B,
+    config: StreamingConfig,
+) -> PreparedBulkIn<B, B::Buffer> {
+    let missing = config.transfer_count.saturating_sub(bulk_in.pending());
+    let buffer_size = config_current_buffer_size(config);
+    let buffers = (0..missing)
+        .map(|_| bulk_in.allocate(buffer_size))
+        .collect();
+    PreparedBulkIn {
+        bulk_in,
+        buffers,
+        config,
     }
 }
 
@@ -788,7 +845,12 @@ mod tests {
     fn async_f32_read_resubmits_completed_buffer_before_returning() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
-            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+            let prepared = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default());
+            assert_eq!(prepared.buffers.len(), RFONE_TRANSFER_COUNT as usize);
+            assert_eq!(prepared.bulk_in.pending(), 0);
+
+            let mut stream = prepared
+                .start_async_direct()
                 .await
                 .expect("start fake async stream");
             let initial_submit_count = stream.bulk_in.as_ref().expect("bulk in").submit_count;
@@ -811,7 +873,8 @@ mod tests {
     fn async_f32_read_returns_buffered_samples_without_waiting_for_another_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
-            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+            let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_direct()
                 .await
                 .expect("start fake async stream");
 
@@ -843,7 +906,8 @@ mod tests {
     fn async_f32_read_replenishes_queue_after_failed_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
-            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+            let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_direct()
                 .await
                 .expect("start fake async stream");
             stream.bulk_in.as_mut().expect("bulk in").fail_next = true;
@@ -867,7 +931,8 @@ mod tests {
     fn async_f32_read_replenishes_queue_after_short_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
-            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+            let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_direct()
                 .await
                 .expect("start fake async stream");
             stream.bulk_in.as_mut().expect("bulk in").short_next = true;
@@ -891,7 +956,8 @@ mod tests {
     fn persistent_async_f32_stream_accepts_processing_config_updates() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
-            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+            let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_direct()
                 .await
                 .expect("start fake async stream");
             stream.pause().expect("pause fake async stream");

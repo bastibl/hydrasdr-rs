@@ -724,8 +724,6 @@ where
     /// Start a persistent synchronous pull RX stream for raw USB blocks.
     pub(crate) fn start_raw_rx_stream(&mut self) -> Result<RawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off).wait()?;
-        self.receiver_mode(ReceiverMode::Rx).wait()?;
-
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
@@ -733,8 +731,13 @@ where
                 return Err(err);
             }
         };
+        let prepared = RawRxStream::prepare(bulk_in, self.streaming.config());
+        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).wait() {
+            let _ = self.receiver_mode(ReceiverMode::Off).wait();
+            return Err(err);
+        }
 
-        match RawRxStream::start(bulk_in, self.streaming.config()) {
+        match prepared.start_raw() {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).wait();
@@ -768,8 +771,6 @@ where
         }
 
         self.receiver_mode(ReceiverMode::Off).wait()?;
-        self.receiver_mode(ReceiverMode::Rx).wait()?;
-
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
@@ -777,8 +778,13 @@ where
                 return Err(err);
             }
         };
+        let prepared = DirectRxStream::prepare(bulk_in, self.streaming.config());
+        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).wait() {
+            let _ = self.receiver_mode(ReceiverMode::Off).wait();
+            return Err(err);
+        }
 
-        match DirectRxStream::start(bulk_in, self.streaming.config()) {
+        match prepared.start_direct() {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).wait();
@@ -815,8 +821,6 @@ where
         &mut self,
     ) -> Result<AsyncRawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off).await?;
-        self.receiver_mode(ReceiverMode::Rx).await?;
-
         let bulk_in = match self.control.as_ref().bulk_in_async(RFONE_RX_ENDPOINT).await {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
@@ -824,8 +828,13 @@ where
                 return Err(err);
             }
         };
+        let prepared = AsyncRawRxStream::prepare(bulk_in, self.streaming.config());
+        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).await {
+            let _ = self.receiver_mode(ReceiverMode::Off).await;
+            return Err(err);
+        }
 
-        match AsyncRawRxStream::start(bulk_in, self.streaming.config()).await {
+        match prepared.start_async_raw().await {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).await;
@@ -841,8 +850,6 @@ where
         }
 
         self.receiver_mode(ReceiverMode::Off).await?;
-        self.receiver_mode(ReceiverMode::Rx).await?;
-
         let bulk_in = match self.control.as_ref().bulk_in_async(RFONE_RX_ENDPOINT).await {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
@@ -850,8 +857,13 @@ where
                 return Err(err);
             }
         };
+        let prepared = AsyncDirectRxStream::prepare(bulk_in, self.streaming.config());
+        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).await {
+            let _ = self.receiver_mode(ReceiverMode::Off).await;
+            return Err(err);
+        }
 
-        match AsyncDirectRxStream::start(bulk_in, self.streaming.config()).await {
+        match prepared.start_async_direct().await {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 let _ = self.receiver_mode(ReceiverMode::Off).await;
