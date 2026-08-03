@@ -132,9 +132,15 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     /// Build direct device metadata from firmware queries and RFOne static tables.
     pub(crate) fn get_device_info(&mut self) -> Result<DeviceInfo> {
-        let board_id = self.board_id_read()?;
-        let firmware_version = self.version_string_read()?;
-        let part_serial = self.board_partid_serialno_read()?;
+        let board_id = self
+            .board_id_read()
+            .map_err(|error| error.at("reading HydraSDR board ID"))?;
+        let firmware_version = self
+            .version_string_read()
+            .map_err(|error| error.at("reading HydraSDR firmware version"))?;
+        let part_serial = self
+            .board_partid_serialno_read()
+            .map_err(|error| error.at("reading HydraSDR part ID and serial number"))?;
         let features = self.get_capabilities()?;
         self.features = Some(features);
         let features_reserved = self.get_capabilities_reserved()?;
@@ -589,9 +595,18 @@ impl<C: AsyncControlBackend> HydraSdr<C> {
 
     /// Async counterpart to [`HydraSdr::get_device_info`].
     pub(crate) async fn get_device_info_async(&mut self) -> Result<DeviceInfo> {
-        let board_id = self.board_id_read_async().await?;
-        let firmware_version = self.version_string_read_async().await?;
-        let part_serial = self.board_partid_serialno_read_async().await?;
+        let board_id = self
+            .board_id_read_async()
+            .await
+            .map_err(|error| error.at("reading HydraSDR board ID"))?;
+        let firmware_version = self
+            .version_string_read_async()
+            .await
+            .map_err(|error| error.at("reading HydraSDR firmware version"))?;
+        let part_serial = self
+            .board_partid_serialno_read_async()
+            .await
+            .map_err(|error| error.at("reading HydraSDR part ID and serial number"))?;
         let features = self.get_capabilities_async().await?;
         self.features = Some(features);
         let features_reserved = self.get_capabilities_reserved_async().await?;
@@ -1089,18 +1104,28 @@ impl HydraSdr<NusbControl> {
 
     async fn open_sn_internal_async(serial: Option<u64>) -> Result<Self> {
         let info = discovery::select_nusb_device_async(serial).await?;
-        let device = info.open().await.map_err(Error::from)?;
+        let device = info
+            .open()
+            .await
+            .map_err(Error::from)
+            .map_err(|error| error.at("opening USB device"))?;
         match device.set_configuration(1).await {
             Ok(()) => {}
             Err(err) if err.kind() == nusb::ErrorKind::Unsupported => {}
-            Err(err) => return Err(Error::from(err)),
+            Err(err) => {
+                return Err(Error::from(err).at("selecting USB configuration 1"));
+            }
         }
         let interface = device
             .detach_and_claim_interface(0)
             .await
-            .map_err(Error::from)?;
+            .map_err(Error::from)
+            .map_err(|error| error.at("claiming HydraSDR USB interface 0"))?;
         let dev = Self::from_control(NusbControl::new(device, interface));
-        let firmware = dev.version_string_read_async().await?;
+        let firmware = dev
+            .version_string_read_async()
+            .await
+            .map_err(|error| error.at("validating HydraSDR firmware version"))?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
             return Err(Error::DeviceNotFound);
         }
@@ -1110,18 +1135,27 @@ impl HydraSdr<NusbControl> {
     #[cfg(not(target_arch = "wasm32"))]
     fn open_sn_internal(serial: Option<u64>) -> Result<Self> {
         let info = discovery::select_nusb_device(serial)?;
-        let device = info.open().wait().map_err(Error::from)?;
+        let device = info
+            .open()
+            .wait()
+            .map_err(Error::from)
+            .map_err(|error| error.at("opening USB device"))?;
         match device.set_configuration(1).wait() {
             Ok(()) => {}
             Err(err) if err.kind() == nusb::ErrorKind::Unsupported => {}
-            Err(err) => return Err(Error::from(err)),
+            Err(err) => {
+                return Err(Error::from(err).at("selecting USB configuration 1"));
+            }
         }
         let interface = device
             .detach_and_claim_interface(0)
             .wait()
-            .map_err(Error::from)?;
+            .map_err(Error::from)
+            .map_err(|error| error.at("claiming HydraSDR USB interface 0"))?;
         let dev = Self::from_control(NusbControl::new(device, interface));
-        let firmware = dev.version_string_read()?;
+        let firmware = dev
+            .version_string_read()
+            .map_err(|error| error.at("validating HydraSDR firmware version"))?;
         if !firmware.starts_with(EXPECTED_FW_PREFIX) {
             return Err(Error::DeviceNotFound);
         }

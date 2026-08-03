@@ -576,8 +576,11 @@ impl DeviceBuilder {
             DeviceSelector::First => HydraSdr::open()?,
             DeviceSelector::Serial(serial) => HydraSdr::open_sn(serial)?,
         };
-        let mut inner = DeviceInner::from_direct(direct)?;
-        inner.configure(&config)?;
+        let mut inner = DeviceInner::from_direct(direct)
+            .map_err(|error| error.at("reading HydraSDR device metadata"))?;
+        inner
+            .configure(&config)
+            .map_err(|error| error.at("applying initial HydraSDR configuration"))?;
         Ok(Device { inner })
     }
 
@@ -589,8 +592,13 @@ impl DeviceBuilder {
             DeviceSelector::First => HydraSdr::open_async().await?,
             DeviceSelector::Serial(serial) => HydraSdr::open_sn_async(serial).await?,
         };
-        let mut inner = DeviceInner::from_direct_async(direct).await?;
-        inner.configure_async(&config).await?;
+        let mut inner = DeviceInner::from_direct_async(direct)
+            .await
+            .map_err(|error| error.at("reading HydraSDR device metadata"))?;
+        inner
+            .configure_async(&config)
+            .await
+            .map_err(|error| error.at("applying initial HydraSDR configuration"))?;
         Ok(Device { inner })
     }
 }

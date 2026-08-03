@@ -22,7 +22,7 @@ pub enum Error {
     Busy,
     /// The requested operation is not supported by the backend or device.
     Unsupported,
-    /// The stream was already stopped, finished, or otherwise closed.
+    /// The stream is not running or is otherwise closed.
     StreamClosed {
         /// Reason the stream is no longer usable.
         reason: &'static str,
@@ -31,6 +31,13 @@ pub enum Error {
     Usb(nusb::Error),
     /// An individual USB transfer failed.
     Transfer(nusb::transfer::TransferError),
+    /// A HydraSDR operation failed with a more specific source error.
+    Operation {
+        /// Operation being performed when the error occurred.
+        operation: &'static str,
+        /// More specific driver or USB error.
+        source: Box<Error>,
+    },
     /// The device or driver violated the expected HydraSDR protocol.
     Protocol {
         /// Operation that failed.
@@ -53,7 +60,7 @@ pub enum ErrorKind {
     Unsupported,
     /// The USB backend returned an error.
     Usb,
-    /// The stream was already stopped, finished, or otherwise closed.
+    /// The stream is not running or is otherwise closed.
     StreamClosed,
     /// Any other driver or backend error.
     Other,
@@ -75,6 +82,14 @@ impl Error {
         Self::Protocol { operation, reason }
     }
 
+    /// Attach driver-operation context while preserving the source error.
+    pub(crate) fn at(self, operation: &'static str) -> Self {
+        Self::Operation {
+            operation,
+            source: Box::new(self),
+        }
+    }
+
     /// Return a broad, backend-independent error category.
     pub fn kind(&self) -> ErrorKind {
         match self {
@@ -90,6 +105,7 @@ impl Error {
                 _ => ErrorKind::Usb,
             },
             Self::Transfer(_) => ErrorKind::Usb,
+            Self::Operation { source, .. } => source.kind(),
             Self::Protocol { .. } => ErrorKind::Other,
         }
     }
@@ -107,6 +123,7 @@ impl fmt::Display for Error {
             Self::StreamClosed { reason } => write!(f, "stream closed: {reason}"),
             Self::Usb(err) => write!(f, "USB error: {err}"),
             Self::Transfer(err) => write!(f, "USB transfer error: {err}"),
+            Self::Operation { operation, source } => write!(f, "{operation}: {source}"),
             Self::Protocol { operation, reason } => write!(f, "{operation}: {reason}"),
         }
     }
@@ -117,6 +134,7 @@ impl std::error::Error for Error {
         match self {
             Self::Usb(err) => Some(err),
             Self::Transfer(err) => Some(err),
+            Self::Operation { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -167,5 +185,18 @@ mod tests {
             }
         ));
         assert_eq!(err.kind(), ErrorKind::InvalidConfig);
+    }
+
+    #[test]
+    fn operation_context_preserves_source_category() {
+        let err =
+            Error::from(nusb::transfer::TransferError::Fault).at("applying receiver configuration");
+
+        assert_eq!(err.kind(), ErrorKind::Usb);
+        assert!(
+            err.to_string()
+                .starts_with("applying receiver configuration: USB transfer error:")
+        );
+        assert!(err.source().is_some());
     }
 }
