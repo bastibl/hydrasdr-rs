@@ -438,11 +438,6 @@ impl<C: ControlBackend> HydraSdr<C> {
 }
 
 impl<C> HydraSdr<C> {
-    pub(crate) fn update_cached_device_info(&self, info: &mut DeviceInfo) {
-        let _ = self;
-        let _ = info;
-    }
-
     fn build_device_info(
         &self,
         _board_id: BoardId,

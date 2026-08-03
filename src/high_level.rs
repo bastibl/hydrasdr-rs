@@ -282,7 +282,6 @@ where
         config.apply_direct(&mut self.direct)?;
         self.sample_format = config.sample_format();
         if let Some(info) = &mut self.info {
-            self.direct.update_cached_device_info(info);
             info.current_config = Some(config.clone());
         }
         Ok(())
@@ -340,7 +339,6 @@ where
         config.apply_direct_async(&mut self.direct).await?;
         self.sample_format = config.sample_format();
         if let Some(info) = &mut self.info {
-            self.direct.update_cached_device_info(info);
             info.current_config = Some(config.clone());
         }
         Ok(())
