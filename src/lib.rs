@@ -1,10 +1,11 @@
 //! HydraSDR RFOne API on top of `nusb`.
 //!
-//! The crate exposes synchronous and asynchronous Rust APIs on native targets
-//! and asynchronous USB I/O through WebUSB on `wasm32-unknown-unknown`.
+//! One-shot USB operations implement [`MaybeFuture`]: await them in async code,
+//! or call [`MaybeFuture::wait`] on native targets. Persistent receive streams
+//! have separate borrowed synchronous and owned asynchronous forms.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] for blocking operation.
-//! Async counterparts are executor-agnostic at this crate layer. Bulk/control
+//! Awaited operations are executor-agnostic at this crate layer. Bulk/control
 //! transfers are natively async in `nusb`; async device discovery/open and
 //! endpoint `clear_halt` follow the support exposed by `nusb`, so applications
 //! that await those paths can enable exactly one of this crate's `tokio` or
@@ -15,8 +16,8 @@
 //! WebUSB builds must enable `web_sys_unstable_apis` as described in the
 //! [WebUSB section of the README](https://github.com/bastibl/hydrasdr-rs#webusb).
 //! Browsers only expose devices for which the page has WebUSB permission. Call
-//! `Device::request_permission_async` from a browser-window user gesture;
-//! [`Device::open_async`] can then discover and open the authorized device from
+//! `Device::request_permission` from a browser-window user gesture;
+//! [`Device::open`] can then discover and open the authorized device from
 //! either the window or a Web Worker. Opening never prompts for permission.
 //! Blocking USB methods and synchronous stream types are not part of the
 //! `wasm32` API; use async device methods and owned async streams.
@@ -26,7 +27,7 @@
 //! Open and configure real hardware with the [`Device`] builder:
 //!
 //! ```no_run
-//! use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+//! use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
 //!     let mut dev = Device::builder()
@@ -35,7 +36,8 @@
 //!         .sample_format(SampleFormat::RawAdc)
 //!         .rf_port(RfPort::Rx0)
 //!         .gain(GainPreset::Linearity(12))
-//!         .open()?;
+//!         .open()
+//!         .wait()?;
 //!
 //!     let mut rx = dev.raw_rx_stream()?;
 //!     if let Some(block) = rx.next_block()? {
@@ -58,6 +60,7 @@ mod device;
 mod discovery;
 mod errors;
 mod high_level;
+mod maybe_future;
 mod rfone;
 mod streaming;
 mod types;
@@ -69,5 +72,6 @@ pub use errors::{Error, ErrorKind, Result};
 pub use high_level::{AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, SampleBlock};
 #[cfg(not(target_arch = "wasm32"))]
 pub use high_level::{F32RxStream, RawRxStream};
+pub use nusb::MaybeFuture;
 pub use streaming::StreamingStats;
 pub use types::{BiasTeeInfo, DecimationMode, DeviceInfo, RfPortInfo};

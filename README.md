@@ -30,11 +30,11 @@ TODO:
 
 `hydrasdr-rs` uses [`nusb`](https://crates.io/crates/nusb) directly. It does not use libusb bindings.
 
-The synchronous API calls `nusb::MaybeFuture::wait()` for discovery, device open, interface claim, control transfers, endpoint halt clearing, and bulk streaming completions while keeping the USB backend in Rust.
+One-shot operations implement `nusb::MaybeFuture`: call `.wait()` for synchronous use on native targets, or `.await` the same operation in async code. This covers discovery, device open, interface claim, control transfers, and configuration without duplicate `_async` methods.
 
 The async API uses `nusb` futures for control and bulk transfers. This crate does not enforce an async runtime: by default, it has no runtime dependency and the synchronous API works without `tokio` or `smol`.
 
-For async USB operations on native targets, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Native applications that call `open_async`, `configure_async`, or async RX streams should normally enable one of this crate's forwarding features:
+For awaited USB operations on native targets, `nusb` needs runtime integration so it can run blocking OS work on an IO thread. Native applications that await `open`, `configure`, or owned async RX streams should normally enable one of this crate's forwarding features:
 
 ```sh
 cargo check --features tokio
@@ -52,7 +52,7 @@ Use `tokio` if the application already runs on Tokio; use `smol` for smaller exa
 rustflags = ["--cfg=web_sys_unstable_apis"]
 ```
 
-If `hydrasdr-rs` is consumed as a dependency, put the same target configuration in the application's Cargo configuration. Browser WebUSB access also requires a secure context, browser support, and user-granted permission for one of the RFOne VID/PID pairs. Call `Device::request_permission_async` from a transient user activation such as a click handler. `Device::list_async` and `Device::open_async` only operate on devices already authorized for the page, so opening works the same way in the browser window and in a Web Worker.
+If `hydrasdr-rs` is consumed as a dependency, put the same target configuration in the application's Cargo configuration. Browser WebUSB access also requires a secure context, browser support, and user-granted permission for one of the RFOne VID/PID pairs. Call `Device::request_permission` from a transient user activation such as a click handler. `Device::list` and `Device::open` only operate on devices already authorized for the page, so opening works the same way in the browser window and in a Web Worker.
 
 Check the WebUSB build with:
 
@@ -71,7 +71,7 @@ Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mi
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
 
 ```rust,no_run
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
     let mut dev = Device::builder()
@@ -81,7 +81,8 @@ fn main() -> hydrasdr_rs::Result<()> {
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
-        .open()?;
+        .open()
+        .wait()?;
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
@@ -112,7 +113,7 @@ fn main() -> hydrasdr_rs::Result<()> {
             .sample_format(SampleFormat::F32Iq)
             .rf_port(RfPort::Rx0)
             .gain(GainPreset::Linearity(10))
-            .open_async()
+            .open()
             .await?;
 
         let mut rx = dev.into_async_f32_rx_stream();

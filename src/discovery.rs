@@ -1,6 +1,5 @@
 //! USB discovery helpers for HydraSDR RFOne devices.
 
-#[cfg(not(target_arch = "wasm32"))]
 use nusb::MaybeFuture;
 
 use crate::errors::{Error, Result};
@@ -64,47 +63,30 @@ pub(crate) fn find_usb_device_id(vid: u16, pid: u16) -> Option<UsbDeviceId> {
         .find(|candidate| candidate.vid == vid && candidate.pid == pid)
 }
 
-/// List visible HydraSDR devices synchronously using `nusb::MaybeFuture::wait()`.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn list_devices() -> Result<Vec<DeviceDescriptor>> {
-    let devices = nusb::list_devices().wait().map_err(Error::from)?;
-    Ok(devices
-        .filter_map(|device| DeviceDescriptor::from_nusb(&device))
-        .collect())
+/// List visible HydraSDR devices synchronously with `.wait()` or asynchronously
+/// with `.await`.
+pub(crate) fn list_devices() -> impl MaybeFuture<Output = Result<Vec<DeviceDescriptor>>> {
+    nusb::list_devices().map(|devices| {
+        Ok(devices
+            .map_err(Error::from)?
+            .filter_map(|device| DeviceDescriptor::from_nusb(&device))
+            .collect())
+    })
 }
 
-/// List visible HydraSDR devices through the async `nusb` path.
-pub(crate) async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
-    let devices = nusb::list_devices().await.map_err(Error::from)?;
-    Ok(devices
-        .filter_map(|device| DeviceDescriptor::from_nusb(&device))
-        .collect())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
-    for device in nusb::list_devices().wait().map_err(Error::from)? {
-        if !matches_device(&device, serial) {
-            continue;
-        }
-        return Ok(device);
-    }
-    Err(Error::DeviceNotFound)
-}
-
-pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
-    for device in nusb::list_devices().await.map_err(Error::from)? {
-        if !matches_device(&device, serial) {
-            continue;
-        }
-        return Ok(device);
-    }
-
-    Err(Error::DeviceNotFound)
+pub(crate) fn select_nusb_device(
+    serial: Option<u64>,
+) -> impl MaybeFuture<Output = Result<nusb::DeviceInfo>> {
+    nusb::list_devices().map(move |devices| {
+        devices
+            .map_err(Error::from)?
+            .find(|device| matches_device(device, serial))
+            .ok_or(Error::DeviceNotFound)
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn request_nusb_device_async(serial: Option<u64>) -> Result<Option<nusb::DeviceInfo>> {
+async fn request_nusb_device(serial: Option<u64>) -> Result<Option<nusb::DeviceInfo>> {
     let selectors = USB_DEVICE_IDS
         .iter()
         .map(|device_id| {
@@ -122,15 +104,14 @@ async fn request_nusb_device_async(serial: Option<u64>) -> Result<Option<nusb::D
 
 /// Ask the browser to grant access to a matching HydraSDR without opening it.
 #[cfg(target_arch = "wasm32")]
-pub(crate) async fn request_device_permission_async(serial: Option<u64>) -> Result<()> {
+pub(crate) async fn request_device_permission(serial: Option<u64>) -> Result<()> {
     for device in nusb::list_devices().await.map_err(Error::from)? {
-        if !matches_device(&device, serial) {
-            continue;
+        if matches_device(&device, serial) {
+            return Ok(());
         }
-        return Ok(());
     }
 
-    request_nusb_device_async(serial)
+    request_nusb_device(serial)
         .await?
         .map(|_| ())
         .ok_or(Error::DeviceNotFound)

@@ -16,7 +16,7 @@ tokio = ["nusb/tokio"]
 smol = ["nusb/smol"]
 
 [dependencies]
-nusb = { path = "../nusb" }
+nusb = "0.2.7"
 
 [dev-dependencies]
 futures-lite = "2"

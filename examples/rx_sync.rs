@@ -5,7 +5,7 @@
 
 use std::env;
 
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -27,7 +27,8 @@ fn main() -> hydrasdr_rs::Result<()> {
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
-        .open()?;
+        .open()
+        .wait()?;
 
     println!(
         "opened {} firmware={} serial={:?}",

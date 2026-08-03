@@ -1,16 +1,11 @@
 //! Receiver configuration.
 
-use crate::commands::GainType;
-use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 use crate::rfone::{
     RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ, RFONE_MIXER_MAX_GAIN,
     RFONE_VGA_MAX_GAIN,
 };
 use crate::types::{DecimationMode, SampleType};
-use crate::usb::control::AsyncControlBackend;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::usb::control::ControlBackend;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -262,55 +257,6 @@ impl Config {
         validate_format_packing(self.sample_format, self.packing)?;
         Ok(())
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn apply_direct<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
-    where
-        C: ControlBackend,
-    {
-        self.validate()?;
-        direct.set_freq(self.frequency_hz)?;
-        direct.set_sample_type(self.sample_format.sample_type())?;
-        direct.set_decimation_mode(self.decimation_mode)?;
-        if let Bandwidth::ManualHz(bandwidth_hz) = self.bandwidth {
-            direct.set_bandwidth(bandwidth_hz)?;
-        }
-        direct.set_samplerate(self.sample_rate_hz)?;
-        if let Some(port) = self.rf_port {
-            direct.set_rf_port(port)?;
-        }
-        apply_gain_direct(direct, self.gain)?;
-        if let Some(enabled) = self.bias_tee {
-            direct.set_rf_bias(u8::from(enabled))?;
-        }
-        direct.set_packing(u8::from(self.packing))?;
-        Ok(())
-    }
-
-    pub(crate) async fn apply_direct_async<C>(&self, direct: &mut HydraSdr<C>) -> Result<()>
-    where
-        C: AsyncControlBackend,
-    {
-        self.validate()?;
-        direct.set_freq_async(self.frequency_hz).await?;
-        direct.set_sample_type(self.sample_format.sample_type())?;
-        direct
-            .set_decimation_mode_async(self.decimation_mode)
-            .await?;
-        if let Bandwidth::ManualHz(bandwidth_hz) = self.bandwidth {
-            direct.set_bandwidth_async(bandwidth_hz).await?;
-        }
-        direct.set_samplerate_async(self.sample_rate_hz).await?;
-        if let Some(port) = self.rf_port {
-            direct.set_rf_port_async(port).await?;
-        }
-        apply_gain_direct_async(direct, self.gain).await?;
-        if let Some(enabled) = self.bias_tee {
-            direct.set_rf_bias_async(u8::from(enabled)).await?;
-        }
-        direct.set_packing_async(u8::from(self.packing)).await?;
-        Ok(())
-    }
 }
 
 /// Builder for [`Config`].
@@ -423,88 +369,6 @@ impl ConfigBuilder {
     pub fn build(self) -> Result<Config> {
         self.config.validate()?;
         Ok(self.config)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn apply_gain_direct<C>(direct: &mut HydraSdr<C>, gain: GainConfig) -> Result<()>
-where
-    C: ControlBackend,
-{
-    match gain {
-        GainConfig::Unchanged => Ok(()),
-        GainConfig::Preset(GainPreset::Linearity(value)) => {
-            direct.set_gain(GainType::Linearity, value)
-        }
-        GainConfig::Preset(GainPreset::Sensitivity(value)) => {
-            direct.set_gain(GainType::Sensitivity, value)
-        }
-        GainConfig::Manual {
-            lna,
-            mixer,
-            vga,
-            lna_agc,
-            mixer_agc,
-        } => {
-            if let Some(value) = lna {
-                direct.set_lna_gain(value)?;
-            }
-            if let Some(value) = mixer {
-                direct.set_mixer_gain(value)?;
-            }
-            if let Some(value) = vga {
-                direct.set_vga_gain(value)?;
-            }
-            if let Some(enabled) = lna_agc {
-                direct.set_lna_agc(u8::from(enabled))?;
-            }
-            if let Some(enabled) = mixer_agc {
-                direct.set_mixer_agc(u8::from(enabled))?;
-            }
-            Ok(())
-        }
-    }
-}
-
-pub(crate) async fn apply_gain_direct_async<C>(
-    direct: &mut HydraSdr<C>,
-    gain: GainConfig,
-) -> Result<()>
-where
-    C: AsyncControlBackend,
-{
-    match gain {
-        GainConfig::Unchanged => Ok(()),
-        GainConfig::Preset(GainPreset::Linearity(value)) => {
-            direct.set_gain_async(GainType::Linearity, value).await
-        }
-        GainConfig::Preset(GainPreset::Sensitivity(value)) => {
-            direct.set_gain_async(GainType::Sensitivity, value).await
-        }
-        GainConfig::Manual {
-            lna,
-            mixer,
-            vga,
-            lna_agc,
-            mixer_agc,
-        } => {
-            if let Some(value) = lna {
-                direct.set_lna_gain_async(value).await?;
-            }
-            if let Some(value) = mixer {
-                direct.set_mixer_gain_async(value).await?;
-            }
-            if let Some(value) = vga {
-                direct.set_vga_gain_async(value).await?;
-            }
-            if let Some(enabled) = lna_agc {
-                direct.set_lna_agc_async(u8::from(enabled)).await?;
-            }
-            if let Some(enabled) = mixer_agc {
-                direct.set_mixer_agc_async(u8::from(enabled)).await?;
-            }
-            Ok(())
-        }
     }
 }
 

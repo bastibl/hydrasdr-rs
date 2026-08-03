@@ -1,19 +1,17 @@
 //! USB control-transfer encoding and the `nusb` backend implementation.
 
-use std::future::Future;
 use std::time::Duration;
 
-use nusb::Endpoint;
-#[cfg(not(target_arch = "wasm32"))]
-use nusb::MaybeFuture;
 use nusb::transfer::{
     Buffer as NusbBuffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient,
 };
+use nusb::{Endpoint, MaybeFuture};
 
 use crate::commands::{GainType, ReceiverMode, VendorRequest};
 use crate::config::RfPort;
 use crate::constants::CTRL_TIMEOUT_MS;
 use crate::errors::{Error, Result};
+use crate::maybe_future::{MaybeFutureExt, ready};
 use crate::streaming::{AsyncBulkInBackend, AsyncStreamingBackend, BulkInCompletion};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::streaming::{BulkInBackend, StreamingBackend};
@@ -129,24 +127,6 @@ impl VendorControlRequest {
         })
     }
 
-    /// Convert this direct request into a `nusb` OUT control transfer.
-    pub(crate) fn nusb_control_out(&self) -> Result<ControlOut<'_>> {
-        if self.direction != ControlDirection::Out {
-            return Err(Error::protocol(
-                "encode control OUT request",
-                "request direction is invalid",
-            ));
-        }
-        Ok(ControlOut {
-            control_type: ControlType::Vendor,
-            recipient: Recipient::Device,
-            request: self.request as u8,
-            value: self.value,
-            index: self.index,
-            data: &self.data,
-        })
-    }
-
     /// Encode receiver mode selection.
     pub(crate) fn receiver_mode(mode: ReceiverMode) -> Self {
         Self::out_request(VendorRequest::ReceiverMode, mode as u16, 0, Vec::new())
@@ -243,24 +223,27 @@ impl VendorControlRequest {
     }
 }
 
-/// Synchronous control-transfer backend for the direct API.
+/// Control-transfer backend usable through [`MaybeFuture::wait`] or `.await`.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) trait ControlBackend: std::fmt::Debug {
-    fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>>;
-    fn control_out(&self, request: VendorControlRequest) -> Result<()>;
-}
+pub(crate) trait BackendSafe: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> BackendSafe for T {}
 
-/// Async control-transfer backend for the direct API.
-pub(crate) trait AsyncControlBackend: std::fmt::Debug {
-    fn control_in_async(
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait BackendSafe {}
+#[cfg(target_arch = "wasm32")]
+impl<T> BackendSafe for T {}
+
+pub(crate) trait ControlBackend: std::fmt::Debug + BackendSafe {
+    fn control_in(
         &self,
         request: VendorControlRequest,
-    ) -> impl Future<Output = Result<Vec<u8>>> + '_;
+    ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<Self>;
 
-    fn control_out_async(
+    fn control_out(
         &self,
         request: VendorControlRequest,
-    ) -> impl Future<Output = Result<()>> + '_;
+    ) -> impl MaybeFuture<Output = Result<()>> + use<Self>;
 }
 
 /// `nusb` implementation of direct control and streaming backends.
@@ -286,40 +269,46 @@ impl NusbControl {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ControlBackend for NusbControl {
-    fn control_in(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
-        let control = request.nusb_control_in()?;
-        self.interface
-            .control_in(control, request.timeout)
-            .wait()
-            .map_err(Error::from)
+    fn control_in(
+        &self,
+        request: VendorControlRequest,
+    ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<> {
+        let interface = self.interface.clone();
+        let timeout = request.timeout;
+        ready(request.nusb_control_in())
+            .and_then(move |control| interface.control_in(control, timeout).map_err(Error::from))
     }
 
-    fn control_out(&self, request: VendorControlRequest) -> Result<()> {
-        let control = request.nusb_control_out()?;
-        self.interface
-            .control_out(control, request.timeout)
-            .wait()
-            .map_err(Error::from)
-    }
-}
-
-impl AsyncControlBackend for NusbControl {
-    async fn control_in_async(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
-        let control = request.nusb_control_in()?;
-        self.interface
-            .control_in(control, request.timeout)
-            .await
-            .map_err(Error::from)
-    }
-
-    async fn control_out_async(&self, request: VendorControlRequest) -> Result<()> {
-        let control = request.nusb_control_out()?;
-        self.interface
-            .control_out(control, request.timeout)
-            .await
-            .map_err(Error::from)
+    fn control_out(
+        &self,
+        request: VendorControlRequest,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<> {
+        let interface = self.interface.clone();
+        let timeout = request.timeout;
+        let validation = if request.direction == ControlDirection::Out {
+            Ok(request)
+        } else {
+            Err(Error::protocol(
+                "encode control OUT request",
+                "request direction is invalid",
+            ))
+        };
+        ready(validation).and_then(move |request| {
+            interface
+                .control_out(
+                    ControlOut {
+                        control_type: ControlType::Vendor,
+                        recipient: Recipient::Device,
+                        request: request.request as u8,
+                        value: request.value,
+                        index: request.index,
+                        data: &request.data,
+                    },
+                    timeout,
+                )
+                .map_err(Error::from)
+        })
     }
 }
 

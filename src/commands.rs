@@ -48,6 +48,7 @@ pub(crate) enum Capability {
     BiasTee = 11,
     Packing = 12,
     RfPortSelect = 13,
+    Bandwidth = 18,
     Rx = 20,
     ExtendedGain = 22,
 }

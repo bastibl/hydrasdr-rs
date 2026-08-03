@@ -48,7 +48,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
-        .open_async()
+        .open()
         .await?;
 
     println!(

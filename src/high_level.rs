@@ -1,13 +1,15 @@
 //! HydraSDR RFOne sync and async APIs.
 
+use nusb::MaybeFuture;
+
 use crate::commands::ReceiverMode;
 use crate::config::{
     Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, RfPort, SampleFormat,
-    apply_gain_direct_async, validate_bandwidth, validate_frequency, validate_gain,
-    validate_sample_rate,
+    validate_bandwidth, validate_frequency, validate_gain, validate_sample_rate,
 };
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
+use crate::maybe_future::{Either, MaybeFutureExt, ready};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -18,9 +20,7 @@ use crate::streaming::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::streaming::{DirectRxStream, RawRxStream as DirectRawRxStream, StreamingBackend};
 use crate::types::DeviceInfo;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::usb::control::ControlBackend;
-use crate::usb::control::{AsyncControlBackend, NusbControl};
+use crate::usb::control::{ControlBackend, NusbControl};
 
 /// High-level owned HydraSDR RFOne device handle.
 ///
@@ -28,7 +28,7 @@ use crate::usb::control::{AsyncControlBackend, NusbControl};
 /// examples live on [`crate::Config`] and [`crate::ConfigBuilder`].
 ///
 /// ```no_run
-/// use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+/// use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 ///
 /// fn main() -> hydrasdr_rs::Result<()> {
 ///     let mut dev = Device::builder()
@@ -37,7 +37,8 @@ use crate::usb::control::{AsyncControlBackend, NusbControl};
 ///         .sample_format(SampleFormat::RawAdc)
 ///         .rf_port(RfPort::Rx0)
 ///         .gain(GainPreset::Linearity(12))
-///         .open()?;
+///         .open()
+///         .wait()?;
 ///
 ///     let mut rx = dev.raw_rx_stream()?;
 ///     if let Some(block) = rx.next_block()? {
@@ -64,14 +65,8 @@ pub struct Device {
 
 impl Device {
     /// List visible HydraSDR RFOne USB devices without opening them.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn list() -> Result<Vec<crate::DeviceDescriptor>> {
+    pub fn list() -> impl MaybeFuture<Output = Result<Vec<crate::DeviceDescriptor>>> {
         crate::discovery::list_devices()
-    }
-
-    /// Async counterpart to [`Device::list`].
-    pub async fn list_async() -> Result<Vec<crate::DeviceDescriptor>> {
-        crate::discovery::list_devices_async().await
     }
 
     /// Start building and opening a high-level USB device.
@@ -80,34 +75,22 @@ impl Device {
     }
 
     /// Open the first visible HydraSDR RFOne with default high-level configuration.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open() -> Result<Self> {
+    pub fn open() -> impl MaybeFuture<Output = Result<Self>> {
         Self::builder().open()
     }
 
     /// Open one visible HydraSDR RFOne by serial with default high-level configuration.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_serial(serial: u64) -> Result<Self> {
+    pub fn open_serial(serial: u64) -> impl MaybeFuture<Output = Result<Self>> {
         Self::builder().serial(serial).open()
-    }
-
-    /// Async counterpart to [`Device::open`].
-    pub async fn open_async() -> Result<Self> {
-        Self::builder().open_async().await
-    }
-
-    /// Async counterpart to [`Device::open_serial`].
-    pub async fn open_serial_async(serial: u64) -> Result<Self> {
-        Self::builder().serial(serial).open_async().await
     }
 
     /// Ask the browser to grant WebUSB access to a HydraSDR without opening it.
     ///
     /// Call this from a browser-window user gesture. After permission is granted,
-    /// [`Device::open_async`] may discover and open the device from a Web Worker.
+    /// [`Device::open`] may discover and open the device from a Web Worker.
     #[cfg(target_arch = "wasm32")]
-    pub async fn request_permission_async() -> Result<()> {
-        Self::builder().request_permission_async().await
+    pub async fn request_permission() -> Result<()> {
+        Self::builder().request_permission().await
     }
 
     /// Return cached device metadata.
@@ -116,72 +99,51 @@ impl Device {
     }
 
     /// Refresh and return device metadata.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn refresh_info(&mut self) -> Result<&DeviceInfo> {
+    pub fn refresh_info(&mut self) -> impl MaybeFuture<Output = Result<&DeviceInfo>> {
         self.inner.refresh_info()
     }
 
     /// Query supported sample rates.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn sample_rates(&mut self) -> Result<Vec<u32>> {
+    pub fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
         self.inner.direct.get_samplerates()
     }
 
     /// Query supported analog bandwidths.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn bandwidths(&mut self) -> Result<Vec<u32>> {
+    pub fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
         self.inner.direct.get_bandwidths()
     }
 
     /// Apply a high-level receiver configuration.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn configure(&mut self, config: &Config) -> Result<()> {
+    pub fn configure(&mut self, config: &Config) -> impl MaybeFuture<Output = Result<()>> {
         self.inner.configure(config)
     }
 
-    /// Apply a high-level receiver configuration through async control requests.
-    pub async fn configure_async(&mut self, config: &Config) -> Result<()> {
-        self.inner.configure_async(config).await
+    /// Set only the tuned center frequency.
+    pub fn set_frequency_hz(&mut self, frequency_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.set_frequency_hz(frequency_hz)
     }
 
-    /// Set only the tuned center frequency through an async control request.
-    pub async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
-        self.inner.set_frequency_hz_async(frequency_hz).await
+    /// Set only the sample rate.
+    pub fn set_sample_rate_hz(
+        &mut self,
+        sample_rate_hz: u32,
+    ) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.set_sample_rate_hz(sample_rate_hz)
     }
 
-    /// Set only the sample rate through async control requests.
-    pub async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
-        self.inner.set_sample_rate_hz_async(sample_rate_hz).await
+    /// Set only the manual analog bandwidth.
+    pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.set_bandwidth_hz(bandwidth_hz)
     }
 
-    /// Set only the manual analog bandwidth through async control requests.
-    pub async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
-        self.inner.set_bandwidth_hz_async(bandwidth_hz).await
+    /// Set only the selected RF input port.
+    pub fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.set_rf_port(port)
     }
 
-    /// Set only the selected RF input port through an async control request.
-    pub async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
-        self.inner.set_rf_port_async(port).await
-    }
-
-    /// Apply only the supplied gain update through async control requests.
-    pub async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
-        self.inner.set_gain_async(gain).await
-    }
-
-    /// Refresh and return device metadata through async control requests.
-    pub async fn refresh_info_async(&mut self) -> Result<&DeviceInfo> {
-        self.inner.refresh_info_async().await
-    }
-
-    /// Query supported sample rates through async control requests.
-    pub async fn sample_rates_async(&mut self) -> Result<Vec<u32>> {
-        self.inner.direct.get_samplerates_async().await
-    }
-
-    /// Query supported analog bandwidths through async control requests.
-    pub async fn bandwidths_async(&mut self) -> Result<Vec<u32>> {
-        self.inner.direct.get_bandwidths_async().await
+    /// Apply only the supplied gain update.
+    pub fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.set_gain(gain)
     }
 
     /// Start a synchronous receive stream for raw ADC USB blocks.
@@ -253,44 +215,6 @@ impl<C> DeviceInner<C> {
 #[cfg(not(target_arch = "wasm32"))]
 impl<C> DeviceInner<C>
 where
-    C: ControlBackend,
-{
-    /// Wrap an already-open direct handle and query device metadata.
-    pub(crate) fn from_direct(mut direct: HydraSdr<C>) -> Result<Self> {
-        let info = direct.get_device_info()?;
-        Ok(Self {
-            direct,
-            info: Some(info),
-            sample_format: SampleFormat::F32Iq,
-        })
-    }
-
-    /// Refresh and return direct device metadata.
-    pub(crate) fn refresh_info(&mut self) -> Result<&DeviceInfo> {
-        let current_config = self
-            .info
-            .as_ref()
-            .and_then(|info| info.current_config.clone());
-        let mut info = self.direct.get_device_info()?;
-        info.current_config = current_config;
-        self.info = Some(info);
-        Ok(self.info())
-    }
-
-    /// Apply a high-level receiver configuration through the direct layer.
-    pub(crate) fn configure(&mut self, config: &Config) -> Result<()> {
-        config.apply_direct(&mut self.direct)?;
-        self.sample_format = config.sample_format();
-        if let Some(info) = &mut self.info {
-            info.current_config = Some(config.clone());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl<C> DeviceInner<C>
-where
     C: ControlBackend + StreamingBackend,
 {
     /// Start a synchronous receive stream for raw ADC USB blocks.
@@ -322,111 +246,133 @@ where
 
 impl<C> DeviceInner<C>
 where
-    C: AsyncControlBackend,
+    C: ControlBackend,
 {
-    /// Wrap an already-open direct handle and query device metadata asynchronously.
-    pub(crate) async fn from_direct_async(mut direct: HydraSdr<C>) -> Result<Self> {
-        let info = direct.get_device_info_async().await?;
-        Ok(Self {
-            direct,
-            info: Some(info),
-            sample_format: SampleFormat::F32Iq,
+    /// Apply a high-level receiver configuration through the direct layer.
+    pub(crate) fn configure(
+        &mut self,
+        config: &Config,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let operation = self.direct.configure(config);
+        let sample_format = &mut self.sample_format;
+        let info = &mut self.info;
+        let config = config.clone();
+        operation.map(move |result| {
+            result?;
+            *sample_format = config.sample_format();
+            if let Some(info) = info {
+                info.current_config = Some(config);
+            }
+            Ok(())
         })
     }
 
-    /// Apply a high-level receiver configuration through the direct async layer.
-    pub(crate) async fn configure_async(&mut self, config: &Config) -> Result<()> {
-        config.apply_direct_async(&mut self.direct).await?;
-        self.sample_format = config.sample_format();
-        if let Some(info) = &mut self.info {
-            info.current_config = Some(config.clone());
-        }
-        Ok(())
+    fn set_frequency_hz(
+        &mut self,
+        frequency_hz: u64,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let operation = self.direct.set_freq(frequency_hz);
+        let info = &mut self.info;
+        ready(validate_frequency(frequency_hz))
+            .and_then(move |()| operation)
+            .map(move |result| {
+                result?;
+                if let Some(config) = current_config_mut(info) {
+                    config.update_frequency_hz(frequency_hz);
+                }
+                Ok(())
+            })
     }
 
-    async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
-        validate_frequency(frequency_hz)?;
-        self.direct.set_freq_async(frequency_hz).await?;
-        if let Some(config) = self
-            .info
-            .as_mut()
-            .and_then(|info| info.current_config.as_mut())
-        {
-            config.update_frequency_hz(frequency_hz);
-        }
-        Ok(())
+    fn set_sample_rate_hz(
+        &mut self,
+        sample_rate_hz: u32,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let validation = validate_sample_rate(sample_rate_hz, self.sample_format);
+        let operation = self.direct.set_samplerate(sample_rate_hz);
+        let info = &mut self.info;
+        ready(validation)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                result?;
+                if let Some(config) = current_config_mut(info) {
+                    config.update_sample_rate_hz(sample_rate_hz);
+                }
+                Ok(())
+            })
     }
 
-    async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
-        validate_sample_rate(sample_rate_hz, self.sample_format)?;
-        self.direct.set_samplerate_async(sample_rate_hz).await?;
-        if let Some(config) = self
-            .info
-            .as_mut()
-            .and_then(|info| info.current_config.as_mut())
-        {
-            config.update_sample_rate_hz(sample_rate_hz);
-        }
-        Ok(())
-    }
-
-    async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+    fn set_bandwidth_hz(
+        &mut self,
+        bandwidth_hz: u32,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
-        validate_bandwidth(bandwidth)?;
-        self.direct.set_bandwidth_async(bandwidth_hz).await?;
-        if let Some(config) = self
-            .info
-            .as_mut()
-            .and_then(|info| info.current_config.as_mut())
-        {
-            config.update_bandwidth(bandwidth);
-        }
-        Ok(())
+        let operation = self.direct.set_bandwidth(bandwidth_hz);
+        let info = &mut self.info;
+        ready(validate_bandwidth(bandwidth))
+            .and_then(move |()| operation)
+            .map(move |result| {
+                result?;
+                if let Some(config) = current_config_mut(info) {
+                    config.update_bandwidth(bandwidth);
+                }
+                Ok(())
+            })
     }
 
-    async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
-        self.direct.set_rf_port_async(port).await?;
-        if let Some(config) = self
-            .info
-            .as_mut()
-            .and_then(|info| info.current_config.as_mut())
-        {
-            config.update_rf_port(port);
-        }
-        Ok(())
+    fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let operation = self.direct.set_rf_port(port);
+        let info = &mut self.info;
+        operation.map(move |result| {
+            result?;
+            if let Some(config) = current_config_mut(info) {
+                config.update_rf_port(port);
+            }
+            Ok(())
+        })
     }
 
-    async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
-        validate_gain(gain)?;
-        apply_gain_direct_async(&mut self.direct, gain).await?;
-        if let Some(config) = self
-            .info
-            .as_mut()
-            .and_then(|info| info.current_config.as_mut())
-        {
-            config.update_gain(gain);
-        }
-        Ok(())
+    fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let operation = self.direct.set_gain_config(gain);
+        let info = &mut self.info;
+        ready(validate_gain(gain))
+            .and_then(move |()| operation)
+            .map(move |result| {
+                result?;
+                if let Some(config) = current_config_mut(info) {
+                    config.update_gain(gain);
+                }
+                Ok(())
+            })
     }
 
-    /// Refresh and return direct device metadata through the async layer.
-    pub(crate) async fn refresh_info_async(&mut self) -> Result<&DeviceInfo> {
+    /// Refresh and return direct device metadata.
+    pub(crate) fn refresh_info(
+        &mut self,
+    ) -> impl MaybeFuture<Output = Result<&DeviceInfo>> + use<'_, C> {
         let current_config = self
             .info
             .as_ref()
             .and_then(|info| info.current_config.clone());
-        let mut info = self.direct.get_device_info_async().await?;
-        info.current_config = current_config;
-        self.info = Some(info);
-        Ok(self.info())
+        let operation = self.direct.get_device_info();
+        let info_slot = &mut self.info;
+        operation.map(move |result| {
+            let mut info = result?;
+            info.current_config = current_config;
+            *info_slot = Some(info);
+            Ok(info_slot.as_ref().expect("just populated"))
+        })
     }
+}
+
+fn current_config_mut(info: &mut Option<DeviceInfo>) -> Option<&mut Config> {
+    info.as_mut().and_then(|info| info.current_config.as_mut())
 }
 
 /// Builder that selects, opens, and initially configures a high-level `nusb` device.
 ///
 /// Use [`DeviceBuilder::config`] to validate the same high-level settings without
-/// opening hardware, or [`DeviceBuilder::open`] / [`DeviceBuilder::open_async`]
-/// to apply them to a selected RFOne.
+/// opening hardware, or [`DeviceBuilder::open`] to apply them to a selected RFOne.
 ///
 /// ```
 /// use hydrasdr_rs::{Device, GainPreset, SampleFormat};
@@ -467,14 +413,14 @@ impl DeviceBuilder {
     ///
     /// This only performs the browser permission request; it does not open or
     /// configure the device. Call it from a browser-window user gesture, then
-    /// use [`DeviceBuilder::open_async`] from either the window or a Web Worker.
+    /// use [`DeviceBuilder::open`] from either the window or a Web Worker.
     #[cfg(target_arch = "wasm32")]
-    pub async fn request_permission_async(&self) -> Result<()> {
+    pub async fn request_permission(&self) -> Result<()> {
         let serial = match self.selector {
             DeviceSelector::First => None,
             DeviceSelector::Serial(serial) => Some(serial),
         };
-        crate::discovery::request_device_permission_async(serial).await
+        crate::discovery::request_device_permission(serial).await
     }
 
     /// Set the tuned center frequency in Hz.
@@ -565,39 +511,40 @@ impl DeviceBuilder {
         self.config.build()
     }
 
-    /// Open and configure the selected device synchronously.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(self) -> Result<Device> {
+    /// Open and configure the selected device.
+    ///
+    /// Await this operation in async code, or call [`MaybeFuture::wait`] on native targets.
+    pub fn open(self) -> impl MaybeFuture<Output = Result<Device>> {
         let selector = self.selector;
-        let config = self.config.build()?;
-        let direct = match selector {
-            DeviceSelector::First => HydraSdr::open()?,
-            DeviceSelector::Serial(serial) => HydraSdr::open_sn(serial)?,
-        };
-        let mut inner = DeviceInner::from_direct(direct)
-            .map_err(|error| error.at("reading HydraSDR device metadata"))?;
-        inner
-            .configure(&config)
-            .map_err(|error| error.at("applying initial HydraSDR configuration"))?;
-        Ok(Device { inner })
-    }
-
-    /// Open and configure the selected device asynchronously.
-    pub async fn open_async(self) -> Result<Device> {
-        let selector = self.selector;
-        let config = self.config.build()?;
-        let direct = match selector {
-            DeviceSelector::First => HydraSdr::open_async().await?,
-            DeviceSelector::Serial(serial) => HydraSdr::open_sn_async(serial).await?,
-        };
-        let mut inner = DeviceInner::from_direct_async(direct)
-            .await
-            .map_err(|error| error.at("reading HydraSDR device metadata"))?;
-        inner
-            .configure_async(&config)
-            .await
-            .map_err(|error| error.at("applying initial HydraSDR configuration"))?;
-        Ok(Device { inner })
+        ready(self.config.build()).and_then(move |config| {
+            let open = match selector {
+                DeviceSelector::First => Either::left(HydraSdr::open()),
+                DeviceSelector::Serial(serial) => Either::right(HydraSdr::open_sn(serial)),
+            };
+            open.and_then(move |direct| {
+                direct
+                    .into_device_info()
+                    .map_err(|error| error.at("reading HydraSDR device metadata"))
+                    .and_then(move |(direct, mut info)| {
+                        let sample_format = config.sample_format();
+                        let saved_config = config.clone();
+                        direct
+                            .into_configured(config)
+                            .map_err(|error| error.at("applying initial HydraSDR configuration"))
+                            .map(move |result| {
+                                let direct = result?;
+                                info.current_config = Some(saved_config);
+                                Ok(Device {
+                                    inner: DeviceInner {
+                                        direct,
+                                        info: Some(info),
+                                        sample_format,
+                                    },
+                                })
+                            })
+                    })
+            })
+        })
     }
 }
 
@@ -841,7 +788,7 @@ enum AsyncReceiverState {
     Running,
 }
 
-pub(crate) struct AsyncRawRxStreamInner<C: AsyncControlBackend + AsyncStreamingBackend> {
+pub(crate) struct AsyncRawRxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -850,7 +797,7 @@ pub(crate) struct AsyncRawRxStreamInner<C: AsyncControlBackend + AsyncStreamingB
 
 impl<C> AsyncRawRxStreamInner<C>
 where
-    C: AsyncControlBackend + AsyncStreamingBackend,
+    C: ControlBackend + AsyncStreamingBackend,
 {
     fn new(device: DeviceInner<C>) -> Self {
         Self {
@@ -872,7 +819,7 @@ where
         device.ensure_raw_adc_stream_format()?;
         self.state = AsyncReceiverState::StopRequired;
         if self.stream.is_some() {
-            device.direct.receiver_mode_async(ReceiverMode::Rx).await?;
+            device.direct.receiver_mode(ReceiverMode::Rx).await?;
             self.state = AsyncReceiverState::Running;
             return Ok(());
         }
@@ -910,7 +857,7 @@ where
             .as_ref()
             .expect("owned async stream retains its device")
             .direct
-            .receiver_mode_async(ReceiverMode::Off)
+            .receiver_mode(ReceiverMode::Off)
             .await?;
         self.state = AsyncReceiverState::Stopped;
         if let Some(stream) = self.stream.as_mut() {
@@ -932,7 +879,7 @@ where
 
 impl<C> Drop for AsyncRawRxStreamInner<C>
 where
-    C: AsyncControlBackend + AsyncStreamingBackend,
+    C: ControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
         if let Some(mut stream) = self.stream.take() {
@@ -989,7 +936,7 @@ impl AsyncRawRxStream {
 }
 
 /// Owned async stream state for converted `F32Iq` samples.
-pub(crate) struct AsyncF32RxStreamInner<C: AsyncControlBackend + AsyncStreamingBackend> {
+pub(crate) struct AsyncF32RxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -998,7 +945,7 @@ pub(crate) struct AsyncF32RxStreamInner<C: AsyncControlBackend + AsyncStreamingB
 
 impl<C> AsyncF32RxStreamInner<C>
 where
-    C: AsyncControlBackend + AsyncStreamingBackend,
+    C: ControlBackend + AsyncStreamingBackend,
 {
     fn new(device: DeviceInner<C>) -> Self {
         Self {
@@ -1021,7 +968,7 @@ where
         if let Some(stream) = self.stream.as_mut() {
             stream.set_decimation_factor(device.direct.streaming_decimation_factor())?;
             self.state = AsyncReceiverState::StopRequired;
-            device.direct.receiver_mode_async(ReceiverMode::Rx).await?;
+            device.direct.receiver_mode(ReceiverMode::Rx).await?;
             self.state = AsyncReceiverState::Running;
             return Ok(());
         }
@@ -1054,30 +1001,30 @@ where
             .expect("owned async stream retains its device"))
     }
 
-    async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
+    async fn set_frequency_hz(&mut self, frequency_hz: u64) -> Result<()> {
         self.stopped_device_mut()?
-            .set_frequency_hz_async(frequency_hz)
+            .set_frequency_hz(frequency_hz)
             .await
     }
 
-    async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
+    async fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
         self.stopped_device_mut()?
-            .set_sample_rate_hz_async(sample_rate_hz)
+            .set_sample_rate_hz(sample_rate_hz)
             .await
     }
 
-    async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
+    async fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
         self.stopped_device_mut()?
-            .set_bandwidth_hz_async(bandwidth_hz)
+            .set_bandwidth_hz(bandwidth_hz)
             .await
     }
 
-    async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
-        self.stopped_device_mut()?.set_rf_port_async(port).await
+    async fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
+        self.stopped_device_mut()?.set_rf_port(port).await
     }
 
-    async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
-        self.stopped_device_mut()?.set_gain_async(gain).await
+    async fn set_gain(&mut self, gain: GainConfig) -> Result<()> {
+        self.stopped_device_mut()?.set_gain(gain).await
     }
 
     async fn stop(&mut self) -> Result<StreamingStats> {
@@ -1088,7 +1035,7 @@ where
             .as_ref()
             .expect("owned async stream retains its device")
             .direct
-            .receiver_mode_async(ReceiverMode::Off)
+            .receiver_mode(ReceiverMode::Off)
             .await?;
         self.state = AsyncReceiverState::Stopped;
         if let Some(stream) = self.stream.as_mut() {
@@ -1110,7 +1057,7 @@ where
 
 impl<C> Drop for AsyncF32RxStreamInner<C>
 where
-    C: AsyncControlBackend + AsyncStreamingBackend,
+    C: ControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
         if let Some(mut stream) = self.stream.take() {
@@ -1149,28 +1096,28 @@ impl AsyncF32RxStream {
     }
 
     /// Set only the tuned center frequency while the receiver is stopped.
-    pub async fn set_frequency_hz_async(&mut self, frequency_hz: u64) -> Result<()> {
-        self.inner.set_frequency_hz_async(frequency_hz).await
+    pub async fn set_frequency_hz(&mut self, frequency_hz: u64) -> Result<()> {
+        self.inner.set_frequency_hz(frequency_hz).await
     }
 
     /// Set only the sample rate while the receiver is stopped.
-    pub async fn set_sample_rate_hz_async(&mut self, sample_rate_hz: u32) -> Result<()> {
-        self.inner.set_sample_rate_hz_async(sample_rate_hz).await
+    pub async fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
+        self.inner.set_sample_rate_hz(sample_rate_hz).await
     }
 
     /// Set only the manual analog bandwidth while the receiver is stopped.
-    pub async fn set_bandwidth_hz_async(&mut self, bandwidth_hz: u32) -> Result<()> {
-        self.inner.set_bandwidth_hz_async(bandwidth_hz).await
+    pub async fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
+        self.inner.set_bandwidth_hz(bandwidth_hz).await
     }
 
     /// Set only the RF input port while the receiver is stopped.
-    pub async fn set_rf_port_async(&mut self, port: RfPort) -> Result<()> {
-        self.inner.set_rf_port_async(port).await
+    pub async fn set_rf_port(&mut self, port: RfPort) -> Result<()> {
+        self.inner.set_rf_port(port).await
     }
 
     /// Apply only the supplied gain update while the receiver is stopped.
-    pub async fn set_gain_async(&mut self, gain: GainConfig) -> Result<()> {
-        self.inner.set_gain_async(gain).await
+    pub async fn set_gain(&mut self, gain: GainConfig) -> Result<()> {
+        self.inner.set_gain(gain).await
     }
 
     /// Stop the receiver, retain the transfer queue for restart, and return counters.
@@ -1217,22 +1164,58 @@ mod tests {
         state: Arc<FakeState>,
     }
 
-    impl AsyncControlBackend for FakeControl {
-        async fn control_in_async(&self, request: VendorControlRequest) -> Result<Vec<u8>> {
-            if request == VendorControlRequest::get_samplerates_count(false) {
-                return Ok(1u32.to_le_bytes().to_vec());
-            }
-            if request == VendorControlRequest::get_samplerates(1, false) {
-                return Ok(10_000_000u32.to_le_bytes().to_vec());
-            }
-            Ok(vec![1])
+    impl ControlBackend for FakeControl {
+        fn control_in(
+            &self,
+            request: VendorControlRequest,
+        ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<> {
+            let result = if request == VendorControlRequest::get_samplerates_count(false) {
+                Ok(1u32.to_le_bytes().to_vec())
+            } else if request == VendorControlRequest::get_samplerates(1, false) {
+                Ok(10_000_000u32.to_le_bytes().to_vec())
+            } else {
+                Ok(vec![1])
+            };
+            ready(result)
         }
 
-        async fn control_out_async(&self, _request: VendorControlRequest) -> Result<()> {
-            let call = self.state.control_out_count.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.state.pause_control_out_at.load(Ordering::SeqCst) == call {
-                core::future::pending::<()>().await;
+        fn control_out(
+            &self,
+            _request: VendorControlRequest,
+        ) -> impl MaybeFuture<Output = Result<()>> + use<> {
+            FakeControlOut {
+                state: Arc::clone(&self.state),
             }
+        }
+    }
+
+    struct FakeControlOut {
+        state: Arc<FakeState>,
+    }
+
+    impl std::future::IntoFuture for FakeControlOut {
+        type Output = Result<()>;
+        type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+        fn into_future(self) -> Self::IntoFuture {
+            Box::pin(async move {
+                let call = self.state.control_out_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.state.pause_control_out_at.load(Ordering::SeqCst) == call {
+                    core::future::pending::<()>().await;
+                }
+                if self.state.fail_control_out.load(Ordering::SeqCst) {
+                    Err(nusb::transfer::TransferError::Fault.into())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    impl MaybeFuture for FakeControlOut {
+        #[cfg(not(target_arch = "wasm32"))]
+        fn wait(self) -> Result<()> {
+            self.state.control_out_count.fetch_add(1, Ordering::SeqCst);
             if self.state.fail_control_out.load(Ordering::SeqCst) {
                 Err(nusb::transfer::TransferError::Fault.into())
             } else {
@@ -1375,17 +1358,17 @@ mod tests {
 
             stream.start().await.expect("start owned async F32 stream");
             assert!(matches!(
-                stream.set_frequency_hz_async(915_000_000).await,
+                stream.set_frequency_hz(915_000_000).await,
                 Err(Error::Busy)
             ));
             stream.stop().await.expect("stop owned async F32 stream");
 
             stream
-                .set_frequency_hz_async(915_000_000)
+                .set_frequency_hz(915_000_000)
                 .await
                 .expect("set focused frequency while stopped");
             stream
-                .set_sample_rate_hz_async(2_500_000)
+                .set_sample_rate_hz(2_500_000)
                 .await
                 .expect("set focused sample rate while stopped");
             assert_eq!(

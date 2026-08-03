@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard};
 
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 static HARDWARE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -14,7 +14,7 @@ fn hardware_test_lock() -> MutexGuard<'static, ()> {
 #[ignore = "requires a connected HydraSDR RFOne and USB permissions; run with `cargo test --test hardware -- --ignored --nocapture`"]
 fn hardware_open_and_query_device_info() {
     let _lock = hardware_test_lock();
-    let dev = Device::open().expect("open HydraSDR RFOne");
+    let dev = Device::open().wait().expect("open HydraSDR RFOne");
     let info = dev.info();
 
     assert!(
@@ -37,9 +37,10 @@ fn hardware_configure_frequency_sample_rate_and_gains() {
         .gain(GainPreset::Linearity(10))
         .bias_tee(false)
         .open()
+        .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    let info = dev.refresh_info().expect("refresh device info");
+    let info = dev.refresh_info().wait().expect("refresh device info");
     assert_eq!(
         info.current_config
             .as_ref()
@@ -59,6 +60,7 @@ fn hardware_short_rx_stream_smoke_test() {
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Sensitivity(8))
         .open()
+        .wait()
         .expect("open and configure HydraSDR RFOne");
 
     let mut rx = dev.raw_rx_stream().expect("start RX stream");
@@ -86,6 +88,7 @@ fn hardware_f32_rx_stream_smoke_test() {
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Sensitivity(8))
         .open()
+        .wait()
         .expect("open and configure HydraSDR RFOne");
 
     let mut rx = dev.f32_rx_stream().expect("start F32 IQ stream");
