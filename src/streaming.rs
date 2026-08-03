@@ -260,6 +260,7 @@ pub(crate) struct AsyncRawRxStream<B: AsyncBulkInBackend> {
     config: StreamingConfig,
     stats: StreamingStats,
     current: Option<B::Buffer>,
+    discard_remaining: usize,
     closed: bool,
 }
 
@@ -273,6 +274,7 @@ pub(crate) struct AsyncDirectRxStream<B: AsyncBulkInBackend> {
     pending: Vec<(f32, f32)>,
     pending_start: usize,
     stats: StreamingStats,
+    discard_remaining: usize,
     closed: bool,
 }
 
@@ -289,6 +291,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
             config,
             stats: StreamingStats::default(),
             current: None,
+            discard_remaining: 0,
             closed: false,
         })
     }
@@ -303,10 +306,18 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
             self.bulk_in_mut()?.submit(buffer);
         }
 
-        let completion = self.bulk_in_mut()?.next_complete_async().await;
-        completion.status?;
-        let buffer = completion.buffer;
-        let actual_len = completion.actual_len;
+        let (buffer, actual_len) = loop {
+            let completion = self.bulk_in_mut()?.next_complete_async().await;
+            if self.discard_remaining != 0 {
+                self.discard_remaining -= 1;
+                self.stats.buffers_received += 1;
+                self.stats.buffers_dropped += 1;
+                self.bulk_in_mut()?.submit(completion.buffer);
+                continue;
+            }
+            completion.status?;
+            break (completion.buffer, completion.actual_len);
+        };
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
             return Err(Error::protocol(
@@ -327,6 +338,23 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
             sample_count,
             dropped_samples,
         }))
+    }
+
+    /// Preserve the endpoint queue while discarding data from before the next restart.
+    pub(crate) fn pause(&mut self) -> Result<()> {
+        if let Some(buffer) = self.current.take() {
+            self.bulk_in_mut()?.submit(buffer);
+        }
+        self.discard_remaining = self
+            .bulk_in
+            .as_ref()
+            .ok_or(Error::stream_closed("async raw RX stream is closed"))?
+            .pending();
+        Ok(())
+    }
+
+    pub(crate) fn stats(&self) -> StreamingStats {
+        self.stats
     }
 
     /// Close the USB queue, cancelling pending transfers where supported.
@@ -371,8 +399,27 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             pending: Vec::new(),
             pending_start: 0,
             stats: StreamingStats::default(),
+            discard_remaining: 0,
             closed: false,
         })
+    }
+
+    /// Preserve the endpoint queue while discarding data from before the next restart.
+    pub(crate) fn pause(&mut self) -> Result<()> {
+        self.converter = Float32IqConverter::default();
+        self.converted.clear();
+        self.pending.clear();
+        self.pending_start = 0;
+        self.discard_remaining = self
+            .bulk_in
+            .as_ref()
+            .ok_or(Error::stream_closed("async direct RX stream is closed"))?
+            .pending();
+        Ok(())
+    }
+
+    pub(crate) fn stats(&self) -> StreamingStats {
+        self.stats
     }
 
     /// Close the USB queue, cancelling pending transfers where supported.
@@ -409,14 +456,26 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             return Ok(written);
         }
 
-        let bulk_in = self
-            .bulk_in
-            .as_mut()
-            .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
-        let completion = bulk_in.next_complete_async().await;
-        completion.status?;
-        let buffer = completion.buffer;
-        let actual_len = completion.actual_len;
+        let (buffer, actual_len) = loop {
+            let bulk_in = self
+                .bulk_in
+                .as_mut()
+                .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+            let completion = bulk_in.next_complete_async().await;
+            if self.discard_remaining != 0 {
+                self.discard_remaining -= 1;
+                self.stats.buffers_received += 1;
+                self.stats.buffers_dropped += 1;
+                let bulk_in = self
+                    .bulk_in
+                    .as_mut()
+                    .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+                bulk_in.submit(completion.buffer);
+                continue;
+            }
+            completion.status?;
+            break (completion.buffer, completion.actual_len);
+        };
         if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
             self.stats.buffers_dropped += 1;
             return Err(Error::protocol(

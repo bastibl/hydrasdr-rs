@@ -716,6 +716,7 @@ pub(crate) struct AsyncRawRxStreamInner<C: AsyncControlBackend + AsyncStreamingB
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
     receiver_needs_stop: bool,
+    active: bool,
 }
 
 impl<C> AsyncRawRxStreamInner<C>
@@ -728,11 +729,12 @@ where
             stream: None,
             stats: StreamingStats::default(),
             receiver_needs_stop: false,
+            active: false,
         }
     }
 
     async fn start(&mut self) -> Result<()> {
-        if self.stream.is_some() {
+        if self.active {
             return Ok(());
         }
         let device = self
@@ -741,8 +743,14 @@ where
             .expect("owned async stream retains its device");
         device.ensure_raw_adc_stream_format()?;
         self.receiver_needs_stop = true;
+        if self.stream.is_some() {
+            device.direct.receiver_mode_async(ReceiverMode::Rx).await?;
+            self.active = true;
+            return Ok(());
+        }
         let stream = device.direct.start_raw_rx_stream_async().await?;
         self.stream = Some(stream);
+        self.active = true;
         Ok(())
     }
 
@@ -773,8 +781,10 @@ where
                 .await?;
             self.receiver_needs_stop = false;
         }
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
+        self.active = false;
+        if let Some(stream) = self.stream.as_mut() {
+            stream.pause()?;
+            self.stats = stream.stats();
         }
         Ok(self.stats)
     }
@@ -803,7 +813,8 @@ where
 /// Owned async raw ADC block stream.
 ///
 /// This stream retains the device and one persistent USB transfer queue. Call
-/// [`AsyncRawRxStream::finish`] to stop the receiver asynchronously, then
+/// [`AsyncRawRxStream::finish`] to stop the receiver asynchronously while preserving
+/// the queue for another [`AsyncRawRxStream::start`], then
 /// [`AsyncRawRxStream::into_device`] to recover the device. Dropping an unfinished
 /// stream closes the transfer queue and device handle, but cannot perform asynchronous
 /// receiver-off cleanup. WebUSB cannot cancel pending transfers, so explicit shutdown
@@ -828,7 +839,7 @@ impl AsyncRawRxStream {
         self.inner.next_block().await
     }
 
-    /// Close the transfer queue, stop the receiver, and return streaming counters.
+    /// Stop the receiver, retain the transfer queue for restart, and return counters.
     ///
     /// Cancellation leaves this stream available so cleanup can be retried.
     pub async fn finish(&mut self) -> Result<StreamingStats> {
@@ -852,6 +863,7 @@ pub(crate) struct AsyncF32RxStreamInner<C: AsyncControlBackend + AsyncStreamingB
     stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
     receiver_needs_stop: bool,
+    active: bool,
 }
 
 impl<C> AsyncF32RxStreamInner<C>
@@ -864,11 +876,12 @@ where
             stream: None,
             stats: StreamingStats::default(),
             receiver_needs_stop: false,
+            active: false,
         }
     }
 
     async fn start(&mut self) -> Result<()> {
-        if self.stream.is_some() {
+        if self.active {
             return Ok(());
         }
         let device = self
@@ -877,8 +890,14 @@ where
             .expect("owned async stream retains its device");
         device.ensure_f32_iq_stream_format()?;
         self.receiver_needs_stop = true;
+        if self.stream.is_some() {
+            device.direct.receiver_mode_async(ReceiverMode::Rx).await?;
+            self.active = true;
+            return Ok(());
+        }
         let stream = device.direct.start_rx_stream_async().await?;
         self.stream = Some(stream);
+        self.active = true;
         Ok(())
     }
 
@@ -901,8 +920,10 @@ where
                 .await?;
             self.receiver_needs_stop = false;
         }
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
+        self.active = false;
+        if let Some(stream) = self.stream.as_mut() {
+            stream.pause()?;
+            self.stats = stream.stats();
         }
         Ok(self.stats)
     }
@@ -931,7 +952,8 @@ where
 /// Owned async converted `F32Iq` stream.
 ///
 /// This stream retains the device and one persistent USB transfer queue. Call
-/// [`AsyncF32RxStream::finish`] to stop the receiver asynchronously, then
+/// [`AsyncF32RxStream::finish`] to stop the receiver asynchronously while preserving
+/// the queue for another [`AsyncF32RxStream::start`], then
 /// [`AsyncF32RxStream::into_device`] to recover the device. Dropping an unfinished
 /// stream closes the transfer queue and device handle, but cannot perform asynchronous
 /// receiver-off cleanup. WebUSB cannot cancel pending transfers, so explicit shutdown
@@ -956,7 +978,7 @@ impl AsyncF32RxStream {
         self.inner.read(out).await
     }
 
-    /// Close the transfer queue, stop the receiver, and return streaming counters.
+    /// Stop the receiver, retain the transfer queue for restart, and return counters.
     ///
     /// Cancellation leaves this stream available so cleanup can be retried.
     pub async fn finish(&mut self) -> Result<StreamingStats> {
@@ -991,6 +1013,7 @@ mod tests {
         control_out_count: AtomicUsize,
         fail_control_out: AtomicBool,
         pause_control_out_at: AtomicUsize,
+        bulk_in_count: AtomicUsize,
         cancel_count: AtomicUsize,
     }
 
@@ -1021,6 +1044,7 @@ mod tests {
         type BulkIn = FakeAsyncBulkIn;
 
         async fn bulk_in_async(&self, _endpoint: u8) -> Result<Self::BulkIn> {
+            self.state.bulk_in_count.fetch_add(1, Ordering::SeqCst);
             Ok(FakeAsyncBulkIn {
                 state: Arc::clone(&self.state),
                 submitted: VecDeque::new(),
@@ -1101,6 +1125,36 @@ mod tests {
             let _device = stream.into_device();
             assert_eq!(stats.buffers_received, 1);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn owned_async_f32_stream_reuses_queue_across_restart() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            let device = fake_device(control, SampleFormat::F32Iq);
+            let mut stream = AsyncF32RxStreamInner::new(device);
+
+            stream.start().await.expect("start owned async F32 stream");
+            let mut first = [(0.0, 0.0); 1];
+            assert_eq!(stream.read(&mut first).await.expect("first read"), 1);
+            stream.finish().await.expect("pause owned async F32 stream");
+            assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+
+            stream
+                .start()
+                .await
+                .expect("restart owned async F32 stream");
+            let mut second = [(0.0, 0.0); 1];
+            assert_eq!(stream.read(&mut second).await.expect("second read"), 1);
+            stream.finish().await.expect("stop owned async F32 stream");
+            assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.cancel_count.load(Ordering::SeqCst), 0);
+
+            let _device = stream.into_device();
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
         });
     }
