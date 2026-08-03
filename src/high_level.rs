@@ -715,7 +715,7 @@ pub(crate) struct AsyncRawRxStreamInner<C: AsyncControlBackend + AsyncStreamingB
     device: Option<DeviceInner<C>>,
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
-    receiver_active: bool,
+    receiver_needs_stop: bool,
 }
 
 impl<C> AsyncRawRxStreamInner<C>
@@ -727,7 +727,7 @@ where
             device: Some(device),
             stream: None,
             stats: StreamingStats::default(),
-            receiver_active: false,
+            receiver_needs_stop: false,
         }
     }
 
@@ -740,8 +740,8 @@ where
             .as_mut()
             .expect("owned async stream retains its device");
         device.ensure_raw_adc_stream_format()?;
+        self.receiver_needs_stop = true;
         let stream = device.direct.start_raw_rx_stream_async().await?;
-        self.receiver_active = true;
         self.stream = Some(stream);
         Ok(())
     }
@@ -764,14 +764,14 @@ where
     }
 
     async fn finish(&mut self) -> Result<StreamingStats> {
-        if self.receiver_active {
+        if self.receiver_needs_stop {
             self.device
                 .as_ref()
                 .expect("owned async stream retains its device")
                 .direct
                 .receiver_mode_async(ReceiverMode::Off)
                 .await?;
-            self.receiver_active = false;
+            self.receiver_needs_stop = false;
         }
         if let Some(mut stream) = self.stream.take() {
             self.stats = stream.close();
@@ -817,7 +817,8 @@ impl AsyncRawRxStream {
     /// Start the receiver and persistent USB transfer queue.
     ///
     /// Repeated calls are no-ops while the stream is already running. Cancellation
-    /// leaves this owned stream and its device available for another start attempt.
+    /// leaves this owned stream and its device available for another start attempt
+    /// or [`AsyncRawRxStream::finish`] cleanup.
     pub async fn start(&mut self) -> Result<()> {
         self.inner.start().await
     }
@@ -850,7 +851,7 @@ pub(crate) struct AsyncF32RxStreamInner<C: AsyncControlBackend + AsyncStreamingB
     device: Option<DeviceInner<C>>,
     stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
-    receiver_active: bool,
+    receiver_needs_stop: bool,
 }
 
 impl<C> AsyncF32RxStreamInner<C>
@@ -862,7 +863,7 @@ where
             device: Some(device),
             stream: None,
             stats: StreamingStats::default(),
-            receiver_active: false,
+            receiver_needs_stop: false,
         }
     }
 
@@ -875,8 +876,8 @@ where
             .as_mut()
             .expect("owned async stream retains its device");
         device.ensure_f32_iq_stream_format()?;
+        self.receiver_needs_stop = true;
         let stream = device.direct.start_rx_stream_async().await?;
-        self.receiver_active = true;
         self.stream = Some(stream);
         Ok(())
     }
@@ -891,14 +892,14 @@ where
     }
 
     async fn finish(&mut self) -> Result<StreamingStats> {
-        if self.receiver_active {
+        if self.receiver_needs_stop {
             self.device
                 .as_ref()
                 .expect("owned async stream retains its device")
                 .direct
                 .receiver_mode_async(ReceiverMode::Off)
                 .await?;
-            self.receiver_active = false;
+            self.receiver_needs_stop = false;
         }
         if let Some(mut stream) = self.stream.take() {
             self.stats = stream.close();
@@ -944,7 +945,8 @@ impl AsyncF32RxStream {
     /// Start the receiver and persistent USB transfer queue.
     ///
     /// Repeated calls are no-ops while the stream is already running. Cancellation
-    /// leaves this owned stream and its device available for another start attempt.
+    /// leaves this owned stream and its device available for another start attempt
+    /// or [`AsyncF32RxStream::finish`] cleanup.
     pub async fn start(&mut self) -> Result<()> {
         self.inner.start().await
     }
@@ -988,6 +990,7 @@ mod tests {
     struct FakeState {
         control_out_count: AtomicUsize,
         fail_control_out: AtomicBool,
+        pause_control_out_at: AtomicUsize,
         cancel_count: AtomicUsize,
     }
 
@@ -1002,7 +1005,10 @@ mod tests {
         }
 
         async fn control_out_async(&self, _request: VendorControlRequest) -> Result<()> {
-            self.state.control_out_count.fetch_add(1, Ordering::SeqCst);
+            let call = self.state.control_out_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.state.pause_control_out_at.load(Ordering::SeqCst) == call {
+                core::future::pending::<()>().await;
+            }
             if self.state.fail_control_out.load(Ordering::SeqCst) {
                 Err(nusb::transfer::TransferError::Fault.into())
             } else {
@@ -1114,6 +1120,52 @@ mod tests {
             assert_eq!(error.kind(), crate::ErrorKind::InvalidConfig);
             assert_eq!(device.sample_format, SampleFormat::RawAdc);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn cancelled_owned_async_raw_start_can_be_finished() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            state.pause_control_out_at.store(2, Ordering::SeqCst);
+            let device = fake_device(control, SampleFormat::RawAdc);
+            let mut stream = AsyncRawRxStreamInner::new(device);
+
+            let mut start = Box::pin(stream.start());
+            assert!(futures_lite::future::poll_once(&mut start).await.is_none());
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+            drop(start);
+
+            stream
+                .finish()
+                .await
+                .expect("finish cancelled owned async raw stream start");
+            let _device = stream.into_device();
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
+        });
+    }
+
+    #[test]
+    fn cancelled_owned_async_f32_start_can_be_finished() {
+        block_on(async {
+            let control = FakeControl::default();
+            let state = Arc::clone(&control.state);
+            state.pause_control_out_at.store(2, Ordering::SeqCst);
+            let device = fake_device(control, SampleFormat::F32Iq);
+            let mut stream = AsyncF32RxStreamInner::new(device);
+
+            let mut start = Box::pin(stream.start());
+            assert!(futures_lite::future::poll_once(&mut start).await.is_none());
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+            drop(start);
+
+            stream
+                .finish()
+                .await
+                .expect("finish cancelled owned async F32 stream start");
+            let _device = stream.into_device();
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
         });
     }
 
