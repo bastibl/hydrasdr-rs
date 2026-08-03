@@ -374,6 +374,10 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
     }
 
     /// Read converted `(I, Q)` float samples into `out`.
+    ///
+    /// Each call returns after copying already-converted samples or processing one
+    /// USB completion. The only await occurs before stream state is consumed, so
+    /// canceling a pending read leaves the queue and buffered samples intact.
     pub(crate) async fn read_float32_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
         if self.closed {
             return Err(Error::stream_closed("async direct RX stream is closed"));
@@ -384,44 +388,40 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
 
         let mut written = 0;
         self.copy_pending(out, &mut written);
-        if written == out.len() {
+        if written != 0 {
             return Ok(written);
         }
 
-        loop {
-            let bulk_in = self
-                .bulk_in
-                .as_mut()
-                .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
-            let completion = bulk_in.next_complete_async().await;
-            completion.status?;
-            let buffer = completion.buffer;
-            let actual_len = completion.actual_len;
-            if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
-                self.stats.buffers_dropped += 1;
-                return Err(Error::status(StatusCode::LibUsb));
-            }
-
-            self.stats.buffers_received += 1;
-            self.converted.clear();
-            self.converter.process_u16le_to_f32iq(
-                &buffer[..actual_len],
-                self.config.decimation_factor,
-                &mut self.converted,
-            );
-            self.stats.buffers_processed += 1;
-
-            let bulk_in = self
-                .bulk_in
-                .as_mut()
-                .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
-            bulk_in.submit(buffer);
-
-            self.copy_converted(out, &mut written);
-            if written == out.len() {
-                return Ok(written);
-            }
+        let bulk_in = self
+            .bulk_in
+            .as_mut()
+            .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+        let completion = bulk_in.next_complete_async().await;
+        completion.status?;
+        let buffer = completion.buffer;
+        let actual_len = completion.actual_len;
+        if actual_len != config_current_buffer_size(self.config) || actual_len > buffer.len() {
+            self.stats.buffers_dropped += 1;
+            return Err(Error::status(StatusCode::LibUsb));
         }
+
+        self.stats.buffers_received += 1;
+        self.converted.clear();
+        self.converter.process_u16le_to_f32iq(
+            &buffer[..actual_len],
+            self.config.decimation_factor,
+            &mut self.converted,
+        );
+        self.stats.buffers_processed += 1;
+
+        let bulk_in = self
+            .bulk_in
+            .as_mut()
+            .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
+        bulk_in.submit(buffer);
+
+        self.copy_converted(out, &mut written);
+        Ok(written)
     }
 
     fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
@@ -687,6 +687,38 @@ mod tests {
             assert_eq!(read, out.len());
             assert_eq!(bulk_in.submit_count, initial_submit_count + 1);
             assert_eq!(bulk_in.pending(), RFONE_TRANSFER_COUNT as usize);
+        });
+    }
+
+    #[test]
+    fn async_f32_read_returns_pending_samples_without_waiting_for_another_completion() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
+                .await
+                .expect("start fake async stream");
+
+            let mut first = [(0.0, 0.0); 1];
+            assert_eq!(
+                stream
+                    .read_float32_iq(&mut first)
+                    .await
+                    .expect("first read"),
+                1
+            );
+            let pending = stream.pending.len() - stream.pending_start;
+            assert!(pending > 0);
+            assert_eq!(stream.stats.buffers_received, 1);
+
+            let mut out = vec![(0.0, 0.0); pending + 1];
+            assert_eq!(
+                stream
+                    .read_float32_iq(&mut out)
+                    .await
+                    .expect("pending read"),
+                pending
+            );
+            assert_eq!(stream.stats.buffers_received, 1);
         });
     }
 }

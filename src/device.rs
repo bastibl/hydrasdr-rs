@@ -316,11 +316,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
     }
 
-    /// Send receiver-off.
-    pub(crate) fn receiver_off_if_needed(&self) -> Result<()> {
-        self.receiver_mode(ReceiverMode::Off)
-    }
-
     fn sample_rate_config(&mut self, samplerate: u32) -> Result<(u16, u32, u32)> {
         if self.sample_rates.is_empty() {
             let _ = self.get_samplerates();
@@ -1005,16 +1000,6 @@ where
         }
     }
 
-    /// Stop a persistent async raw RX stream and return its accumulated counters.
-    pub(crate) async fn stop_raw_rx_stream_async(
-        &mut self,
-        mut stream: AsyncRawRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
-        let stats = stream.close();
-        self.receiver_mode_async(ReceiverMode::Off).await?;
-        Ok(stats)
-    }
-
     /// Start a persistent async pull RX stream for unpacked float32 IQ samples.
     pub(crate) async fn start_rx_stream_async(&mut self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
@@ -1039,16 +1024,6 @@ where
                 Err(err)
             }
         }
-    }
-
-    /// Stop a persistent async pull RX stream and return its accumulated counters.
-    pub(crate) async fn stop_rx_stream_async(
-        &mut self,
-        mut stream: AsyncDirectRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
-        let stats = stream.close();
-        self.receiver_mode_async(ReceiverMode::Off).await?;
-        Ok(stats)
     }
 }
 

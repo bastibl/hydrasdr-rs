@@ -41,7 +41,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     let run_rx = args.iter().any(|arg| arg == "--rx");
     // DeviceBuilder mirrors the synchronous API while staying
     // executor-agnostic at this crate layer.
-    let mut dev = Device::builder()
+    let dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
         .sample_format(SampleFormat::F32Iq)
@@ -62,10 +62,12 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut rx = dev.f32_rx_stream_async().await?;
+        let mut rx = dev.into_async_f32_rx_stream();
+        rx.start().await?;
         let mut samples = [(0.0, 0.0); 32];
         let count = rx.read(&mut samples).await?;
         let stats = rx.finish().await?;
+        let _dev = rx.into_device();
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short async RX complete: {stats:?}");
     } else {
