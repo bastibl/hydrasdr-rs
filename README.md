@@ -52,7 +52,7 @@ Use `tokio` if the application already runs on Tokio; use `smol` for smaller exa
 rustflags = ["--cfg=web_sys_unstable_apis"]
 ```
 
-If `hydrasdr-rs` is consumed as a dependency, put the same target configuration in the application's Cargo configuration. Browser WebUSB access also requires a secure context, browser support, and user-granted permission for one of the RFOne VID/PID pairs. `Device::list_async` only returns devices already authorized for the page. If `Device::open_async` finds no authorized match, it requests permission; browsers require that first open to run from a transient user activation such as a click handler.
+If `hydrasdr-rs` is consumed as a dependency, put the same target configuration in the application's Cargo configuration. Browser WebUSB access also requires a secure context, browser support, and user-granted permission for one of the RFOne VID/PID pairs. Call `Device::request_permission_async` from a transient user activation such as a click handler. `Device::list_async` and `Device::open_async` only operate on devices already authorized for the page, so opening works the same way in the browser window and in a Web Worker.
 
 Check the WebUSB build with:
 

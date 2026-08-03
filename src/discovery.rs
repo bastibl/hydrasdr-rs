@@ -4,6 +4,7 @@
 use nusb::MaybeFuture;
 
 use crate::errors::{Error, Result};
+
 /// Known HydraSDR USB VID/PID pair and its board identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UsbDeviceId {
@@ -83,12 +84,7 @@ pub(crate) async fn list_devices_async() -> Result<Vec<DeviceDescriptor>> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
     for device in nusb::list_devices().wait().map_err(Error::from)? {
-        if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
-            continue;
-        }
-        if let Some(wanted) = serial
-            && device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted)
-        {
+        if !matches_device(&device, serial) {
             continue;
         }
         return Ok(device);
@@ -98,19 +94,9 @@ pub(crate) fn select_nusb_device(serial: Option<u64>) -> Result<nusb::DeviceInfo
 
 pub(crate) async fn select_nusb_device_async(serial: Option<u64>) -> Result<nusb::DeviceInfo> {
     for device in nusb::list_devices().await.map_err(Error::from)? {
-        if find_usb_device_id(device.vendor_id(), device.product_id()).is_none() {
+        if !matches_device(&device, serial) {
             continue;
         }
-        if let Some(wanted) = serial
-            && device.serial_number().and_then(parse_hydrasdr_serial) != Some(wanted)
-        {
-            continue;
-        }
-        return Ok(device);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    if let Some(device) = request_nusb_device_async(serial).await? {
         return Ok(device);
     }
 
@@ -132,6 +118,29 @@ async fn request_nusb_device_async(serial: Option<u64>) -> Result<Option<nusb::D
         .collect::<Vec<_>>();
 
     nusb::request_device(&selectors).await.map_err(Error::from)
+}
+
+/// Ask the browser to grant access to a matching HydraSDR without opening it.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn request_device_permission_async(serial: Option<u64>) -> Result<()> {
+    for device in nusb::list_devices().await.map_err(Error::from)? {
+        if !matches_device(&device, serial) {
+            continue;
+        }
+        return Ok(());
+    }
+
+    request_nusb_device_async(serial)
+        .await?
+        .map(|_| ())
+        .ok_or(Error::DeviceNotFound)
+}
+
+fn matches_device(device: &nusb::DeviceInfo, serial: Option<u64>) -> bool {
+    find_usb_device_id(device.vendor_id(), device.product_id()).is_some()
+        && serial.is_none_or(|wanted| {
+            device.serial_number().and_then(parse_hydrasdr_serial) == Some(wanted)
+        })
 }
 
 /// Parse the C firmware serial string format `HYDRASDR SN:<16 hex digits>`.

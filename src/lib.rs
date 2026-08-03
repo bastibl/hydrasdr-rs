@@ -14,10 +14,12 @@
 //!
 //! WebUSB builds must enable `web_sys_unstable_apis` as described in the
 //! [WebUSB section of the README](https://github.com/bastibl/hydrasdr-rs#webusb).
-//! Browsers only expose devices for which the page has WebUSB permission;
-//! `Device::open_async` requests it when necessary and must then be called from
-//! a browser user gesture. Blocking USB methods and synchronous stream types are
-//! not part of the `wasm32` API; use async device methods and owned async streams.
+//! Browsers only expose devices for which the page has WebUSB permission. Call
+//! `Device::request_permission_async` from a browser-window user gesture;
+//! [`Device::open_async`] can then discover and open the authorized device from
+//! either the window or a Web Worker. Opening never prompts for permission.
+//! Blocking USB methods and synchronous stream types are not part of the
+//! `wasm32` API; use async device methods and owned async streams.
 //!
 //! # Synchronous API
 //!

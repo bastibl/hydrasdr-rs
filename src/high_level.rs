@@ -101,6 +101,15 @@ impl Device {
         Self::builder().serial(serial).open_async().await
     }
 
+    /// Ask the browser to grant WebUSB access to a HydraSDR without opening it.
+    ///
+    /// Call this from a browser-window user gesture. After permission is granted,
+    /// [`Device::open_async`] may discover and open the device from a Web Worker.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_permission_async() -> Result<()> {
+        Self::builder().request_permission_async().await
+    }
+
     /// Return cached device metadata.
     pub fn info(&self) -> &DeviceInfo {
         self.inner.info()
@@ -454,6 +463,20 @@ impl DeviceBuilder {
     pub fn serial(mut self, serial: u64) -> Self {
         self.selector = DeviceSelector::Serial(serial);
         self
+    }
+
+    /// Ask the browser to grant WebUSB access to the selected HydraSDR.
+    ///
+    /// This only performs the browser permission request; it does not open or
+    /// configure the device. Call it from a browser-window user gesture, then
+    /// use [`DeviceBuilder::open_async`] from either the window or a Web Worker.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_permission_async(&self) -> Result<()> {
+        let serial = match self.selector {
+            DeviceSelector::First => None,
+            DeviceSelector::Serial(serial) => Some(serial),
+        };
+        crate::discovery::request_device_permission_async(serial).await
     }
 
     /// Set the tuned center frequency in Hz.
