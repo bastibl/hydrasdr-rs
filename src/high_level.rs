@@ -900,7 +900,11 @@ where
     }
 
     async fn start(&mut self) -> Result<()> {
-        if self.state == AsyncReceiverState::Running {
+        let stream_reusable = self
+            .stream
+            .as_ref()
+            .is_some_and(|stream| !stream.is_closed());
+        if self.state == AsyncReceiverState::Running && stream_reusable {
             return Ok(());
         }
         let device = self
@@ -909,11 +913,12 @@ where
             .expect("owned async stream retains its device");
         device.ensure_raw_adc_stream_format()?;
         self.state = AsyncReceiverState::StopRequired;
-        if self.stream.is_some() {
+        if stream_reusable {
             device.direct.receiver_mode(ReceiverMode::Rx).await?;
             self.state = AsyncReceiverState::Running;
             return Ok(());
         }
+        self.stream = None;
         let stream = device.direct.start_raw_rx_stream_async().await?;
         self.stream = Some(stream);
         self.state = AsyncReceiverState::Running;
@@ -1078,11 +1083,21 @@ where
         if self.state != AsyncReceiverState::Running {
             return Err(Error::stream_closed("async F32 RX stream is stopped"));
         }
-        self.stream
+        let result = self
+            .stream
             .as_mut()
             .ok_or(Error::stream_closed("async F32 RX stream is closed"))?
             .read_float32_iq(out)
-            .await
+            .await;
+        match result {
+            Ok(written) => Ok(written),
+            Err(error) => {
+                let mut stream = self.stream.take().expect("stream was borrowed above");
+                self.stats = stream.close();
+                self.state = AsyncReceiverState::StopRequired;
+                Err(error)
+            }
+        }
     }
 
     fn stopped_device_mut(&mut self) -> Result<&mut DeviceInner<C>> {

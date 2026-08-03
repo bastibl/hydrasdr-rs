@@ -212,9 +212,9 @@ impl<B: BulkInBackend> RawRxStream<B> {
         let (buffer, actual_len) =
             match checked_completion(completion, config_current_buffer_size(self.config)) {
                 Ok(completion) => completion,
-                Err((buffer, error)) => {
+                Err((_buffer, error)) => {
                     self.stats.buffers_dropped += 1;
-                    self.bulk_in_mut()?.submit(buffer);
+                    self.close();
                     return Err(error);
                 }
             };
@@ -311,9 +311,9 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
             self.stats.buffers_received += 1;
             match checked_completion(completion, config_current_buffer_size(self.config)) {
                 Ok(completion) => break completion,
-                Err((buffer, error)) => {
+                Err((_buffer, error)) => {
                     self.stats.buffers_dropped += 1;
-                    self.bulk_in_mut()?.submit(buffer);
+                    self.close();
                     return Err(error);
                 }
             }
@@ -334,6 +334,9 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
 
     /// Preserve the endpoint queue while discarding data from before the next restart.
     pub(crate) fn pause(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
         if let Some(buffer) = self.current.take() {
             self.bulk_in_mut()?.submit(buffer);
         }
@@ -348,6 +351,10 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
 
     pub(crate) fn stats(&self) -> StreamingStats {
         self.stats
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Close the USB queue, cancelling pending transfers where supported.
@@ -465,13 +472,9 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             self.stats.buffers_received += 1;
             match checked_completion(completion, config_current_buffer_size(self.config)) {
                 Ok(completion) => break completion,
-                Err((buffer, error)) => {
+                Err((_buffer, error)) => {
                     self.stats.buffers_dropped += 1;
-                    let bulk_in = self
-                        .bulk_in
-                        .as_mut()
-                        .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
-                    bulk_in.submit(buffer);
+                    self.close();
                     return Err(error);
                 }
             }
@@ -576,13 +579,9 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             let (buffer, actual_len) =
                 match checked_completion(completion, config_current_buffer_size(self.config)) {
                     Ok(completion) => completion,
-                    Err((buffer, error)) => {
+                    Err((_buffer, error)) => {
                         self.stats.buffers_dropped += 1;
-                        let bulk_in = self
-                            .bulk_in
-                            .as_mut()
-                            .ok_or(Error::stream_closed("direct RX stream is closed"))?;
-                        bulk_in.submit(buffer);
+                        self.close();
                         return Err(error);
                     }
                 };
@@ -919,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn async_f32_read_replenishes_queue_after_failed_completion() {
+    fn async_f32_read_closes_stream_after_failed_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
             let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
@@ -936,15 +935,13 @@ mod tests {
             assert!(matches!(error, Error::Transfer(_)));
             assert_eq!(stream.stats.buffers_received, 1);
             assert_eq!(stream.stats.buffers_dropped, 1);
-            assert_eq!(
-                stream.bulk_in.as_ref().expect("bulk in").pending(),
-                RFONE_TRANSFER_COUNT as usize
-            );
+            assert!(stream.closed);
+            assert!(stream.bulk_in.is_none());
         });
     }
 
     #[test]
-    fn async_f32_read_replenishes_queue_after_short_completion() {
+    fn async_f32_read_closes_stream_after_short_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
             let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
@@ -961,10 +958,8 @@ mod tests {
             assert!(matches!(error, Error::Protocol { .. }));
             assert_eq!(stream.stats.buffers_received, 1);
             assert_eq!(stream.stats.buffers_dropped, 1);
-            assert_eq!(
-                stream.bulk_in.as_ref().expect("bulk in").pending(),
-                RFONE_TRANSFER_COUNT as usize
-            );
+            assert!(stream.closed);
+            assert!(stream.bulk_in.is_none());
         });
     }
 
