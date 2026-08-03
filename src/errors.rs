@@ -27,10 +27,6 @@ pub enum Error {
         /// Reason the stream is no longer usable.
         reason: &'static str,
     },
-    /// A device mutation failed or was cancelled after its hardware state may have changed.
-    ///
-    /// Apply a complete [`crate::Config`] before using focused setters or starting a stream.
-    ConfigurationUnknown,
     /// The USB backend returned an error outside an individual transfer.
     Usb(nusb::Error),
     /// An individual USB transfer failed.
@@ -102,7 +98,6 @@ impl Error {
             Self::Busy => ErrorKind::Busy,
             Self::Unsupported => ErrorKind::Unsupported,
             Self::StreamClosed { .. } => ErrorKind::StreamClosed,
-            Self::ConfigurationUnknown => ErrorKind::Other,
             Self::Usb(err) => match err.kind() {
                 nusb::ErrorKind::Busy => ErrorKind::Busy,
                 nusb::ErrorKind::NotFound => ErrorKind::NotFound,
@@ -126,9 +121,6 @@ impl fmt::Display for Error {
             Self::Busy => f.write_str("HydraSDR device or USB resource is busy"),
             Self::Unsupported => f.write_str("operation is unsupported"),
             Self::StreamClosed { reason } => write!(f, "stream closed: {reason}"),
-            Self::ConfigurationUnknown => f.write_str(
-                "device configuration is unknown; apply a complete configuration before use",
-            ),
             Self::Usb(err) => write!(f, "USB error: {err}"),
             Self::Transfer(err) => write!(f, "USB transfer error: {err}"),
             Self::Operation { operation, source } => write!(f, "{operation}: {source}"),
