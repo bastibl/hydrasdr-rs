@@ -420,15 +420,16 @@ impl AsyncBulkInBackend for NusbBulkIn {
 }
 
 pub(crate) fn decode_u32_le_words(bytes: &[u8]) -> Result<Vec<u32>> {
-    let chunks = bytes.chunks_exact(4);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    if !remainder.is_empty() {
         return Err(Error::protocol(
             "decode control response",
             "response length is not a multiple of four bytes",
         ));
     }
     Ok(chunks
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk has four bytes")))
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect())
 }
 

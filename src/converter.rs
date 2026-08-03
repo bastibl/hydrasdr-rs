@@ -181,7 +181,7 @@ impl Float32IqConverter {
         let pairs = output.len() / 2;
 
         out.reserve(pairs);
-        for pair in output.chunks_exact(2) {
+        for pair in output.as_chunks::<2>().0 {
             out.push((pair[0], pair[1]));
         }
 
@@ -196,7 +196,7 @@ impl Float32IqConverter {
         self.scratch_a.clear();
         self.scratch_a.reserve(usable_samples);
 
-        for chunk in raw[..usable_samples * 2].chunks_exact(8) {
+        for chunk in raw[..usable_samples * 2].as_chunks::<8>().0 {
             let s0 = u16::from_le_bytes([chunk[0], chunk[1]]);
             let s1 = u16::from_le_bytes([chunk[2], chunk[3]]);
             let s2 = u16::from_le_bytes([chunk[4], chunk[5]]);
@@ -437,8 +437,10 @@ mod tests {
 
     fn decode_f32(bytes: &[u8]) -> Vec<f32> {
         bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect()
     }
 
