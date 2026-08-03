@@ -1,8 +1,8 @@
 //! HydraSDR RFOne API on top of `nusb`.
 //!
 //! One-shot USB operations implement [`MaybeFuture`]: await them in async code,
-//! or call [`MaybeFuture::wait`] on native targets. Persistent receive streams
-//! have separate borrowed synchronous and owned asynchronous forms.
+//! or call [`MaybeFuture::wait`] on native targets. Synchronous raw streams borrow
+//! their device; converted synchronous streams and asynchronous streams own it.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] for blocking operation.
 //! Awaited operations are executor-agnostic at this crate layer. Bulk/control
