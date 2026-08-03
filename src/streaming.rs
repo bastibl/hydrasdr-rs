@@ -149,8 +149,7 @@ pub(crate) struct DirectRxStream<B: BulkInBackend> {
     config: StreamingConfig,
     converter: Float32IqConverter,
     converted: Vec<(f32, f32)>,
-    pending: Vec<(f32, f32)>,
-    pending_start: usize,
+    converted_start: usize,
     stats: StreamingStats,
     closed: bool,
 }
@@ -271,8 +270,7 @@ pub(crate) struct AsyncDirectRxStream<B: AsyncBulkInBackend> {
     config: StreamingConfig,
     converter: Float32IqConverter,
     converted: Vec<(f32, f32)>,
-    pending: Vec<(f32, f32)>,
-    pending_start: usize,
+    converted_start: usize,
     stats: StreamingStats,
     discard_remaining: usize,
     closed: bool,
@@ -396,8 +394,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             config,
             converter: Float32IqConverter::default(),
             converted: Vec::new(),
-            pending: Vec::new(),
-            pending_start: 0,
+            converted_start: 0,
             stats: StreamingStats::default(),
             discard_remaining: 0,
             closed: false,
@@ -408,8 +405,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
     pub(crate) fn pause(&mut self) -> Result<()> {
         self.converter = Float32IqConverter::default();
         self.converted.clear();
-        self.pending.clear();
-        self.pending_start = 0;
+        self.converted_start = 0;
         self.discard_remaining = self
             .bulk_in
             .as_ref()
@@ -442,8 +438,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             }
             self.bulk_in = None;
             self.converted.clear();
-            self.pending.clear();
-            self.pending_start = 0;
+            self.converted_start = 0;
             self.closed = true;
         }
         self.stats
@@ -463,7 +458,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         }
 
         let mut written = 0;
-        self.copy_pending(out, &mut written);
+        self.copy_converted(out, &mut written);
         if written != 0 {
             return Ok(written);
         }
@@ -498,6 +493,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
 
         self.stats.buffers_received += 1;
         self.converted.clear();
+        self.converted_start = 0;
         self.converter.process_u16le_to_f32iq(
             &buffer[..actual_len],
             self.config.decimation_factor,
@@ -515,32 +511,20 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         Ok(written)
     }
 
-    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let pending = &self.pending[self.pending_start..];
-        let take = (out.len() - *written).min(pending.len());
+    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let converted = &self.converted[self.converted_start..];
+        let take = (out.len() - *written).min(converted.len());
         if take == 0 {
             return;
         }
 
-        out[*written..*written + take].copy_from_slice(&pending[..take]);
-        self.pending_start += take;
-        if self.pending_start == self.pending.len() {
-            self.pending.clear();
-            self.pending_start = 0;
+        out[*written..*written + take].copy_from_slice(&converted[..take]);
+        self.converted_start += take;
+        if self.converted_start == self.converted.len() {
+            self.converted.clear();
+            self.converted_start = 0;
         }
         *written += take;
-    }
-
-    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let take = (out.len() - *written).min(self.converted.len());
-        if take > 0 {
-            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
-            *written += take;
-        }
-        if take < self.converted.len() {
-            debug_assert_eq!(self.pending_start, 0);
-            self.pending.extend_from_slice(&self.converted[take..]);
-        }
     }
 }
 
@@ -564,8 +548,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             config,
             converter: Float32IqConverter::default(),
             converted: Vec::new(),
-            pending: Vec::new(),
-            pending_start: 0,
+            converted_start: 0,
             stats: StreamingStats::default(),
             closed: false,
         })
@@ -579,8 +562,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             }
             self.bulk_in = None;
             self.converted.clear();
-            self.pending.clear();
-            self.pending_start = 0;
+            self.converted_start = 0;
             self.closed = true;
         }
         self.stats
@@ -603,7 +585,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
         }
 
         let mut written = 0;
-        self.copy_pending(out, &mut written);
+        self.copy_converted(out, &mut written);
         if written == out.len() {
             return Ok(written);
         }
@@ -632,6 +614,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
 
             self.stats.buffers_received += 1;
             self.converted.clear();
+            self.converted_start = 0;
             self.converter.process_u16le_to_f32iq(
                 &buffer[..actual_len],
                 self.config.decimation_factor,
@@ -652,32 +635,20 @@ impl<B: BulkInBackend> DirectRxStream<B> {
         }
     }
 
-    fn copy_pending(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let pending = &self.pending[self.pending_start..];
-        let take = (out.len() - *written).min(pending.len());
+    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+        let converted = &self.converted[self.converted_start..];
+        let take = (out.len() - *written).min(converted.len());
         if take == 0 {
             return;
         }
 
-        out[*written..*written + take].copy_from_slice(&pending[..take]);
-        self.pending_start += take;
-        if self.pending_start == self.pending.len() {
-            self.pending.clear();
-            self.pending_start = 0;
+        out[*written..*written + take].copy_from_slice(&converted[..take]);
+        self.converted_start += take;
+        if self.converted_start == self.converted.len() {
+            self.converted.clear();
+            self.converted_start = 0;
         }
         *written += take;
-    }
-
-    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
-        let take = (out.len() - *written).min(self.converted.len());
-        if take > 0 {
-            out[*written..*written + take].copy_from_slice(&self.converted[..take]);
-            *written += take;
-        }
-        if take < self.converted.len() {
-            debug_assert_eq!(self.pending_start, 0);
-            self.pending.extend_from_slice(&self.converted[take..]);
-        }
     }
 }
 
@@ -798,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn async_f32_read_returns_pending_samples_without_waiting_for_another_completion() {
+    fn async_f32_read_returns_buffered_samples_without_waiting_for_another_completion() {
         block_on(async {
             let bulk_in = FakeAsyncBulkIn::default();
             let mut stream = AsyncDirectRxStream::start(bulk_in, StreamingConfig::default())
@@ -813,17 +784,17 @@ mod tests {
                     .expect("first read"),
                 1
             );
-            let pending = stream.pending.len() - stream.pending_start;
-            assert!(pending > 0);
+            let buffered = stream.converted.len() - stream.converted_start;
+            assert!(buffered > 0);
             assert_eq!(stream.stats.buffers_received, 1);
 
-            let mut out = vec![(0.0, 0.0); pending + 1];
+            let mut out = vec![(0.0, 0.0); buffered + 1];
             assert_eq!(
                 stream
                     .read_float32_iq(&mut out)
                     .await
-                    .expect("pending read"),
-                pending
+                    .expect("buffered read"),
+                buffered
             );
             assert_eq!(stream.stats.buffers_received, 1);
         });
