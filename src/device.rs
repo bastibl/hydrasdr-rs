@@ -729,7 +729,7 @@ where
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off);
+                let _ = self.receiver_mode(ReceiverMode::Off).wait();
                 return Err(err);
             }
         };
@@ -737,7 +737,7 @@ where
         match RawRxStream::start(bulk_in, self.streaming.config()) {
             Ok(stream) => Ok(stream),
             Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off);
+                let _ = self.receiver_mode(ReceiverMode::Off).wait();
                 Err(err)
             }
         }
@@ -773,7 +773,7 @@ where
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
             Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off);
+                let _ = self.receiver_mode(ReceiverMode::Off).wait();
                 return Err(err);
             }
         };
@@ -781,7 +781,7 @@ where
         match DirectRxStream::start(bulk_in, self.streaming.config()) {
             Ok(stream) => Ok(stream),
             Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off);
+                let _ = self.receiver_mode(ReceiverMode::Off).wait();
                 Err(err)
             }
         }
