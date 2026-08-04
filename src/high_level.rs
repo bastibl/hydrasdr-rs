@@ -718,12 +718,17 @@ where
     /// Request receiver-off cleanup. Repeated calls are no-ops.
     pub(crate) fn stop(&mut self) -> Result<()> {
         if !self.stopped {
-            let stream = self
-                .stream
-                .take()
-                .ok_or(Error::stream_closed("RX stream is closed"))?;
-            self.stats = self.device.direct.stop_raw_rx_stream(stream)?;
-            self.stopped = true;
+            let result = if let Some(stream) = self.stream.take() {
+                let (stats, result) = self.device.direct.close_raw_rx_stream(stream);
+                self.stats = stats;
+                result
+            } else {
+                self.device.direct.receiver_mode(ReceiverMode::Off).wait()
+            };
+            if result.is_ok() {
+                self.stopped = true;
+            }
+            result?;
         }
         Ok(())
     }
@@ -745,10 +750,7 @@ where
 {
     fn drop(&mut self) {
         if !self.stopped && !self.finished {
-            if let Some(stream) = self.stream.take() {
-                let _ = self.device.direct.stop_raw_rx_stream(stream);
-            }
-            self.stopped = true;
+            let _ = self.stop();
         }
     }
 }
@@ -1848,6 +1850,36 @@ mod tests {
             [
                 VendorControlRequest::receiver_mode(ReceiverMode::Off),
                 VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn borrowed_raw_stream_drop_retries_failed_receiver_off() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let mut device = fake_device(control, SampleFormat::RawAdc);
+
+        {
+            let mut stream = device.raw_rx_stream().expect("start borrowed raw stream");
+            state.fail_control_out_at.store(3, Ordering::SeqCst);
+            stream
+                .stop()
+                .expect_err("first receiver-off request should fail");
+        }
+
+        assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::receiver_mode(ReceiverMode::Rx),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
             ]
         );
     }

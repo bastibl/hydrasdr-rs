@@ -780,16 +780,6 @@ where
         }
     }
 
-    /// Stop a persistent synchronous raw RX stream and return its accumulated counters.
-    pub(crate) fn stop_raw_rx_stream(
-        &mut self,
-        stream: RawRxStream<C::BulkIn>,
-    ) -> Result<StreamingStats> {
-        let (stats, stop_result) = self.close_raw_rx_stream(stream);
-        stop_result?;
-        Ok(stats)
-    }
-
     pub(crate) fn close_raw_rx_stream(
         &mut self,
         mut stream: RawRxStream<C::BulkIn>,
