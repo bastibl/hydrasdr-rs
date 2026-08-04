@@ -62,6 +62,8 @@ pub struct BiasTeeInfo {
 /// RF port metadata returned in [`DeviceInfo`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RfPortInfo {
+    /// Protocol selector used to activate this port.
+    pub port: crate::RfPort,
     /// Firmware-provided RF port name.
     pub name: &'static str,
     /// Minimum tunable frequency for this port, in Hz.

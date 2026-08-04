@@ -23,7 +23,13 @@ fn hardware_open_and_query_device_info() {
         "unexpected version: {}",
         info.firmware_version
     );
-    assert!(!info.rf_ports.is_empty());
+    assert_eq!(
+        info.rf_ports
+            .iter()
+            .map(|port| (port.port, port.name))
+            .collect::<Vec<_>>(),
+        [(RfPort::Rx0, "ANT")]
+    );
     assert_eq!(info.active_state.rf_port().unwrap(), RfPort::Rx0);
     assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(10));
     assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(0));

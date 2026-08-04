@@ -47,32 +47,31 @@ pub(crate) const RFONE_HARDCODED_CAPS: u32 = Capability::Rx.bits()
     | Capability::Packing.bits()
     | Capability::RfPortSelect.bits();
 
-/// Return C-parity RF port metadata for RFOne.
+/// Return user-facing RF port metadata for RFOne.
 pub(crate) fn rf_port_infos() -> Vec<RfPortInfo> {
-    vec![
-        RfPortInfo {
-            name: "ANT",
-            min_frequency: RFONE_MIN_FREQ_HZ,
-            max_frequency: RFONE_MAX_FREQ_HZ,
-            has_bias_tee: true,
-            bias_tee: Some(BiasTeeInfo {
-                voltage: RFONE_BIAS_TEE_VOLTAGE_V,
-                max_current_milliamp: RFONE_BIAS_TEE_MAX_MA,
-            }),
-        },
-        RfPortInfo {
-            name: "CABLE1",
-            min_frequency: RFONE_MIN_FREQ_HZ,
-            max_frequency: RFONE_MAX_FREQ_HZ,
-            has_bias_tee: false,
-            bias_tee: None,
-        },
-        RfPortInfo {
-            name: "CABLE2",
-            min_frequency: RFONE_MIN_FREQ_HZ,
-            max_frequency: RFONE_MAX_FREQ_HZ,
-            has_bias_tee: false,
-            bias_tee: None,
-        },
-    ]
+    vec![RfPortInfo {
+        port: crate::RfPort::Rx0,
+        name: "ANT",
+        min_frequency: RFONE_MIN_FREQ_HZ,
+        max_frequency: RFONE_MAX_FREQ_HZ,
+        has_bias_tee: true,
+        bias_tee: Some(BiasTeeInfo {
+            voltage: RFONE_BIAS_TEE_VOLTAGE_V,
+            max_current_milliamp: RFONE_BIAS_TEE_MAX_MA,
+        }),
+    }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfone_advertises_only_its_physical_antenna() {
+        let ports = rf_port_infos();
+
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].port, crate::RfPort::Rx0);
+        assert_eq!(ports[0].name, "ANT");
+    }
 }
