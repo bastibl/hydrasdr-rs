@@ -112,11 +112,12 @@ impl Device {
         self.inner.refresh_info()
     }
 
-    /// Query sample rates advertised for the active sample format.
+    /// Return the cached sample rates advertised for the active sample format.
     ///
     /// Converted F32 IQ results include exactly representable effective rates
-    /// produced by host-side decimation.
-    pub fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
+    /// produced by host-side decimation. The table is fetched while applying
+    /// the active configuration, so this accessor performs no USB requests.
+    pub fn sample_rates(&self) -> Vec<u32> {
         self.inner.sample_rates()
     }
 
@@ -341,8 +342,8 @@ where
         })
     }
 
-    fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
-        self.direct.get_samplerates()
+    fn sample_rates(&self) -> Vec<u32> {
+        self.direct.visible_sample_rates()
     }
 
     fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {

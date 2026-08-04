@@ -426,21 +426,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.streaming.set_packing(state.packing);
     }
 
-    /// Read supported sample rates with the C count-then-list protocol.
-    ///
-    /// IQ sample modes return the C-style virtual rate table built from hardware rates and
-    /// supported DDC decimation factors.
-    pub(crate) fn get_samplerates(
-        &mut self,
-    ) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
-        let fetch = self.fetch_samplerates();
-        fetch.map(move |result| {
-            let table = result?;
-            self.sample_rates = table;
-            Ok(self.visible_sample_rates())
-        })
-    }
-
     /// Set sample rate by C-compatible index or kHz fallback calculation.
     pub(crate) fn set_samplerate(
         &mut self,
@@ -738,7 +723,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 }
 
 impl<C> HydraSdr<C> {
-    fn visible_sample_rates(&self) -> Vec<u32> {
+    pub(crate) fn visible_sample_rates(&self) -> Vec<u32> {
         if !self.sample_type_is_iq() {
             return build_raw_samplerates(&self.sample_rates.entries);
         }
