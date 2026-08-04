@@ -4,6 +4,15 @@ use hydrasdr_rs::{
 };
 
 #[test]
+fn public_default_config_initializes_all_hardware_settings() {
+    let config = Config::default();
+
+    assert_eq!(config.rf_port(), Some(RfPort::Rx0));
+    assert_eq!(config.gain(), GainConfig::default());
+    assert_eq!(config.bias_tee(), Some(false));
+}
+
+#[test]
 fn public_config_builder_uses_ergonomic_types() {
     let config = Config::builder()
         .frequency_hz(144_500_000)

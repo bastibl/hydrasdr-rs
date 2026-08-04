@@ -1,7 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+use hydrasdr_rs::{Device, GainPreset, GainStage, MaybeFuture, RfPort, SampleFormat};
 
 static HARDWARE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -24,6 +24,12 @@ fn hardware_open_and_query_device_info() {
         info.firmware_version
     );
     assert!(!info.rf_ports.is_empty());
+    assert_eq!(info.active_state.rf_port().unwrap(), RfPort::Rx0);
+    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(0));
+    assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(0));
+    assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(0));
+    assert!(!info.active_state.agc_enabled().unwrap());
+    assert!(!info.active_state.bias_tee().unwrap());
 }
 
 #[test]

@@ -84,6 +84,9 @@ pub enum GainPreset {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GainConfig {
     /// Leave direct gain state unchanged.
+    ///
+    /// This is opt-in. The standard [`Config`] default explicitly sets every
+    /// gain stage to 0 dB and disables both AGCs.
     Unchanged,
     /// Apply one RFOne preset.
     Preset(GainPreset),
@@ -108,6 +111,19 @@ pub enum GainConfig {
     },
 }
 
+/// Return the complete standard manual-gain configuration.
+impl Default for GainConfig {
+    fn default() -> Self {
+        Self::Manual {
+            lna: Some(0),
+            mixer: Some(0),
+            vga: Some(0),
+            lna_agc: Some(false),
+            mixer_agc: Some(false),
+        }
+    }
+}
+
 impl From<GainPreset> for GainConfig {
     fn from(value: GainPreset) -> Self {
         Self::Preset(value)
@@ -115,6 +131,11 @@ impl From<GainPreset> for GainConfig {
 }
 
 /// Reusable high-level receiver configuration.
+///
+/// The default is complete: it selects RX0, disables the bias tee and both
+/// AGCs, and sets the LNA, mixer, and VGA gains to 0 dB. Callers can opt out of
+/// gain writes with [`GainConfig::Unchanged`] or construct partial manual gain
+/// updates explicitly.
 ///
 /// Building a config validates ranges without opening USB hardware, so this is
 /// safe in doctests and CI:
@@ -155,9 +176,9 @@ impl Default for Config {
             bandwidth: Bandwidth::Auto,
             sample_format: SampleFormat::RawAdc,
             decimation_mode: DecimationMode::LowBandwidth,
-            rf_port: None,
-            gain: GainConfig::Unchanged,
-            bias_tee: None,
+            rf_port: Some(RfPort::Rx0),
+            gain: GainConfig::default(),
+            bias_tee: Some(false),
             packing: false,
         }
     }
