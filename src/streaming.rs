@@ -4,6 +4,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -99,7 +100,7 @@ pub(crate) trait AsyncBulkInBackend: std::fmt::Debug {
     fn allocate(&self, len: usize) -> Self::Buffer;
     fn submit(&mut self, buffer: Self::Buffer);
     fn pending(&self) -> usize;
-    fn next_complete_async(&mut self) -> impl Future<Output = BulkInCompletion<Self::Buffer>> + '_;
+    fn poll_next_complete(&mut self, cx: &mut Context<'_>) -> Poll<BulkInCompletion<Self::Buffer>>;
     fn cancel_all(&mut self);
 }
 
@@ -314,6 +315,7 @@ pub(crate) struct AsyncRawRxStream<B: AsyncBulkInBackend> {
     config: StreamingConfig,
     stats: StreamingStats,
     current: Option<B::Buffer>,
+    current_len: usize,
     discard_remaining: usize,
     closed: bool,
 }
@@ -338,24 +340,42 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         prepare_async_bulk_in(bulk_in, config)
     }
 
-    /// Read the next raw transfer block.
-    pub(crate) async fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+    /// Poll until the next raw transfer has been stored in `current`.
+    pub(crate) fn poll_next_transfer(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         if self.closed {
-            return Err(Error::stream_closed("async raw RX stream is closed"));
+            return Poll::Ready(Err(Error::stream_closed("async raw RX stream is closed")));
         }
 
         if let Some(buffer) = self.current.take() {
-            self.bulk_in_mut()?.submit(buffer);
+            let bulk_in = match self.bulk_in_mut() {
+                Ok(bulk_in) => bulk_in,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            bulk_in.submit(buffer);
+            self.current_len = 0;
         }
 
         let (buffer, actual_len) = loop {
-            let completion = self.bulk_in_mut()?.next_complete_async().await;
+            let completion = {
+                let bulk_in = match self.bulk_in_mut() {
+                    Ok(bulk_in) => bulk_in,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match bulk_in.poll_next_complete(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(completion) => completion,
+                }
+            };
             if self.discard_remaining != 0 {
                 self.discard_remaining -= 1;
                 self.stats.buffers_received += 1;
                 self.stats.buffers_dropped += 1;
                 self.stats.buffers_discarded_on_restart += 1;
-                self.bulk_in_mut()?.submit(completion.buffer);
+                let bulk_in = match self.bulk_in_mut() {
+                    Ok(bulk_in) => bulk_in,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                bulk_in.submit(completion.buffer);
                 continue;
             }
             self.stats.buffers_received += 1;
@@ -364,22 +384,33 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
                 Err((_buffer, error)) => {
                     self.stats.buffers_dropped += 1;
                     self.close();
-                    return Err(error);
+                    return Poll::Ready(Err(error));
                 }
             }
         };
 
         self.stats.buffers_processed += 1;
-        let sample_count = sample_count_for_buffer(actual_len, self.config.packing_enabled);
-        let dropped_samples = self.stats.buffers_dropped * sample_count as u64;
         self.current = Some(buffer);
-        let samples = &self.current.as_ref().expect("current buffer set")[..actual_len];
+        self.current_len = actual_len;
+        Poll::Ready(Ok(()))
+    }
 
-        Ok(Some(Transfer {
-            samples,
+    pub(crate) fn current_transfer(&self) -> Result<Transfer<'_>> {
+        let samples = self.current.as_ref().ok_or(Error::stream_closed(
+            "async raw RX stream has no current block",
+        ))?;
+        let sample_count = sample_count_for_buffer(self.current_len, self.config.packing_enabled);
+        Ok(Transfer {
+            samples: &samples[..self.current_len],
             sample_count,
-            dropped_samples,
-        }))
+            dropped_samples: self.stats.buffers_dropped * sample_count as u64,
+        })
+    }
+
+    /// Read the next raw transfer block.
+    pub(crate) async fn next_transfer(&mut self) -> Result<Option<Transfer<'_>>> {
+        std::future::poll_fn(|cx| self.poll_next_transfer(cx)).await?;
+        self.current_transfer().map(Some)
     }
 
     /// Preserve the endpoint queue while discarding data from before the next restart.
@@ -389,6 +420,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         }
         if let Some(buffer) = self.current.take() {
             self.bulk_in_mut()?.submit(buffer);
+            self.current_len = 0;
         }
         let bulk_in = self
             .bulk_in
@@ -419,6 +451,7 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
             }
             self.bulk_in = None;
             self.current = None;
+            self.current_len = 0;
             self.closed = true;
         }
         self.stats
@@ -502,18 +535,18 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         self.stats
     }
 
-    /// Read converted complex float samples into `out`.
-    ///
-    /// Each call drains samples already buffered in the stream, or awaits and
-    /// processes at most one new USB completion. The only await occurs before
-    /// stream state is consumed, so canceling a pending read leaves the queue and
-    /// buffered samples intact.
-    pub(crate) async fn read_float32_iq(&mut self, out: &mut [Complex32]) -> Result<usize> {
+    pub(crate) fn poll_read_float32_iq(
+        &mut self,
+        out: &mut [Complex32],
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize>> {
         if self.closed {
-            return Err(Error::stream_closed("async direct RX stream is closed"));
+            return Poll::Ready(Err(Error::stream_closed(
+                "async direct RX stream is closed",
+            )));
         }
         if out.is_empty() {
-            return Ok(0);
+            return Poll::Ready(Ok(0));
         }
 
         let mut written = 0;
@@ -521,30 +554,38 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             out[written] = sample;
             written += 1;
             if written == out.len() {
-                return Ok(written);
+                return Poll::Ready(Ok(written));
             }
         }
 
         loop {
             if self.current.is_none() {
                 if written != 0 {
-                    return Ok(written);
+                    return Poll::Ready(Ok(written));
                 }
                 let (buffer, actual_len) = loop {
-                    let bulk_in = self
-                        .bulk_in
-                        .as_mut()
-                        .ok_or(Error::stream_closed("async direct RX stream is closed"))?;
-                    let completion = bulk_in.next_complete_async().await;
+                    let completion = {
+                        let Some(bulk_in) = self.bulk_in.as_mut() else {
+                            return Poll::Ready(Err(Error::stream_closed(
+                                "async direct RX stream is closed",
+                            )));
+                        };
+                        match bulk_in.poll_next_complete(cx) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(completion) => completion,
+                        }
+                    };
                     if self.discard_remaining != 0 {
                         self.discard_remaining -= 1;
                         self.stats.buffers_received += 1;
                         self.stats.buffers_dropped += 1;
                         self.stats.buffers_discarded_on_restart += 1;
-                        self.bulk_in
-                            .as_mut()
-                            .ok_or(Error::stream_closed("async direct RX stream is closed"))?
-                            .submit(completion.buffer);
+                        let Some(bulk_in) = self.bulk_in.as_mut() else {
+                            return Poll::Ready(Err(Error::stream_closed(
+                                "async direct RX stream is closed",
+                            )));
+                        };
+                        bulk_in.submit(completion.buffer);
                         continue;
                     }
                     self.stats.buffers_received += 1;
@@ -553,7 +594,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
                         Err((_buffer, error)) => {
                             self.stats.buffers_dropped += 1;
                             self.close();
-                            return Err(error);
+                            return Poll::Ready(Err(error));
                         }
                     }
                 };
@@ -575,24 +616,37 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
 
             if self.current_offset == self.current_len {
                 let buffer = self.current.take().expect("current buffer set");
-                self.bulk_in
-                    .as_mut()
-                    .ok_or(Error::stream_closed("async direct RX stream is closed"))?
-                    .submit(buffer);
+                let Some(bulk_in) = self.bulk_in.as_mut() else {
+                    return Poll::Ready(Err(Error::stream_closed(
+                        "async direct RX stream is closed",
+                    )));
+                };
+                bulk_in.submit(buffer);
                 self.current_len = 0;
                 self.current_offset = 0;
-                return Ok(written);
+                return Poll::Ready(Ok(written));
             } else if progress.consumed_bytes == 0 {
-                return Err(Error::protocol(
+                return Poll::Ready(Err(Error::protocol(
                     "convert F32 IQ samples",
                     "USB buffer ended with an incomplete conversion group",
-                ));
+                )));
             }
 
             if written == out.len() {
-                return Ok(written);
+                return Poll::Ready(Ok(written));
             }
         }
+    }
+
+    /// Read converted complex float samples into `out`.
+    ///
+    /// Each call drains samples already buffered in the stream, or awaits and
+    /// processes at most one new USB completion. The only await occurs before
+    /// stream state is consumed, so canceling a pending read leaves the queue and
+    /// buffered samples intact.
+    #[cfg(test)]
+    pub(crate) async fn read_float32_iq(&mut self, out: &mut [Complex32]) -> Result<usize> {
+        std::future::poll_fn(|cx| self.poll_read_float32_iq(out, cx)).await
     }
 }
 
@@ -783,6 +837,7 @@ impl<B: AsyncBulkInBackend> PreparedBulkIn<B, B::Buffer> {
             config: self.config,
             stats: StreamingStats::default(),
             current: None,
+            current_len: 0,
             discard_remaining: 0,
             closed: false,
         })
@@ -963,6 +1018,7 @@ mod tests {
     struct FakeAsyncBulkIn {
         submitted: VecDeque<Vec<u8>>,
         submit_count: usize,
+        pending_once: bool,
         fail_next: bool,
         short_next: bool,
         cancelled: bool,
@@ -988,7 +1044,15 @@ mod tests {
             self.submitted.len()
         }
 
-        async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
+        fn poll_next_complete(
+            &mut self,
+            cx: &mut Context<'_>,
+        ) -> Poll<BulkInCompletion<Self::Buffer>> {
+            if self.pending_once {
+                self.pending_once = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let buffer = self
                 .submitted
                 .pop_front()
@@ -1005,11 +1069,11 @@ mod tests {
             } else {
                 buffer.len()
             };
-            BulkInCompletion {
+            Poll::Ready(BulkInCompletion {
                 actual_len,
                 buffer,
                 status,
-            }
+            })
         }
 
         fn cancel_all(&mut self) {
@@ -1065,6 +1129,62 @@ mod tests {
             assert_eq!(bulk_in.submit_count, initial_submit_count);
             assert_eq!(bulk_in.pending(), RFONE_TRANSFER_COUNT as usize - 1);
             assert!(stream.current.is_some());
+        });
+    }
+
+    #[test]
+    fn cancelled_pending_f32_read_leaves_the_next_completion_available() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncDirectRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_direct()
+                .await
+                .expect("start fake async stream");
+            stream.bulk_in.as_mut().expect("bulk in").pending_once = true;
+            let mut out = [Complex32::default(); 1];
+
+            {
+                let read = stream.read_float32_iq(&mut out);
+                let mut read = std::pin::pin!(read);
+                assert!(futures_lite::future::poll_once(&mut read).await.is_none());
+            }
+
+            assert_eq!(stream.stats.buffers_received, 0);
+            assert_eq!(
+                stream
+                    .read_float32_iq(&mut out)
+                    .await
+                    .expect("read completion after cancellation"),
+                1
+            );
+            assert_eq!(stream.stats.buffers_received, 1);
+        });
+    }
+
+    #[test]
+    fn cancelled_pending_raw_block_leaves_the_next_completion_available() {
+        block_on(async {
+            let bulk_in = FakeAsyncBulkIn::default();
+            let mut stream = AsyncRawRxStream::prepare(bulk_in, StreamingConfig::default())
+                .start_async_raw()
+                .await
+                .expect("start fake async raw stream");
+            stream.bulk_in.as_mut().expect("bulk in").pending_once = true;
+
+            {
+                let next = stream.next_transfer();
+                let mut next = std::pin::pin!(next);
+                assert!(futures_lite::future::poll_once(&mut next).await.is_none());
+            }
+
+            assert_eq!(stream.stats.buffers_received, 0);
+            let transfer = stream
+                .next_transfer()
+                .await
+                .expect("read completion after cancellation")
+                .expect("raw transfer");
+            assert_eq!(transfer.samples.len(), DEFAULT_BUFFER_SIZE);
+            assert_eq!(stream.stats.buffers_received, 1);
         });
     }
 

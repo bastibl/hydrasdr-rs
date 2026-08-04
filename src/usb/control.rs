@@ -6,6 +6,7 @@ use nusb::transfer::{
     Buffer as NusbBuffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient,
 };
 use nusb::{Endpoint, MaybeFuture};
+use std::task::{Context, Poll};
 
 use crate::commands::{ReceiverMode, VendorRequest};
 use crate::config::RfPort;
@@ -348,13 +349,14 @@ impl AsyncBulkInBackend for NusbBulkIn {
         self.endpoint.pending()
     }
 
-    async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
-        let completion = self.endpoint.next_complete().await;
-        BulkInCompletion {
-            buffer: completion.buffer,
-            actual_len: completion.actual_len,
-            status: completion.status.map_err(Error::from),
-        }
+    fn poll_next_complete(&mut self, cx: &mut Context<'_>) -> Poll<BulkInCompletion<Self::Buffer>> {
+        self.endpoint
+            .poll_next_complete(cx)
+            .map(|completion| BulkInCompletion {
+                buffer: completion.buffer,
+                actual_len: completion.actual_len,
+                status: completion.status.map_err(Error::from),
+            })
     }
 
     fn cancel_all(&mut self) {

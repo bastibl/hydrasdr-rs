@@ -5,6 +5,7 @@ use nusb::MaybeFuture;
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 
 use crate::Complex32;
 use crate::commands::ReceiverMode;
@@ -1169,6 +1170,18 @@ where
         }
     }
 
+    fn packing_changed(&self) -> bool {
+        let desired_packing = self
+            .device
+            .as_ref()
+            .expect("owned async stream retains its control handle")
+            .direct
+            .streaming_packing_enabled();
+        self.stream
+            .as_ref()
+            .is_some_and(|stream| stream.packing_enabled() != desired_packing)
+    }
+
     async fn start(&mut self) -> Result<()> {
         match self.state {
             ReceiverState::Running => return Ok(()),
@@ -1208,17 +1221,7 @@ where
         if self.state != ReceiverState::Running {
             return Err(Error::stream_closed("async raw RX stream is stopped"));
         }
-        let desired_packing = self
-            .device
-            .as_ref()
-            .expect("owned async stream retains its control handle")
-            .direct
-            .streaming_packing_enabled();
-        let packing_changed = self
-            .stream
-            .as_ref()
-            .is_some_and(|stream| stream.packing_enabled() != desired_packing);
-        if packing_changed {
+        if self.packing_changed() {
             self.retire_stream();
             let device = self
                 .device
@@ -1239,6 +1242,28 @@ where
                 Err(error)
             }
         }
+    }
+
+    fn poll_next_block(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.state != ReceiverState::Running {
+            return Poll::Ready(Err(Error::stream_closed("async raw RX stream is stopped")));
+        }
+        let result = match self.stream.as_mut() {
+            Some(stream) => stream.poll_next_transfer(cx),
+            None => Poll::Ready(Err(Error::stream_closed("async RX stream is closed"))),
+        };
+        if matches!(result, Poll::Ready(Err(_))) {
+            self.state = ReceiverState::CleanupRequired;
+        }
+        result
+    }
+
+    fn current_block(&self) -> Result<SampleBlock<'_>> {
+        self.stream
+            .as_ref()
+            .ok_or(Error::stream_closed("async RX stream is closed"))?
+            .current_transfer()
+            .map(SampleBlock::from_transfer)
     }
 
     async fn stop(&mut self) -> Result<StreamingStats> {
@@ -1343,8 +1368,7 @@ where
         Ok(())
     }
 
-    /// Read converted complex samples into `out`.
-    async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
+    fn begin_read(&mut self) -> Result<()> {
         if self.state != ReceiverState::Running {
             return Err(Error::stream_closed("async F32 RX stream is stopped"));
         }
@@ -1358,16 +1382,29 @@ where
             .stream
             .as_mut()
             .ok_or(Error::stream_closed("async F32 RX stream is closed"))?;
-        stream.set_decimation_factor(factor)?;
-        let result = stream.read_float32_iq(out).await;
+        stream.set_decimation_factor(factor)
+    }
+
+    fn poll_read(&mut self, out: &mut [Complex32], cx: &mut Context<'_>) -> Poll<Result<usize>> {
+        let result = match self.stream.as_mut() {
+            Some(stream) => stream.poll_read_float32_iq(out, cx),
+            None => Poll::Ready(Err(Error::stream_closed("async F32 RX stream is closed"))),
+        };
         match result {
-            Ok(written) => Ok(written),
-            Err(error) => {
+            Poll::Ready(Err(error)) => {
                 self.retire_stream();
                 self.state = ReceiverState::CleanupRequired;
-                Err(error)
+                Poll::Ready(Err(error))
             }
+            result => result,
         }
+    }
+
+    /// Read converted complex samples into `out`.
+    #[cfg(test)]
+    async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
+        self.begin_read()?;
+        std::future::poll_fn(|cx| self.poll_read(out, cx)).await
     }
 
     async fn stop(&mut self) -> Result<StreamingStats> {
@@ -1759,10 +1796,10 @@ impl<M: SampleMode> Drop for RxStream<M> {
             && let Some(receiver) = self.receiver.take()
         {
             wasm_bindgen_futures::spawn_local(async move {
-                if direct.receiver_mode(ReceiverMode::Off).await.is_ok() {
-                    if let Some(cleanup) = receiver.release() {
-                        let _ = cleanup.cleanup().await;
-                    }
+                if direct.receiver_mode(ReceiverMode::Off).await.is_ok()
+                    && let Some(cleanup) = receiver.release()
+                {
+                    let _ = cleanup.cleanup().await;
                 }
             });
         }
@@ -1776,6 +1813,9 @@ impl RxStream<RawAdc> {
     /// buffer is resubmitted on the next call. For blocking operation, `timeout`
     /// bounds the wait and [`None`] waits indefinitely. The timeout is ignored
     /// when this operation is awaited, which waits for the next USB completion.
+    /// The steady-state asynchronous path uses a concrete future without a
+    /// per-call future allocation; changing raw packing may allocate while the
+    /// USB queue is rebuilt.
     pub fn next_block(
         &mut self,
         timeout: Option<Duration>,
@@ -1789,6 +1829,31 @@ impl RxStream<RawAdc> {
     async fn next_block_async(&mut self) -> Result<Option<SampleBlock<'_>>> {
         match &mut self.state {
             RxStreamState::AsyncRaw(stream) => stream.next_block().await,
+            _ => Err(Error::stream_closed(
+                "raw RX stream is not running asynchronously",
+            )),
+        }
+    }
+
+    fn async_raw_packing_changed(&self) -> bool {
+        match &self.state {
+            RxStreamState::AsyncRaw(stream) => stream.packing_changed(),
+            _ => false,
+        }
+    }
+
+    fn poll_next_block_async(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        match &mut self.state {
+            RxStreamState::AsyncRaw(stream) => stream.poll_next_block(cx),
+            _ => Poll::Ready(Err(Error::stream_closed(
+                "raw RX stream is not running asynchronously",
+            ))),
+        }
+    }
+
+    fn current_async_raw_block(&self) -> Result<Option<SampleBlock<'_>>> {
+        match &self.state {
+            RxStreamState::AsyncRaw(stream) => stream.current_block().map(Some),
             _ => Err(Error::stream_closed(
                 "raw RX stream is not running asynchronously",
             )),
@@ -1813,7 +1878,8 @@ impl RxStream<F32Iq> {
     /// [`None`] waits indefinitely. Asynchronous operation drains buffered data
     /// or waits for at most one new USB completion, so it may return fewer
     /// samples than the slice can hold; the timeout is ignored when this
-    /// operation is awaited.
+    /// operation is awaited. Awaiting this operation uses a concrete future
+    /// without a per-call future allocation.
     pub fn read<'a>(
         &'a mut self,
         out: &'a mut [Complex32],
@@ -1823,12 +1889,27 @@ impl RxStream<F32Iq> {
             stream: self,
             out,
             timeout,
+            initialized: false,
+            completed: false,
         }
     }
 
-    async fn read_async(&mut self, out: &mut [Complex32]) -> Result<usize> {
+    fn poll_read_async(
+        &mut self,
+        out: &mut [Complex32],
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize>> {
         match &mut self.state {
-            RxStreamState::AsyncF32(stream) => stream.read(out).await,
+            RxStreamState::AsyncF32(stream) => stream.poll_read(out, cx),
+            _ => Poll::Ready(Err(Error::stream_closed(
+                "F32 IQ stream is not running asynchronously",
+            ))),
+        }
+    }
+
+    fn begin_read_async(&mut self) -> Result<()> {
+        match &mut self.state {
+            RxStreamState::AsyncF32(stream) => stream.begin_read(),
             _ => Err(Error::stream_closed(
                 "F32 IQ stream is not running asynchronously",
             )),
@@ -1847,9 +1928,9 @@ impl RxStream<F32Iq> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type BoxedOperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
-type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+type BoxedOperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 struct StartOperation<'a, M: SampleMode> {
     stream: &'a mut RxStream<M>,
@@ -1857,7 +1938,7 @@ struct StartOperation<'a, M: SampleMode> {
 
 impl<'a, M: SampleMode> IntoFuture for StartOperation<'a, M> {
     type Output = Result<()>;
-    type IntoFuture = OperationFuture<'a, Self::Output>;
+    type IntoFuture = BoxedOperationFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.stream.start_async())
@@ -1877,7 +1958,7 @@ struct StopOperation<'a, M: SampleMode> {
 
 impl<'a, M: SampleMode> IntoFuture for StopOperation<'a, M> {
     type Output = Result<StreamingStats>;
-    type IntoFuture = OperationFuture<'a, Self::Output>;
+    type IntoFuture = BoxedOperationFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.stream.stop_async())
@@ -1898,11 +1979,62 @@ struct NextBlockOperation<'a> {
 
 impl<'a> IntoFuture for NextBlockOperation<'a> {
     type Output = Result<Option<SampleBlock<'a>>>;
-    type IntoFuture = OperationFuture<'a, Self::Output>;
+    type IntoFuture = NextBlockFuture<'a>;
 
     fn into_future(self) -> Self::IntoFuture {
         let _ = self.timeout;
-        Box::pin(self.stream.next_block_async())
+        if self.stream.async_raw_packing_changed() {
+            NextBlockFuture::Restarting(Box::pin(self.stream.next_block_async()))
+        } else {
+            NextBlockFuture::Direct(Some(self.stream))
+        }
+    }
+}
+
+enum NextBlockFuture<'a> {
+    Direct(Option<&'a mut RxStream<RawAdc>>),
+    Restarting(BoxedOperationFuture<'a, Result<Option<SampleBlock<'a>>>>),
+    Transitioning,
+}
+
+impl<'a> Future for NextBlockFuture<'a> {
+    type Output = Result<Option<SampleBlock<'a>>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        let packing_changed = match this {
+            Self::Direct(stream) => stream
+                .as_deref()
+                .is_some_and(RxStream::async_raw_packing_changed),
+            Self::Restarting(_) | Self::Transitioning => false,
+        };
+        if packing_changed {
+            let Self::Direct(Some(stream)) = core::mem::replace(this, Self::Transitioning) else {
+                unreachable!("packing change checked on direct raw stream")
+            };
+            *this = Self::Restarting(Box::pin(stream.next_block_async()));
+        }
+
+        match this {
+            Self::Direct(stream) => {
+                let stream = stream
+                    .take()
+                    .expect("next-block future polled after completion");
+                match stream.poll_next_block_async(cx) {
+                    Poll::Pending => {
+                        *this = Self::Direct(Some(stream));
+                        Poll::Pending
+                    }
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) => {
+                        let stream: &'a RxStream<RawAdc> = stream;
+                        Poll::Ready(stream.current_async_raw_block())
+                    }
+                }
+            }
+            Self::Restarting(future) => future.as_mut().poll(cx),
+            Self::Transitioning => unreachable!("next-block future transition is synchronous"),
+        }
     }
 }
 
@@ -1918,15 +2050,29 @@ struct ReadOperation<'a> {
     stream: &'a mut RxStream<F32Iq>,
     out: &'a mut [Complex32],
     timeout: Option<Duration>,
+    initialized: bool,
+    completed: bool,
 }
 
-impl<'a> IntoFuture for ReadOperation<'a> {
+impl Future for ReadOperation<'_> {
     type Output = Result<usize>;
-    type IntoFuture = OperationFuture<'a, Self::Output>;
 
-    fn into_future(self) -> Self::IntoFuture {
-        let _ = self.timeout;
-        Box::pin(self.stream.read_async(self.out))
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        assert!(!this.completed, "read future polled after completion");
+        let _ = this.timeout;
+        if !this.initialized {
+            if let Err(error) = this.stream.begin_read_async() {
+                this.completed = true;
+                return Poll::Ready(Err(error));
+            }
+            this.initialized = true;
+        }
+        let result = this.stream.poll_read_async(this.out, cx);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
@@ -2254,12 +2400,15 @@ mod tests {
             self.submitted.len()
         }
 
-        async fn next_complete_async(&mut self) -> BulkInCompletion<Self::Buffer> {
+        fn poll_next_complete(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<BulkInCompletion<Self::Buffer>> {
             let buffer = self
                 .submitted
                 .pop_front()
                 .expect("fake async bulk queue contains submitted buffers");
-            BulkInCompletion {
+            std::task::Poll::Ready(BulkInCompletion {
                 actual_len: buffer.len(),
                 buffer,
                 status: if self
@@ -2271,7 +2420,7 @@ mod tests {
                 } else {
                     Ok(())
                 },
-            }
+            })
         }
 
         fn cancel_all(&mut self) {
