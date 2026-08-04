@@ -173,21 +173,49 @@ impl Float32IqConverter {
         (output.len() / 2) as i32
     }
 
-    pub(crate) fn process_u16le_to_f32iq(
+    /// Convert a prefix of `raw` directly into `out`.
+    ///
+    /// The converter consumes input in chunks that preserve every decimation
+    /// stage's four-sample phase. It can therefore produce one more complex
+    /// sample than fits when `out` has odd length; that sample is returned for
+    /// the stream to retain as fixed-size carry state.
+    pub(crate) fn process_u16le_to_f32iq_slice(
         &mut self,
         raw: &[u8],
         decimation_factor: usize,
-        out: &mut Vec<Complex32>,
-    ) -> usize {
-        let output = self.process_u16le(raw, decimation_factor);
-        let pairs = output.len() / 2;
-
-        out.reserve(pairs);
-        for pair in output.as_chunks::<2>().0 {
-            out.push(Complex32::new(pair[0], pair[1]));
+        out: &mut [Complex32],
+    ) -> (usize, usize, Option<Complex32>) {
+        if out.is_empty() {
+            return (0, 0, None);
         }
 
-        pairs
+        let decimation_factor = decimation_factor.max(1);
+        let raw_alignment = 4 * decimation_factor;
+        let available_raw_samples = (raw.len() / 2) / raw_alignment * raw_alignment;
+        let available_pairs = available_raw_samples / (2 * decimation_factor);
+        let requested_pairs = out.len().saturating_add(1) & !1;
+        let pairs = available_pairs.min(requested_pairs);
+        if pairs == 0 {
+            return (0, 0, None);
+        }
+
+        let raw_samples = pairs * 2 * decimation_factor;
+        let output = self.process_u16le(&raw[..raw_samples * 2], decimation_factor);
+        debug_assert_eq!(output.len(), pairs * 2);
+
+        let written = out.len().min(pairs);
+        for (dst, pair) in out[..written]
+            .iter_mut()
+            .zip(output.as_chunks::<2>().0.iter())
+        {
+            *dst = Complex32::new(pair[0], pair[1]);
+        }
+        let pending = (written != pairs).then(|| {
+            let pair = &output[written * 2..written * 2 + 2];
+            Complex32::new(pair[0], pair[1])
+        });
+
+        (raw_samples * 2, written, pending)
     }
 
     fn process_u16le(&mut self, raw: &[u8], decimation_factor: usize) -> &[f32] {
@@ -537,5 +565,52 @@ mod tests {
 
         assert_eq!(iq_pairs, 16);
         assert_eq!(out.len(), 16 * 2 * core::mem::size_of::<f32>());
+    }
+
+    #[test]
+    fn slice_conversion_matches_whole_transfer_for_all_decimations() {
+        let samples: Vec<_> = (0..4096).map(|i| ((i * 37 + 11) % 4096) as u16).collect();
+        let input = adc_bytes(&samples);
+
+        for decimation in [1, 2, 4, 8, 16, 32, 64] {
+            let mut whole = Float32IqConverter::default();
+            let floats = whole.process_u16le(&input, decimation);
+            let expected: Vec<_> = floats
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| Complex32::new(pair[0], pair[1]))
+                .collect();
+
+            let mut sliced = Float32IqConverter::default();
+            let mut actual = Vec::new();
+            let mut offset = 0;
+            let mut pending = None;
+            let output_sizes = [1, 3, 8, 17];
+            let mut call = 0;
+            while offset != input.len() || pending.is_some() {
+                let mut out = vec![Complex32::default(); output_sizes[call % output_sizes.len()]];
+                call += 1;
+                let mut written = 0;
+                if let Some(sample) = pending.take() {
+                    out[0] = sample;
+                    written = 1;
+                }
+                if written != out.len() && offset != input.len() {
+                    let (consumed, produced, carry) = sliced.process_u16le_to_f32iq_slice(
+                        &input[offset..],
+                        decimation,
+                        &mut out[written..],
+                    );
+                    assert_ne!(consumed, 0);
+                    offset += consumed;
+                    written += produced;
+                    pending = carry;
+                }
+                actual.extend_from_slice(&out[..written]);
+            }
+
+            assert_eq!(actual, expected, "decimation {decimation}");
+        }
     }
 }

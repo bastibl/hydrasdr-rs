@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nusb::MaybeFuture;
 
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
-use crate::config::{Bandwidth, Config, RfPort};
+use crate::config::{Bandwidth, ConfigData, RfPort};
 use crate::discovery;
 use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
@@ -246,7 +246,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     pub(crate) fn configure(
         &mut self,
-        config: &Config,
+        config: &ConfigData,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let operation = self.prepare_config(config);
         operation.map(move |result| {
@@ -257,7 +257,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     pub(crate) fn into_configured(
         mut self,
-        config: Config,
+        config: ConfigData,
     ) -> impl MaybeFuture<Output = Result<Self>> + use<C> {
         let operation = self.prepare_config(&config);
         operation.map(move |result| {
@@ -268,7 +268,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     fn prepare_config(
         &self,
-        config: &Config,
+        config: &ConfigData,
     ) -> impl MaybeFuture<Output = Result<AppliedConfig>> + use<C> {
         let validation = config.validate();
         let frequency = config.frequency_hz();

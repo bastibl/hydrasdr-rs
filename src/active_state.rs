@@ -2,7 +2,8 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{Bandwidth, Config, DecimationMode, Error, GainConfig, Result, RfPort, SampleFormat};
+use crate::config::ConfigData;
+use crate::{Bandwidth, DecimationMode, Error, GainConfig, Result, RfPort, SampleFormat};
 
 /// Physical RFOne gain stage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,7 +213,7 @@ impl ActiveState {
         self.lock().packing.get("packing")
     }
 
-    pub(crate) fn apply_config(&self, config: &Config) {
+    pub(crate) fn apply_config(&self, config: &ConfigData) {
         let mut state = self.lock();
         state.frequency_hz = ActiveValue::Known(config.frequency_hz());
         state.sample_rate_hz = ActiveValue::Known(config.sample_rate_hz());
@@ -229,11 +230,11 @@ impl ActiveState {
         state.packing = ActiveValue::Known(config.packing());
     }
 
-    pub(crate) fn begin_config(&self, config: &Config) {
+    pub(crate) fn begin_config(&self, config: &ConfigData) {
         invalidate_config(&mut self.lock(), config, UPDATE_INCOMPLETE);
     }
 
-    pub(crate) fn fail_config(&self, config: &Config) {
+    pub(crate) fn fail_config(&self, config: &ConfigData) {
         invalidate_config(&mut self.lock(), config, LAST_UPDATE_FAILED);
     }
 
@@ -291,7 +292,7 @@ impl ActiveState {
     }
 }
 
-fn invalidate_config(state: &mut ActiveStateInner, config: &Config, reason: UnavailableReason) {
+fn invalidate_config(state: &mut ActiveStateInner, config: &ConfigData, reason: UnavailableReason) {
     state.frequency_hz = ActiveValue::Unknown(reason);
     state.sample_rate_hz = ActiveValue::Unknown(reason);
     state.bandwidth = ActiveValue::Unknown(reason);

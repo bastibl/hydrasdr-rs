@@ -6,6 +6,7 @@ use crate::rfone::{
     RFONE_VGA_MAX_GAIN,
 };
 use crate::types::{DecimationMode, SampleType};
+use core::marker::PhantomData;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -66,6 +67,38 @@ pub enum SampleFormat {
     /// decimation to produce the requested effective rate. Use
     /// [`crate::Device::sample_rates`] to query the advertised effective rates.
     F32Iq,
+}
+
+mod private {
+    pub trait Sealed {}
+}
+
+/// Compile-time receiver sample mode.
+///
+/// This trait is sealed because the RFOne high-level API currently supports
+/// only [`RawAdc`] and [`F32Iq`].
+pub trait SampleMode: private::Sealed + Copy + core::fmt::Debug + Eq {
+    /// Runtime format corresponding to this compile-time mode.
+    const FORMAT: SampleFormat;
+}
+
+/// Raw ADC sample mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawAdc;
+
+/// Converted complex `f32` IQ sample mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct F32Iq;
+
+impl private::Sealed for RawAdc {}
+impl private::Sealed for F32Iq {}
+
+impl SampleMode for RawAdc {
+    const FORMAT: SampleFormat = SampleFormat::RawAdc;
+}
+
+impl SampleMode for F32Iq {
+    const FORMAT: SampleFormat = SampleFormat::F32Iq;
 }
 
 impl SampleFormat {
@@ -136,7 +169,10 @@ impl From<GainPreset> for GainConfig {
     }
 }
 
-/// Reusable high-level receiver configuration.
+/// Reusable high-level receiver configuration for sample mode `M`.
+///
+/// The generic mode defaults to [`F32Iq`]. Select [`RawAdc`] with
+/// [`ConfigBuilder::raw_adc`].
 ///
 /// The default is complete: it selects RX0, disables the bias tee and both
 /// AGCs, and sets 35 dB total gain as LNA 14 dB, mixer 15 dB, and VGA 6 dB.
@@ -148,22 +184,27 @@ impl From<GainPreset> for GainConfig {
 /// advertises a sample rate or optional capability such as manual bandwidth.
 ///
 /// ```
-/// use hydrasdr_rs::{Bandwidth, Config, GainPreset, SampleFormat};
+/// use hydrasdr_rs::{Bandwidth, Config, GainPreset};
 ///
 /// let config = Config::builder()
+///     .raw_adc()
 ///     .frequency_hz(144_500_000)
 ///     .sample_rate_hz(10_000_000)
 ///     .bandwidth(Bandwidth::Auto)
-///     .sample_format(SampleFormat::RawAdc)
 ///     .gain(GainPreset::Linearity(10))
 ///     .build()?;
 ///
 /// assert_eq!(config.frequency_hz(), 144_500_000);
-/// assert_eq!(config.sample_format(), SampleFormat::RawAdc);
 /// # Ok::<(), hydrasdr_rs::Error>(())
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Config {
+pub struct Config<M: SampleMode = F32Iq> {
+    pub(crate) data: ConfigData,
+    mode: PhantomData<fn() -> M>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConfigData {
     frequency_hz: u64,
     sample_rate_hz: u32,
     bandwidth: Bandwidth,
@@ -175,23 +216,32 @@ pub struct Config {
     packing: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl<M: SampleMode> Config<M> {
+    fn standard() -> Self {
         Self {
-            frequency_hz: DEFAULT_FREQUENCY_HZ,
-            sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
-            bandwidth: Bandwidth::Auto,
-            sample_format: SampleFormat::RawAdc,
-            decimation_mode: DecimationMode::LowBandwidth,
-            rf_port: Some(RfPort::Rx0),
-            gain: GainConfig::default(),
-            bias_tee: Some(false),
-            packing: false,
+            data: ConfigData {
+                frequency_hz: DEFAULT_FREQUENCY_HZ,
+                sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
+                bandwidth: Bandwidth::Auto,
+                sample_format: M::FORMAT,
+                decimation_mode: DecimationMode::LowBandwidth,
+                rf_port: Some(RfPort::Rx0),
+                gain: GainConfig::default(),
+                bias_tee: Some(false),
+                packing: false,
+            },
+            mode: PhantomData,
         }
     }
 }
 
-impl Config {
+impl Default for Config<F32Iq> {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl Config<F32Iq> {
     /// Start building a high-level receiver configuration.
     ///
     /// ```
@@ -206,13 +256,15 @@ impl Config {
     /// assert_eq!(config.sample_rate_hz(), 10_000_000);
     /// # Ok::<(), hydrasdr_rs::Error>(())
     /// ```
-    pub fn builder() -> ConfigBuilder {
+    pub fn builder() -> ConfigBuilder<F32Iq> {
         ConfigBuilder::default()
     }
+}
 
+impl<M: SampleMode> Config<M> {
     /// Tuned center frequency in Hz.
     pub const fn frequency_hz(&self) -> u64 {
-        self.frequency_hz
+        self.data.frequency_hz
     }
 
     /// Requested sample rate in Hz.
@@ -221,42 +273,32 @@ impl Config {
     /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
     /// host-side decimation.
     pub const fn sample_rate_hz(&self) -> u32 {
-        self.sample_rate_hz
+        self.data.sample_rate_hz
     }
 
     /// Configured bandwidth policy.
     pub const fn bandwidth(&self) -> Bandwidth {
-        self.bandwidth
+        self.data.bandwidth
     }
 
     /// Configured high-level sample format.
     pub const fn sample_format(&self) -> SampleFormat {
-        self.sample_format
-    }
-
-    /// Virtual IQ-rate hardware/host decimation policy.
-    pub const fn decimation_mode(&self) -> DecimationMode {
-        self.decimation_mode
+        M::FORMAT
     }
 
     /// Configured RF port, if explicitly selected.
     pub const fn rf_port(&self) -> Option<RfPort> {
-        self.rf_port
+        self.data.rf_port
     }
 
     /// Configured gain plan.
     pub const fn gain(&self) -> GainConfig {
-        self.gain
+        self.data.gain
     }
 
     /// Configured bias tee state, if explicitly selected.
     pub const fn bias_tee(&self) -> Option<bool> {
-        self.bias_tee
-    }
-
-    /// Whether packed samples should be requested.
-    pub const fn packing(&self) -> bool {
-        self.packing
+        self.data.bias_tee
     }
 
     /// Validate static RFOne and USB protocol constraints without touching USB.
@@ -264,6 +306,62 @@ impl Config {
     /// This does not query device-advertised sample rates or optional
     /// capabilities; those require an opened device and firmware interaction.
     pub fn validate(&self) -> Result<()> {
+        self.data.validate()
+    }
+}
+
+impl Config<RawAdc> {
+    /// Whether packed samples should be requested.
+    pub const fn packing(&self) -> bool {
+        self.data.packing
+    }
+}
+
+impl Config<F32Iq> {
+    /// Virtual IQ-rate hardware/host decimation policy.
+    pub const fn decimation_mode(&self) -> DecimationMode {
+        self.data.decimation_mode
+    }
+}
+
+impl ConfigData {
+    pub(crate) const fn frequency_hz(&self) -> u64 {
+        self.frequency_hz
+    }
+
+    pub(crate) const fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    pub(crate) const fn bandwidth(&self) -> Bandwidth {
+        self.bandwidth
+    }
+
+    pub(crate) const fn sample_format(&self) -> SampleFormat {
+        self.sample_format
+    }
+
+    pub(crate) const fn decimation_mode(&self) -> DecimationMode {
+        self.decimation_mode
+    }
+
+    pub(crate) const fn rf_port(&self) -> Option<RfPort> {
+        self.rf_port
+    }
+
+    pub(crate) const fn gain(&self) -> GainConfig {
+        self.gain
+    }
+
+    pub(crate) const fn bias_tee(&self) -> Option<bool> {
+        self.bias_tee
+    }
+
+    pub(crate) const fn packing(&self) -> bool {
+        self.packing
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
         validate_sample_rate(self.sample_rate_hz, self.sample_format)?;
         validate_bandwidth(self.bandwidth)?;
@@ -274,36 +372,43 @@ impl Config {
     }
 }
 
-/// Builder for [`Config`].
+/// Builder for [`Config`], defaulting to the [`F32Iq`] sample mode.
 ///
 /// ```
-/// use hydrasdr_rs::{Bandwidth, Config, SampleFormat};
+/// use hydrasdr_rs::{Bandwidth, Config};
 ///
 /// let config = Config::builder()
+///     .raw_adc()
 ///     .frequency_hz(915_000_000)
 ///     .sample_rate_hz(2_000_000)
 ///     .bandwidth(Bandwidth::Auto)
-///     .sample_format(SampleFormat::RawAdc)
 ///     .packing(true)
 ///     .build()?;
 ///
 /// assert_eq!(config.bandwidth(), Bandwidth::Auto);
-/// assert_eq!(config.sample_format(), SampleFormat::RawAdc);
 /// assert!(config.packing());
 /// # Ok::<(), hydrasdr_rs::Error>(())
 /// ```
-#[derive(Clone, Debug, Default)]
-pub struct ConfigBuilder {
-    config: Config,
+#[derive(Clone, Debug)]
+pub struct ConfigBuilder<M: SampleMode = F32Iq> {
+    config: Config<M>,
 }
 
-impl ConfigBuilder {
+impl Default for ConfigBuilder<F32Iq> {
+    fn default() -> Self {
+        Self {
+            config: Config::default(),
+        }
+    }
+}
+
+impl<M: SampleMode> ConfigBuilder<M> {
     /// Set the tuned center frequency in Hz.
     ///
     /// RFOne accepts center frequencies in the inclusive range
     /// `24_000_000..=1_800_000_000` Hz.
     pub fn frequency_hz(mut self, value: u64) -> Self {
-        self.config.frequency_hz = value;
+        self.config.data.frequency_hz = value;
         self
     }
 
@@ -318,7 +423,7 @@ impl ConfigBuilder {
     /// device for its advertised rates; other encodable values are left for
     /// firmware to accept or reject.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
-        self.config.sample_rate_hz = value;
+        self.config.data.sample_rate_hz = value;
         self
     }
 
@@ -328,7 +433,7 @@ impl ConfigBuilder {
     /// reflects the vendor request encoding; current RFOne firmware does not
     /// advertise manual bandwidth control.
     pub fn bandwidth(mut self, value: Bandwidth) -> Self {
-        self.config.bandwidth = value;
+        self.config.data.bandwidth = value;
         self
     }
 
@@ -343,26 +448,9 @@ impl ConfigBuilder {
         self.bandwidth(Bandwidth::ManualHz(value))
     }
 
-    /// Set the high-level sample format.
-    ///
-    /// The sample format determines how the requested rate is interpreted and
-    /// which protocol-encoding bound applies.
-    pub fn sample_format(mut self, value: SampleFormat) -> Self {
-        self.config.sample_format = value;
-        self
-    }
-
-    /// Set the firmware/host decimation policy for float IQ samples.
-    ///
-    /// Decimation is only valid with [`SampleFormat::F32Iq`].
-    pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
-        self.config.decimation_mode = value;
-        self
-    }
-
     /// Select the RF input port.
     pub fn rf_port(mut self, value: RfPort) -> Self {
-        self.config.rf_port = Some(value);
+        self.config.data.rf_port = Some(value);
         self
     }
 
@@ -371,28 +459,62 @@ impl ConfigBuilder {
     /// Preset gain indexes must be in the inclusive range `0..=21`.
     /// Manual component gains use the ranges documented on [`GainConfig::Manual`].
     pub fn gain(mut self, value: impl Into<GainConfig>) -> Self {
-        self.config.gain = value.into();
+        self.config.data.gain = value.into();
         self
     }
 
     /// Enable or disable the RF port bias tee.
     pub fn bias_tee(mut self, enabled: bool) -> Self {
-        self.config.bias_tee = Some(enabled);
-        self
-    }
-
-    /// Enable or disable packed raw-sample transfers.
-    ///
-    /// Packing is only valid with [`SampleFormat::RawAdc`].
-    pub fn packing(mut self, enabled: bool) -> Self {
-        self.config.packing = enabled;
+        self.config.data.bias_tee = Some(enabled);
         self
     }
 
     /// Validate and build a reusable configuration.
-    pub fn build(self) -> Result<Config> {
+    pub fn build(self) -> Result<Config<M>> {
         self.config.validate()?;
         Ok(self.config)
+    }
+}
+
+impl ConfigBuilder<RawAdc> {
+    /// Enable or disable packed raw-sample transfers.
+    pub fn packing(mut self, enabled: bool) -> Self {
+        self.config.data.packing = enabled;
+        self
+    }
+}
+
+impl ConfigBuilder<F32Iq> {
+    /// Select raw ADC samples instead of the default converted IQ mode.
+    ///
+    /// Format-specific options are exposed only after selecting their mode:
+    ///
+    /// ```compile_fail
+    /// use hydrasdr_rs::Config;
+    /// let _ = Config::builder().packing(true);
+    /// ```
+    pub fn raw_adc(mut self) -> ConfigBuilder<RawAdc> {
+        self.config.data.sample_format = SampleFormat::RawAdc;
+        self.config.data.decimation_mode = DecimationMode::LowBandwidth;
+        ConfigBuilder {
+            config: Config {
+                data: self.config.data,
+                mode: PhantomData,
+            },
+        }
+    }
+
+    /// Set the firmware/host decimation policy for float IQ samples.
+    ///
+    /// ```compile_fail
+    /// use hydrasdr_rs::{Config, DecimationMode};
+    /// let _ = Config::builder()
+    ///     .raw_adc()
+    ///     .decimation_mode(DecimationMode::HighDefinition);
+    /// ```
+    pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
+        self.config.data.decimation_mode = value;
+        self
     }
 }
 

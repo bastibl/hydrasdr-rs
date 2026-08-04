@@ -5,7 +5,7 @@
 
 use std::env;
 
-use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort};
 
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -23,7 +23,6 @@ fn main() -> hydrasdr_rs::Result<()> {
     let dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
-        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -41,11 +40,13 @@ fn main() -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut rx = dev.into_f32_rx_stream();
-        rx.start()?;
+        let mut rx = dev.into_rx_stream();
+        rx.start().wait()?;
         let mut samples = [Complex32::default(); 32];
-        let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
-        let stats = rx.stop()?;
+        let count = rx
+            .read(&mut samples, std::time::Duration::from_secs(1))
+            .wait()?;
+        let stats = rx.stop().wait()?;
         rx.shutdown().wait()?;
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short RX complete: {stats:?}");

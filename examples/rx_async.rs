@@ -8,7 +8,7 @@ use std::env;
 #[cfg(any(feature = "smol", feature = "tokio"))]
 use futures_lite::future::block_on;
 #[cfg(any(feature = "smol", feature = "tokio"))]
-use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort};
 
 #[cfg(any(feature = "smol", feature = "tokio"))]
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
@@ -44,7 +44,6 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     let dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
-        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -62,10 +61,10 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut rx = dev.into_async_f32_rx_stream();
+        let mut rx = dev.into_rx_stream();
         rx.start().await?;
         let mut samples = [Complex32::default(); 32];
-        let count = rx.read(&mut samples).await?;
+        let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
         let stats = rx.stop().await?;
         rx.shutdown().await?;
         println!("rx samples: {count}, first={:?}", samples.first());

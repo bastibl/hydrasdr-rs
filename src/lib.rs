@@ -1,8 +1,8 @@
 //! HydraSDR RFOne API on top of `nusb`.
 //!
 //! One-shot USB operations implement [`MaybeFuture`]: await them in async code,
-//! or call [`MaybeFuture::wait`] on native targets. Synchronous raw streams borrow
-//! their device; converted synchronous streams and asynchronous streams own it.
+//! or call [`MaybeFuture::wait`] on native targets. Receive streams own their
+//! device and retain a persistent USB transfer queue.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] for blocking operation.
 //! Awaited operations are executor-agnostic at this crate layer. Bulk/control
@@ -18,34 +18,34 @@
 //! `Device::request_permission` from a browser-window user gesture;
 //! [`Device::open`] can then discover and open the authorized device from
 //! either the window or a Web Worker. Opening never prompts for permission.
-//! Blocking USB methods and synchronous stream types are not part of the
-//! `wasm32` API; use async device methods and owned async streams.
+//! [`MaybeFuture::wait`] is not available on `wasm32`; await device and stream
+//! operations there.
 //!
 //! # Synchronous API
 //!
 //! Open and configure real hardware with the [`Device`] builder:
 //!
 //! ```no_run
-//! use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+//! use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort};
 //! use std::time::Duration;
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
-//!     let mut dev = Device::builder()
+//!     let dev = Device::builder()
 //!         .frequency_hz(100_000_000)
 //!         .sample_rate_hz(10_000_000)
-//!         .sample_format(SampleFormat::RawAdc)
 //!         .rf_port(RfPort::Rx0)
 //!         .gain(GainPreset::Linearity(12))
 //!         .open()
 //!         .wait()?;
 //!
-//!     let mut rx = dev.raw_rx_stream()?;
-//!     if let Some(block) = rx.next_block(Duration::from_secs(1))? {
-//!         println!("{} bytes", block.raw_bytes().len());
-//!     }
-//!     let stats = rx.finish()?;
+//!     let mut rx = dev.into_rx_stream();
+//!     rx.start().wait()?;
+//!     let mut samples = [Complex32::default(); 1024];
+//!     let count = rx.read(&mut samples, Duration::from_secs(1)).wait()?;
+//!     let stats = rx.stop().wait()?;
+//!     println!("{count} samples");
 //!     println!("{stats:?}");
-//!     dev.shutdown().wait()?;
+//!     rx.shutdown().wait()?;
 //!
 //!     Ok(())
 //! }
@@ -69,13 +69,14 @@ mod types;
 mod usb;
 
 pub use active_state::{ActiveState, GainStage};
-pub use config::{Bandwidth, Config, ConfigBuilder, GainConfig, GainPreset, RfPort, SampleFormat};
+pub use config::{
+    Bandwidth, Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat,
+    SampleMode,
+};
 pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
 pub use discovery::DeviceDescriptor;
 pub use errors::{Error, ErrorKind, Result};
-pub use high_level::{AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, SampleBlock};
-#[cfg(not(target_arch = "wasm32"))]
-pub use high_level::{F32RxStream, RawRxStream};
+pub use high_level::{Device, DeviceBuilder, RxStream, SampleBlock};
 pub use num_complex::Complex32;
 pub use nusb::MaybeFuture;
 pub use streaming::StreamingStats;

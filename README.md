@@ -6,7 +6,7 @@ This is mainly an experiment for using [`nusb`](https://crates.io/crates/nusb) f
 There are only a few Rust SDR drivers and the ones I know of are based on `rusb`, which wraps `libusb`.
 Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://github.com/futuresdr/futuresdr) and Seify's async API. `nusb` now supports WebUSB, so the async driver can use the same API on native and web targets.
 
-Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API provides synchronous and asynchronous device, configuration, and receive-stream types on native targets; WebUSB builds expose only the async USB operations and owned async streams.
+Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API uses the same typed device and receive stream for blocking and asynchronous operation: call `.wait()` on native targets or `.await` the operation. WebUSB supports the asynchronous path.
 
 Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
 
@@ -65,7 +65,7 @@ cargo check --target wasm32-unknown-unknown
 
 ## Configuration validation
 
-`Config::builder()` and `Device::builder()` validate static RFOne and USB protocol constraints before they touch hardware. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
+`Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before they touch hardware. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
 The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
 
@@ -78,13 +78,12 @@ Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mi
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
 
 ```rust,no_run
-use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort};
 
 fn main() -> hydrasdr_rs::Result<()> {
     let dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
-        .sample_format(SampleFormat::F32Iq)
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -93,12 +92,14 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let mut rx = dev.into_f32_rx_stream();
-    rx.start()?;
+    let mut rx = dev.into_rx_stream();
+    rx.start().wait()?;
     let mut samples = [Complex32::default(); 32];
-    let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
+    let count = rx
+        .read(&mut samples, std::time::Duration::from_secs(1))
+        .wait()?;
     println!("read {count} IQ samples");
-    let stats = rx.stop()?;
+    let stats = rx.stop().wait()?;
     rx.shutdown().wait()?;
     println!("{stats:?}");
 
@@ -108,27 +109,26 @@ fn main() -> hydrasdr_rs::Result<()> {
 
 ## Asynchronous API
 
-Async receive streams own the device and keep one USB transfer queue alive for their full lifetime. Enable exactly one runtime integration feature if your application needs `nusb`'s runtime-backed IO thread:
+Awaited receive operations keep the stream's one USB transfer queue alive for its full lifetime. Enable exactly one runtime integration feature if your application needs `nusb`'s runtime-backed IO thread:
 
 ```rust,no_run
 use futures_lite::future::block_on;
-use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort};
 
 fn main() -> hydrasdr_rs::Result<()> {
     block_on(async {
         let dev = Device::builder()
             .frequency_hz(144_500_000)
             .sample_rate_hz(10_000_000)
-            .sample_format(SampleFormat::F32Iq)
             .rf_port(RfPort::Rx0)
             .gain(GainPreset::Linearity(10))
             .open()
             .await?;
 
-        let mut rx = dev.into_async_f32_rx_stream();
+        let mut rx = dev.into_rx_stream();
         rx.start().await?;
         let mut samples = [Complex32::default(); 32];
-        let count = rx.read(&mut samples).await?;
+        let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
         println!("async samples: {count}");
         let stats = rx.stop().await?;
         rx.shutdown().await?;

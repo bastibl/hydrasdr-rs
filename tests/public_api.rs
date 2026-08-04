@@ -1,12 +1,26 @@
 use hydrasdr_rs::{
-    ActiveState, Bandwidth, Config, DeviceInfo, Error, ErrorKind, GainConfig, GainPreset, RfPort,
-    SampleFormat,
+    ActiveState, Bandwidth, Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq,
+    GainConfig, GainPreset, RawAdc, RfPort, SampleFormat,
 };
+
+fn assert_f32_builder(_: DeviceBuilder<F32Iq>) {}
+fn assert_f32_config(_: Config<F32Iq>) {}
+fn assert_raw_builder(_: DeviceBuilder<RawAdc>) {}
+fn assert_raw_config(_: Config<RawAdc>) {}
+
+#[test]
+fn public_builders_carry_the_selected_sample_mode() {
+    assert_f32_builder(Device::builder());
+    assert_raw_builder(Device::builder().raw_adc());
+    assert_f32_config(Config::builder().build().unwrap());
+    assert_raw_config(Config::builder().raw_adc().build().unwrap());
+}
 
 #[test]
 fn public_default_config_initializes_all_hardware_settings() {
     let config = Config::default();
 
+    assert_eq!(config.sample_format(), SampleFormat::F32Iq);
     assert_eq!(config.rf_port(), Some(RfPort::Rx0));
     assert_eq!(
         config.gain(),
@@ -27,7 +41,7 @@ fn public_config_builder_uses_ergonomic_types() {
         .frequency_hz(144_500_000)
         .sample_rate_hz(10_000_000)
         .bandwidth(Bandwidth::Auto)
-        .sample_format(SampleFormat::RawAdc)
+        .raw_adc()
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
         .bias_tee(false)
@@ -70,37 +84,30 @@ fn public_config_builder_validates_rfone_frequency_range() {
 fn public_config_builder_validates_vendor_parameter_ranges() {
     assert!(
         Config::builder()
-            .sample_format(SampleFormat::RawAdc)
+            .raw_adc()
             .sample_rate_hz(65_535_999)
             .build()
             .is_ok()
     );
-    assert!(
-        Config::builder()
-            .sample_format(SampleFormat::F32Iq)
-            .sample_rate_hz(32_767_999)
-            .build()
-            .is_ok()
-    );
+    assert!(Config::builder().sample_rate_hz(32_767_999).build().is_ok());
     assert!(Config::builder().bandwidth_hz(65_535_999).build().is_ok());
 
     assert!(
         Config::builder()
-            .sample_format(SampleFormat::RawAdc)
+            .raw_adc()
             .sample_rate_hz(65_536_000)
             .build()
             .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
     );
     assert!(
         Config::builder()
-            .sample_format(SampleFormat::F32Iq)
             .sample_rate_hz(32_768_000)
             .build()
             .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
     );
     assert!(
         Config::builder()
-            .sample_format(SampleFormat::RawAdc)
+            .raw_adc()
             .sample_rate_hz(u32::MAX)
             .build()
             .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
