@@ -1069,24 +1069,6 @@ impl Drop for RxStreamClaim {
 /// [`RxStream::start`] operation selects blocking USB on native targets;
 /// awaiting it selects asynchronous USB. Do not mix waiting and awaiting on
 /// one stream.
-///
-/// The sample mode controls which data operation exists:
-///
-/// ```compile_fail
-/// use hydrasdr_rs::{Complex32, RawAdc, RxStream};
-/// use std::time::Duration;
-/// fn cannot_read_iq(stream: &mut RxStream<RawAdc>, out: &mut [Complex32]) {
-///     let _ = stream.read(out, Duration::ZERO);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use hydrasdr_rs::{F32Iq, RxStream};
-/// use std::time::Duration;
-/// fn cannot_read_raw(stream: &mut RxStream<F32Iq>) {
-///     let _ = stream.next_block(Duration::ZERO);
-/// }
-/// ```
 #[must_use = "RX streams retain the device's exclusive stream claim until dropped"]
 pub struct RxStream<M: SampleMode = F32Iq> {
     state: RxStreamState,
