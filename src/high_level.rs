@@ -304,6 +304,21 @@ impl<M: SampleMode> Device<M> {
             })
     }
 
+    /// Enable or disable RF input bias power.
+    pub fn set_bias_tee(&mut self, enabled: bool) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
+        let config = &mut self.config;
+        let operation = self.inner.set_bias_tee(enabled);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_bias_tee_internal(enabled);
+                }
+                result
+            })
+    }
+
     /// Turn off reception and RF input bias power.
     ///
     /// Returns [`Error::Busy`] without sending shutdown commands while the
@@ -346,6 +361,49 @@ impl<M: SampleMode> Device<M> {
             Arc::clone(&self.shared),
             claim,
         ))
+    }
+}
+
+impl Device<RawAdc> {
+    /// Enable or disable packed raw-sample transfers.
+    ///
+    /// An active raw stream adopts the new transfer format on its next block.
+    pub fn set_packing(&mut self, enabled: bool) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
+        let config = &mut self.config;
+        let operation = self.inner.set_packing(enabled);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_packing_internal(enabled);
+                }
+                result
+            })
+    }
+}
+
+impl Device<F32Iq> {
+    /// Change the firmware/host decimation policy and reapply the requested IQ rate.
+    ///
+    /// An active converted stream adopts the resulting host decimation factor
+    /// on its next read.
+    pub fn set_decimation_policy(
+        &mut self,
+        policy: crate::DecimationPolicy,
+    ) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
+        let config = &mut self.config;
+        let sample_rate_hz = config.sample_rate_hz();
+        let operation = self.inner.set_decimation_policy(sample_rate_hz, policy);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_decimation_policy_internal(policy);
+                }
+                result
+            })
     }
 }
 
@@ -447,6 +505,25 @@ where
     fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let operation = self.direct.set_gain_config(gain);
         ready(validate_gain(gain)).and_then(move |()| operation)
+    }
+
+    fn set_bias_tee(
+        &mut self,
+        enabled: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        self.direct.set_rf_bias(enabled)
+    }
+
+    fn set_packing(&mut self, enabled: bool) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        self.direct.set_packing(enabled)
+    }
+
+    fn set_decimation_policy(
+        &mut self,
+        sample_rate_hz: u32,
+        policy: crate::DecimationPolicy,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        self.direct.set_decimation_policy(sample_rate_hz, policy)
     }
 }
 
@@ -2052,6 +2129,47 @@ mod tests {
                 .expect("control request lock"),
             [VendorControlRequest::set_frequency(100_000_000)]
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn targeted_bias_tee_control_sends_one_request() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let mut device = fake_device(control);
+
+        device.set_bias_tee(true).wait().expect("enable bias tee");
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [VendorControlRequest::set_rf_bias(1)]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn targeted_packing_control_updates_streaming_state() {
+        let mut device = fake_device(FakeControl::default());
+
+        device.set_packing(true).wait().expect("enable packing");
+
+        assert!(device.direct.streaming_packing_enabled());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn targeted_decimation_policy_reapplies_the_requested_rate() {
+        let mut device = fake_device(FakeControl::default());
+
+        device
+            .set_decimation_policy(5_000_000, crate::DecimationPolicy::HighDefinition)
+            .wait()
+            .expect("select high-definition decimation");
+
+        assert_eq!(device.direct.streaming_decimation_factor(), 2);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

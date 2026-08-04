@@ -437,6 +437,27 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.apply_gain_plan(requests)
     }
 
+    pub(crate) fn set_packing(
+        &mut self,
+        enabled: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        self.control_in_exact(VendorControlRequest::set_packing(u8::from(enabled)), 1)
+            .map(move |result| {
+                result?;
+                self.packing_enabled = enabled;
+                self.streaming.set_packing(enabled);
+                Ok(())
+            })
+    }
+
+    pub(crate) fn set_decimation_policy(
+        &mut self,
+        sample_rate_hz: u32,
+        policy: DecimationPolicy,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        self.set_samplerate_for_policy(sample_rate_hz, policy)
+    }
+
     /// Select an RF input port and require the firmware success byte used by the C API.
     pub(crate) fn set_rf_port(
         &mut self,

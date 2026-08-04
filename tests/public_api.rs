@@ -8,6 +8,17 @@ fn assert_f32_config(_: Config<F32Iq>) {}
 fn assert_raw_builder(_: DeviceBuilder<RawAdc>) {}
 fn assert_raw_config(_: Config<RawAdc>) {}
 
+#[allow(dead_code)]
+fn assert_mode_specific_device_setters(
+    f32_device: &mut Device<F32Iq>,
+    raw_device: &mut Device<RawAdc>,
+) {
+    drop(f32_device.set_bias_tee(true));
+    drop(raw_device.set_bias_tee(true));
+    drop(raw_device.set_packing(true));
+    drop(f32_device.set_decimation_policy(hydrasdr_rs::DecimationPolicy::HighDefinition));
+}
+
 #[test]
 fn public_builders_carry_the_selected_sample_mode() {
     assert_f32_builder(Device::builder());

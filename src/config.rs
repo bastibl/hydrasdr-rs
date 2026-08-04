@@ -314,6 +314,18 @@ impl<M: SampleMode> Config<M> {
         self.gain = value;
     }
 
+    pub(crate) fn set_bias_tee_internal(&mut self, enabled: bool) {
+        self.bias_tee = enabled;
+    }
+
+    pub(crate) fn set_packing_internal(&mut self, enabled: bool) {
+        self.packing = enabled;
+    }
+
+    pub(crate) fn set_decimation_policy_internal(&mut self, policy: DecimationPolicy) {
+        self.decimation_policy = policy;
+    }
+
     pub(crate) fn apply_internal(&mut self, applied: &Self) {
         self.frequency_hz = applied.frequency_hz;
         self.sample_rate_hz = applied.sample_rate_hz;
