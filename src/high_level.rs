@@ -48,14 +48,17 @@ use crate::usb::control::{ControlBackend, NusbControl};
 ///     }
 ///     let stats = rx.finish()?;
 ///     println!("{stats:?}");
+///     dev.shutdown().wait()?;
 ///
 ///     Ok(())
 /// }
 /// ```
 #[derive(Debug)]
-pub(crate) struct DeviceInner<C = NusbControl> {
+pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
     direct: HydraSdr<C>,
     info: DeviceInfo,
+    #[cfg(not(target_arch = "wasm32"))]
+    shutdown_on_drop: bool,
 }
 
 /// High-level owned HydraSDR RFOne device handle.
@@ -152,6 +155,19 @@ impl Device {
         self.inner.set_gain(gain)
     }
 
+    /// Consume the device after turning off reception and RF input bias power.
+    ///
+    /// Both shutdown commands are attempted even if turning off the receiver
+    /// fails. Await this operation in async code, or call [`MaybeFuture::wait`]
+    /// on native targets. Native drops perform the same sequence best-effort;
+    /// WebUSB callers must explicitly await shutdown because `Drop` cannot run
+    /// asynchronous USB operations. Poll the returned operation to completion;
+    /// canceling it does not guarantee that both commands reached the device.
+    #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
+    pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.shutdown()
+    }
+
     /// Start a synchronous receive stream for raw ADC USB blocks.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn raw_rx_stream(&mut self) -> Result<RawRxStream<'_>> {
@@ -189,7 +205,7 @@ impl Device {
     }
 }
 
-impl<C> DeviceInner<C> {
+impl<C: ControlBackend> DeviceInner<C> {
     /// Return cached device metadata.
     pub(crate) fn info(&self) -> &DeviceInfo {
         &self.info
@@ -246,6 +262,43 @@ impl<C> DeviceInner<C>
 where
     C: ControlBackend,
 {
+    fn shutdown_operation(&self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_bias_tee_update();
+
+        let receiver_off = self
+            .direct
+            .receiver_mode(ReceiverMode::Off)
+            .map_err(|error| error.at("turning off the receiver during shutdown"));
+        let bias_off = self
+            .direct
+            .set_rf_bias(false)
+            .map_err(|error| error.at("turning off RF bias power during shutdown"))
+            .map(move |result| {
+                active_state.set_bias_tee_result(false, result.is_ok());
+                result
+            });
+
+        receiver_off
+            .map(Ok::<_, Error>)
+            .and_then(move |receiver_result| {
+                bias_off.map(move |bias_result| receiver_result.and(bias_result))
+            })
+    }
+
+    fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut device = self;
+            device.shutdown_on_drop = false;
+            device.shutdown_operation()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.shutdown_operation()
+        }
+    }
+
     /// Apply a high-level receiver configuration through the direct layer.
     pub(crate) fn configure(
         &mut self,
@@ -361,6 +414,16 @@ where
             *info_slot = info;
             Ok(&*info_slot)
         })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<C: ControlBackend> Drop for DeviceInner<C> {
+    fn drop(&mut self) {
+        if self.shutdown_on_drop {
+            self.shutdown_on_drop = false;
+            let _ = self.shutdown_operation().wait();
+        }
     }
 }
 
@@ -529,7 +592,12 @@ impl DeviceBuilder {
                                 let direct = result?;
                                 info.active_state.apply_config(&saved_config);
                                 Ok(Device {
-                                    inner: DeviceInner { direct, info },
+                                    inner: DeviceInner {
+                                        direct,
+                                        info,
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        shutdown_on_drop: true,
+                                    },
                                 })
                             })
                     })
@@ -847,7 +915,7 @@ where
 /// The stream retains the device and keeps one USB transfer queue alive between
 /// reads. Call [`F32RxStream::stop`] before changing receiver settings or recovering
 /// the device with [`F32RxStream::into_device`].
-#[must_use = "RX streams own the device; call stop() for receiver-off cleanup"]
+#[must_use = "RX streams own the device; call shutdown() for explicit hardware cleanup"]
 #[cfg(not(target_arch = "wasm32"))]
 pub struct F32RxStream {
     inner: F32RxStreamInner<NusbControl>,
@@ -909,6 +977,13 @@ impl F32RxStream {
         Device {
             inner: self.inner.into_device(),
         }
+    }
+
+    /// Consume the stream after closing its queue and turning off reception
+    /// and RF input bias power.
+    #[must_use = "shutdown must be waited to send hardware cleanup commands"]
+    pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.into_device().shutdown()
     }
 }
 
@@ -1042,10 +1117,10 @@ where
 /// [`AsyncRawRxStream::stop`] to stop the receiver asynchronously while preserving
 /// the queue for another [`AsyncRawRxStream::start`]. Consume it with
 /// [`AsyncRawRxStream::into_device`] if the device handle is needed afterward.
-/// Dropping a running stream closes the transfer queue and device handle, but cannot
-/// perform asynchronous receiver-off cleanup. WebUSB cannot cancel pending transfers,
-/// so explicit shutdown is especially important in the browser.
-#[must_use = "RX streams own the device; call stop().await for receiver-off cleanup"]
+/// Native drops close the transfer queue and perform receiver-off and bias-off cleanup
+/// best-effort. WebUSB cannot perform asynchronous control transfers from `Drop`, so
+/// call [`AsyncRawRxStream::shutdown`] explicitly in the browser.
+#[must_use = "RX streams own the device; call shutdown().await for explicit hardware cleanup"]
 pub struct AsyncRawRxStream {
     inner: AsyncRawRxStreamInner<NusbControl>,
 }
@@ -1088,6 +1163,16 @@ impl AsyncRawRxStream {
         Device {
             inner: self.inner.into_device(),
         }
+    }
+
+    /// Consume the stream after closing its queue and turning off reception
+    /// and RF input bias power.
+    ///
+    /// Await this method explicitly on WebUSB; asynchronous USB cleanup cannot
+    /// run from `Drop`.
+    #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
+    pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.into_device().shutdown()
     }
 }
 
@@ -1247,10 +1332,10 @@ where
 /// [`AsyncF32RxStream::stop`] to stop the receiver asynchronously while preserving
 /// the queue for another [`AsyncF32RxStream::start`]. Consume it with
 /// [`AsyncF32RxStream::into_device`] if the device handle is needed afterward.
-/// Dropping a running stream closes the transfer queue and device handle, but cannot
-/// perform asynchronous receiver-off cleanup. WebUSB cannot cancel pending transfers,
-/// so explicit shutdown is especially important in the browser.
-#[must_use = "RX streams own the device; call stop().await for receiver-off cleanup"]
+/// Native drops close the transfer queue and perform receiver-off and bias-off cleanup
+/// best-effort. WebUSB cannot perform asynchronous control transfers from `Drop`, so
+/// call [`AsyncF32RxStream::shutdown`] explicitly in the browser.
+#[must_use = "RX streams own the device; call shutdown().await for explicit hardware cleanup"]
 pub struct AsyncF32RxStream {
     inner: AsyncF32RxStreamInner<NusbControl>,
 }
@@ -1319,13 +1404,23 @@ impl AsyncF32RxStream {
             inner: self.inner.into_device(),
         }
     }
+
+    /// Consume the stream after closing its queue and turning off reception
+    /// and RF input bias power.
+    ///
+    /// Await this method explicitly on WebUSB; asynchronous USB cleanup cannot
+    /// run from `Drop`.
+    #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
+    pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
+        self.inner.into_device().shutdown()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use futures_lite::future::block_on;
 
@@ -1338,7 +1433,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeState {
         control_out_count: AtomicUsize,
+        control_out_requests: Mutex<Vec<VendorControlRequest>>,
         fail_control_out: AtomicBool,
+        fail_control_out_at: AtomicUsize,
         pause_control_out_at: AtomicUsize,
         bulk_in_count: AtomicUsize,
         cancel_count: AtomicUsize,
@@ -1366,16 +1463,18 @@ mod tests {
 
         fn control_out(
             &self,
-            _request: VendorControlRequest,
+            request: VendorControlRequest,
         ) -> impl MaybeFuture<Output = Result<()>> + use<> {
             FakeControlOut {
                 state: Arc::clone(&self.state),
+                request,
             }
         }
     }
 
     struct FakeControlOut {
         state: Arc<FakeState>,
+        request: VendorControlRequest,
     }
 
     impl std::future::IntoFuture for FakeControlOut {
@@ -1384,11 +1483,18 @@ mod tests {
 
         fn into_future(self) -> Self::IntoFuture {
             Box::pin(async move {
+                self.state
+                    .control_out_requests
+                    .lock()
+                    .expect("control request lock")
+                    .push(self.request);
                 let call = self.state.control_out_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if self.state.pause_control_out_at.load(Ordering::SeqCst) == call {
                     core::future::pending::<()>().await;
                 }
-                if self.state.fail_control_out.load(Ordering::SeqCst) {
+                if self.state.fail_control_out.load(Ordering::SeqCst)
+                    || self.state.fail_control_out_at.load(Ordering::SeqCst) == call
+                {
                     Err(nusb::transfer::TransferError::Fault.into())
                 } else {
                     Ok(())
@@ -1400,8 +1506,15 @@ mod tests {
     impl MaybeFuture for FakeControlOut {
         #[cfg(not(target_arch = "wasm32"))]
         fn wait(self) -> Result<()> {
-            self.state.control_out_count.fetch_add(1, Ordering::SeqCst);
-            if self.state.fail_control_out.load(Ordering::SeqCst) {
+            self.state
+                .control_out_requests
+                .lock()
+                .expect("control request lock")
+                .push(self.request);
+            let call = self.state.control_out_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.state.fail_control_out.load(Ordering::SeqCst)
+                || self.state.fail_control_out_at.load(Ordering::SeqCst) == call
+            {
                 Err(nusb::transfer::TransferError::Fault.into())
             } else {
                 Ok(())
@@ -1541,7 +1654,78 @@ mod tests {
                 rf_ports: Vec::new(),
                 active_state,
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            shutdown_on_drop: true,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_shutdown_turns_off_receiver_and_bias_power() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let device = fake_device(control, SampleFormat::RawAdc);
+        let active_state = device.info.active_state.clone();
+
+        device.shutdown().wait().expect("explicit shutdown");
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+        assert!(!active_state.bias_tee().expect("bias state after shutdown"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn shutdown_attempts_bias_off_after_receiver_off_fails() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        state.fail_control_out_at.store(1, Ordering::SeqCst);
+        let device = fake_device(control, SampleFormat::RawAdc);
+        let active_state = device.info.active_state.clone();
+
+        let error = device
+            .shutdown()
+            .wait()
+            .expect_err("receiver shutdown should fail");
+
+        assert!(matches!(
+            error,
+            Error::Operation {
+                operation: "turning off the receiver during shutdown",
+                ..
+            }
+        ));
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+        assert!(!active_state.bias_tee().expect("successful bias-off state"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_device_drop_performs_best_effort_shutdown() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let device = fake_device(control, SampleFormat::RawAdc);
+
+        drop(device);
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1831,8 +2015,9 @@ mod tests {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn dropping_owned_async_stream_closes_queue_without_sync_control() {
+    fn native_drop_closes_async_queue_and_shuts_down_hardware() {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
@@ -1843,7 +2028,7 @@ mod tests {
 
             drop(stream);
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
-            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
         });
     }
 }

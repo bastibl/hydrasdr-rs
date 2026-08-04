@@ -45,6 +45,7 @@
 //!     }
 //!     let stats = rx.finish()?;
 //!     println!("{stats:?}");
+//!     dev.shutdown().wait()?;
 //!
 //!     Ok(())
 //! }

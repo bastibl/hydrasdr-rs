@@ -67,11 +67,12 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
         let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples).await?;
         let stats = rx.stop().await?;
-        let _dev = rx.into_device();
+        rx.shutdown().await?;
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short async RX complete: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer async smoke stream.");
+        dev.shutdown().await?;
     }
 
     Ok(())

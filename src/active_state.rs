@@ -281,6 +281,14 @@ impl ActiveState {
             invalidate_gain(&mut state, gain, LAST_UPDATE_FAILED);
         }
     }
+
+    pub(crate) fn begin_bias_tee_update(&self) {
+        self.lock().bias_tee = ActiveValue::Unknown(UPDATE_INCOMPLETE);
+    }
+
+    pub(crate) fn set_bias_tee_result(&self, enabled: bool, succeeded: bool) {
+        self.lock().bias_tee = update_result(enabled, succeeded);
+    }
 }
 
 fn invalidate_config(state: &mut ActiveStateInner, config: &Config, reason: UnavailableReason) {

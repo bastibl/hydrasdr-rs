@@ -36,6 +36,7 @@ fn hardware_open_and_query_device_info() {
     assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(6));
     assert!(!info.active_state.agc_enabled().unwrap());
     assert!(!info.active_state.bias_tee().unwrap());
+    dev.shutdown().wait().expect("explicitly shut down device");
 }
 
 #[test]

@@ -46,10 +46,12 @@ fn main() -> hydrasdr_rs::Result<()> {
         let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
         let stats = rx.stop()?;
+        rx.shutdown().wait()?;
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short RX complete: {stats:?}");
     } else {
         println!("RX not started; pass --rx with --run for a one-buffer smoke stream.");
+        dev.shutdown().wait()?;
     }
 
     Ok(())

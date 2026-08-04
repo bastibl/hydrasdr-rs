@@ -538,6 +538,14 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
     }
 
+    /// Enable or disable RF input bias power directly.
+    pub(crate) fn set_rf_bias(
+        &self,
+        enabled: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+        self.control_out(VendorControlRequest::set_rf_bias(u8::from(enabled)))
+    }
+
     fn set_samplerate_for_mode(
         &mut self,
         samplerate: u32,
