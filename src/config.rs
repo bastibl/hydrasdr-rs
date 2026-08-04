@@ -109,11 +109,6 @@ pub enum GainPreset {
 /// Gain configuration applied after sample/rate/RF-port setup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GainConfig {
-    /// Leave direct gain state unchanged.
-    ///
-    /// This is opt-in. The standard [`Config`] default explicitly sets 35 dB
-    /// total gain and disables both AGCs.
-    Unchanged,
     /// Apply one RFOne preset.
     Preset(GainPreset),
     /// Apply explicit component gains/AGC bits where present.
@@ -163,8 +158,7 @@ impl From<GainPreset> for GainConfig {
 ///
 /// The default is complete: it selects RX0, disables the bias tee and both
 /// AGCs, and sets 35 dB total gain as LNA 14 dB, mixer 15 dB, and VGA 6 dB.
-/// Callers can opt out of gain writes with [`GainConfig::Unchanged`] or
-/// construct partial manual gain updates explicitly.
+/// Callers can construct partial manual gain updates explicitly.
 ///
 /// Building a config validates static RFOne and USB protocol constraints
 /// without opening hardware. It does not prove that connected firmware
@@ -314,7 +308,6 @@ impl<M: SampleMode> Config<M> {
 
     pub(crate) fn set_gain_internal(&mut self, value: GainConfig) {
         self.gain = match (self.gain, value) {
-            (current, GainConfig::Unchanged) => current,
             (
                 GainConfig::Manual {
                     lna: current_lna,
@@ -556,21 +549,6 @@ pub(crate) fn validate_gain(gain: GainConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn applied_config_preserves_unchanged_gain() {
-        let mut active = Config::default();
-        let applied = Config::builder()
-            .frequency_hz(144_500_000)
-            .gain(GainConfig::Unchanged)
-            .build()
-            .expect("valid partial configuration");
-
-        active.apply_internal(&applied);
-
-        assert_eq!(active.frequency_hz(), 144_500_000);
-        assert_eq!(active.gain(), GainConfig::default());
-    }
 
     #[test]
     fn applied_manual_gain_merges_unspecified_stages() {

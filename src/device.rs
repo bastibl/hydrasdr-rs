@@ -900,7 +900,6 @@ fn gain_step<C: ControlBackend>(
 
 fn gain_config_plan(gain: crate::GainConfig, extended: bool) -> Vec<VendorControlRequest> {
     match gain {
-        crate::GainConfig::Unchanged => Vec::new(),
         crate::GainConfig::Preset(crate::GainPreset::Linearity(value)) => {
             if extended {
                 extended_gain_plan(GainType::Linearity, value)

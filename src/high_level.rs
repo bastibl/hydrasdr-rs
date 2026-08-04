@@ -1697,7 +1697,6 @@ mod tests {
         let state = Arc::clone(&control.state);
         state.fail_packing.store(true, Ordering::SeqCst);
         let config = Config::builder()
-            .gain(GainConfig::Unchanged)
             .bias_tee(true)
             .build()
             .expect("valid fake configuration");
