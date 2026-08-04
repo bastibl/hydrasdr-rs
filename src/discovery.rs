@@ -35,8 +35,11 @@ pub struct DeviceDescriptor {
     pub pid: u16,
     /// Static board description matched from the known VID/PID table.
     pub description: &'static str,
-    /// Parsed 64-bit RFOne serial number, if the device reports one.
-    pub serial: Option<u64>,
+    /// Parsed 64-bit RFOne serial number.
+    ///
+    /// This is `0` when the USB serial string is absent or does not use the
+    /// expected HydraSDR format.
+    pub serial: u64,
     /// USB product string, if the backend reports one.
     pub product_string: Option<String>,
 }
@@ -49,7 +52,7 @@ impl DeviceDescriptor {
             vid: device_id.vid,
             pid: device_id.pid,
             description: device_id.description,
-            serial: info.serial_number().and_then(parse_hydrasdr_serial),
+            serial: normalized_serial(info.serial_number()),
             product_string: info.product_string().map(str::to_owned),
         })
     }
@@ -91,7 +94,7 @@ async fn request_nusb_device(serial: Option<u64>) -> Result<Option<nusb::DeviceI
         .iter()
         .map(|device_id| {
             let selector = nusb::DeviceSelector::all().with_vid_pid(device_id.vid, device_id.pid);
-            if let Some(serial) = serial {
+            if let Some(serial) = serial.filter(|serial| *serial != 0) {
                 selector.with_serial_number(format!("HYDRASDR SN:{serial:016X}"))
             } else {
                 selector
@@ -113,15 +116,18 @@ pub(crate) async fn request_device_permission(serial: Option<u64>) -> Result<()>
 
     request_nusb_device(serial)
         .await?
+        .filter(|device| matches_device(device, serial))
         .map(|_| ())
         .ok_or(Error::DeviceNotFound)
 }
 
 fn matches_device(device: &nusb::DeviceInfo, serial: Option<u64>) -> bool {
     find_usb_device_id(device.vendor_id(), device.product_id()).is_some()
-        && serial.is_none_or(|wanted| {
-            device.serial_number().and_then(parse_hydrasdr_serial) == Some(wanted)
-        })
+        && serial.is_none_or(|wanted| normalized_serial(device.serial_number()) == wanted)
+}
+
+fn normalized_serial(serial: Option<&str>) -> u64 {
+    serial.and_then(parse_hydrasdr_serial).unwrap_or(0)
 }
 
 /// Parse the C firmware serial string format `HYDRASDR SN:<16 hex digits>`.
@@ -131,4 +137,21 @@ pub(crate) fn parse_hydrasdr_serial(serial: &str) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(hex, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_normalization_reserves_zero_for_missing_or_invalid_values() {
+        assert_eq!(normalized_serial(None), 0);
+        assert_eq!(normalized_serial(Some("")), 0);
+        assert_eq!(normalized_serial(Some("HYDRASDR SN:not-hex")), 0);
+        assert_eq!(normalized_serial(Some("HYDRASDR SN:0000000000000000")), 0);
+        assert_eq!(
+            normalized_serial(Some("HYDRASDR SN:123456789ABCDEF0")),
+            0x1234_5678_9abc_def0
+        );
+    }
 }

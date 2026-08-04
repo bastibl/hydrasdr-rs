@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
-    Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq, GainConfig, GainPreset,
-    RawAdc, RfPort, SampleFormat, StageGain,
+    Config, Device, DeviceBuilder, DeviceDescriptor, DeviceInfo, Error, ErrorKind, F32Iq,
+    GainConfig, GainPreset, RawAdc, RfPort, SampleFormat, StageGain,
 };
 
 fn assert_f32_builder(_: DeviceBuilder<F32Iq>) {}
@@ -175,4 +175,15 @@ fn public_error_and_metadata_are_ergonomic() {
     };
 
     assert_eq!(info.serial, Some(0x1234));
+
+    let descriptor = DeviceDescriptor {
+        vid: 0x38af,
+        pid: 0x0001,
+        description: "HydraSDR RFOne Official VID/PID",
+        serial: 0,
+        product_string: None,
+    };
+
+    let serial: u64 = descriptor.serial;
+    assert_eq!(serial, 0);
 }

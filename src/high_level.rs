@@ -211,6 +211,8 @@ impl Device<F32Iq> {
     }
 
     /// Open one visible HydraSDR RFOne by serial with default high-level configuration.
+    ///
+    /// Zero opens any device whose USB serial is absent, invalid, or zero.
     pub fn open_serial(serial: u64) -> impl MaybeFuture<Output = Result<Self>> {
         Self::builder().serial(serial).open()
     }
@@ -731,7 +733,9 @@ impl Default for DeviceBuilder<F32Iq> {
 }
 
 impl<M: SampleMode> DeviceBuilder<M> {
-    /// Select a device by parsed 64-bit serial number.
+    /// Select a device by normalized 64-bit serial number.
+    ///
+    /// Zero selects any device whose USB serial is absent, invalid, or zero.
     pub fn serial(mut self, serial: u64) -> Self {
         self.selector = DeviceSelector::Serial(serial);
         self

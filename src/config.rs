@@ -17,7 +17,9 @@ const MAX_PRESET_GAIN: u8 = 21;
 pub(crate) enum DeviceSelector {
     /// Open the first visible HydraSDR RFOne.
     First,
-    /// Open the HydraSDR RFOne with a parsed 64-bit serial number.
+    /// Open the HydraSDR RFOne with a normalized 64-bit serial number.
+    ///
+    /// Zero selects any device whose serial is absent, invalid, or zero.
     Serial(u64),
 }
 
