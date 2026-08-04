@@ -258,7 +258,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         &self,
         config: &Config<M>,
     ) -> impl MaybeFuture<Output = Result<AppliedConfig>> + use<C, M> {
-        let validation = config.validate();
         let frequency = config.frequency_hz();
         let sample_rate = config.sample_rate_hz();
         let sample_type = M::FORMAT.sample_type();
@@ -287,14 +286,12 @@ impl<C: ControlBackend> HydraSdr<C> {
             gain_requests.next(),
             gain_requests.next(),
         ];
+        let set_frequency = Self::control_out_with(
+            Arc::clone(&control),
+            VendorControlRequest::set_frequency(frequency),
+        );
 
-        ready(validation)
-            .and_then({
-                let control = Arc::clone(&control);
-                move |()| {
-                    Self::control_out_with(control, VendorControlRequest::set_frequency(frequency))
-                }
-            })
+        set_frequency
             .and_then(move |()| bandwidths)
             .and_then({
                 let control = Arc::clone(&control);

@@ -65,7 +65,7 @@ cargo check --target wasm32-unknown-unknown
 
 ## Configuration validation
 
-`Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before they touch hardware. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
+`Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before returning a `Config` or touching hardware. Every `Config` obtainable through the public API is therefore valid; applying one does not repeat its static validation. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
 `Device::config()` returns the typed configuration last successfully applied through the driver; `RxStream::config()` carries the same snapshot while the stream owns the device. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged.
 

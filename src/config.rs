@@ -185,6 +185,7 @@ impl From<GainPreset> for GainConfig {
 /// Building a config validates static RFOne and USB protocol constraints
 /// without opening hardware. It does not prove that connected firmware
 /// advertises a sample rate or optional capability such as manual bandwidth.
+/// Every `Config` obtainable through the public API has passed this validation.
 ///
 /// ```
 /// use hydrasdr_rs::{Bandwidth, Config, GainPreset};
@@ -309,11 +310,7 @@ impl<M: SampleMode> Config<M> {
         self.bias_tee
     }
 
-    /// Validate static RFOne and USB protocol constraints without touching USB.
-    ///
-    /// This does not query device-advertised sample rates or optional
-    /// capabilities; those require an opened device and firmware interaction.
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
         validate_sample_rate(self.sample_rate_hz, M::FORMAT)?;
         validate_bandwidth(self.bandwidth)?;
@@ -502,6 +499,8 @@ impl<M: SampleMode> ConfigBuilder<M> {
     }
 
     /// Validate and build a reusable configuration.
+    ///
+    /// A successfully built [`Config`] remains valid for its lifetime.
     pub fn build(self) -> Result<Config<M>> {
         self.config.validate()?;
         Ok(self.config)
