@@ -912,41 +912,32 @@ fn gain_config_plan(gain: crate::GainConfig, extended: bool) -> Vec<VendorContro
                 gain_plan(GainType::Sensitivity, value)
             }
         }
-        crate::GainConfig::Manual {
-            lna,
-            mixer,
-            vga,
-            lna_agc,
-            mixer_agc,
-        } if extended => {
+        crate::GainConfig::Stages { lna, mixer, vga } if extended => {
             let mut requests = Vec::new();
             let mut push = |gain_type, value| {
                 requests.push(VendorControlRequest::unified_gain(gain_type, value));
             };
-            if let Some(value) = lna {
-                push(GainType::Lna, value);
-            }
-            if let Some(value) = mixer {
-                push(GainType::Mixer, value);
-            }
-            if let Some(value) = vga {
-                push(GainType::Vga, value);
-            }
-            if let Some(enabled) = lna_agc {
-                push(GainType::LnaAgc, u8::from(enabled));
-            }
-            if let Some(enabled) = mixer_agc {
-                push(GainType::MixerAgc, u8::from(enabled));
-            }
+            push_stage_gain(&mut push, GainType::Lna, GainType::LnaAgc, lna);
+            push_stage_gain(&mut push, GainType::Mixer, GainType::MixerAgc, mixer);
+            push(GainType::Vga, vga);
             requests
         }
-        crate::GainConfig::Manual {
-            lna,
-            mixer,
-            vga,
-            lna_agc,
-            mixer_agc,
-        } => manual_gain_plan(lna, mixer, vga, lna_agc, mixer_agc),
+        crate::GainConfig::Stages { lna, mixer, vga } => legacy_stage_gain_plan(lna, mixer, vga),
+    }
+}
+
+fn push_stage_gain(
+    push: &mut impl FnMut(GainType, u8),
+    gain_type: GainType,
+    agc_type: GainType,
+    gain: crate::StageGain,
+) {
+    match gain {
+        crate::StageGain::Manual(value) => {
+            push(agc_type, 0);
+            push(gain_type, value);
+        }
+        crate::StageGain::Agc => push(agc_type, 1),
     }
 }
 
@@ -954,32 +945,30 @@ fn extended_gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlReques
     vec![VendorControlRequest::unified_gain(gain_type, value)]
 }
 
-fn manual_gain_plan(
-    lna: Option<u8>,
-    mixer: Option<u8>,
-    vga: Option<u8>,
-    lna_agc: Option<bool>,
-    mixer_agc: Option<bool>,
+fn legacy_stage_gain_plan(
+    lna: crate::StageGain,
+    mixer: crate::StageGain,
+    vga: u8,
 ) -> Vec<VendorControlRequest> {
     let mut requests = Vec::new();
     let mut push = |request, value| {
         requests.push(VendorControlRequest::legacy_gain(request, value));
     };
-    if let Some(value) = lna {
-        push(VendorRequest::SetLnaGain, value);
+    match lna {
+        crate::StageGain::Manual(value) => {
+            push(VendorRequest::SetLnaAgc, 0);
+            push(VendorRequest::SetLnaGain, value);
+        }
+        crate::StageGain::Agc => push(VendorRequest::SetLnaAgc, 1),
     }
-    if let Some(value) = mixer {
-        push(VendorRequest::SetMixerGain, value);
+    match mixer {
+        crate::StageGain::Manual(value) => {
+            push(VendorRequest::SetMixerAgc, 0);
+            push(VendorRequest::SetMixerGain, value);
+        }
+        crate::StageGain::Agc => push(VendorRequest::SetMixerAgc, 1),
     }
-    if let Some(value) = vga {
-        push(VendorRequest::SetVgaGain, value);
-    }
-    if let Some(enabled) = lna_agc {
-        push(VendorRequest::SetLnaAgc, u8::from(enabled));
-    }
-    if let Some(enabled) = mixer_agc {
-        push(VendorRequest::SetMixerAgc, u8::from(enabled));
-    }
+    push(VendorRequest::SetVgaGain, vga);
     requests
 }
 
@@ -1426,6 +1415,44 @@ mod tests {
 
         assert!(validate_samplerate_response(&selected, &[1, 12, 0, 0]).is_ok());
         assert!(validate_samplerate_response(&selected, &[1, 8, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn stage_gain_config_produces_a_complete_legacy_plan() {
+        let gain = crate::GainConfig::Stages {
+            lna: crate::StageGain::Manual(3),
+            mixer: crate::StageGain::Agc,
+            vga: 4,
+        };
+
+        assert_eq!(
+            gain_config_plan(gain, false),
+            [
+                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
+                VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, 3),
+                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 1),
+                VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_gain_config_produces_a_complete_extended_plan() {
+        let gain = crate::GainConfig::Stages {
+            lna: crate::StageGain::Manual(3),
+            mixer: crate::StageGain::Agc,
+            vga: 4,
+        };
+
+        assert_eq!(
+            gain_config_plan(gain, true),
+            [
+                VendorControlRequest::unified_gain(GainType::LnaAgc, 0),
+                VendorControlRequest::unified_gain(GainType::Lna, 3),
+                VendorControlRequest::unified_gain(GainType::MixerAgc, 1),
+                VendorControlRequest::unified_gain(GainType::Vga, 4),
+            ]
+        );
     }
 
     #[test]

@@ -110,41 +110,42 @@ pub enum GainPreset {
     Sensitivity(u8),
 }
 
-/// Gain configuration applied after sample/rate/RF-port setup.
+/// Complete gain configuration applied after sample/rate/RF-port setup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GainConfig {
     /// Apply one RFOne preset.
     Preset(GainPreset),
-    /// Apply explicit component gains/AGC bits where present.
-    Manual {
-        /// LNA gain value, if explicitly configured.
-        ///
-        /// RFOne accepts values in the inclusive range `0..=14`.
-        lna: Option<u8>,
-        /// Mixer gain value, if explicitly configured.
-        ///
-        /// RFOne accepts values in the inclusive range `0..=15`.
-        mixer: Option<u8>,
-        /// VGA gain value, if explicitly configured.
+    /// Configure every physical gain stage, including each AGC mode.
+    Stages {
+        /// LNA gain control.
+        lna: StageGain,
+        /// Mixer gain control.
+        mixer: StageGain,
+        /// VGA gain value.
         ///
         /// RFOne accepts values in the inclusive range `0..=15`.
-        vga: Option<u8>,
-        /// LNA AGC enable state, if explicitly configured.
-        lna_agc: Option<bool>,
-        /// Mixer AGC enable state, if explicitly configured.
-        mixer_agc: Option<bool>,
+        vga: u8,
     },
 }
 
-/// Return the complete standard manual-gain configuration.
+/// Gain control for an LNA or mixer stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StageGain {
+    /// Use a fixed stage gain.
+    ///
+    /// RFOne accepts LNA values in `0..=14` and mixer values in `0..=15`.
+    Manual(u8),
+    /// Let the hardware AGC control the stage.
+    Agc,
+}
+
+/// Return the standard fixed-gain configuration.
 impl Default for GainConfig {
     fn default() -> Self {
-        Self::Manual {
-            lna: Some(14),
-            mixer: Some(15),
-            vga: Some(6),
-            lna_agc: Some(false),
-            mixer_agc: Some(false),
+        Self::Stages {
+            lna: StageGain::Manual(14),
+            mixer: StageGain::Manual(15),
+            vga: 6,
         }
     }
 }
@@ -162,7 +163,6 @@ impl From<GainPreset> for GainConfig {
 ///
 /// The default is complete: it selects RX0, disables the bias tee and both
 /// AGCs, and sets 35 dB total gain as LNA 14 dB, mixer 15 dB, and VGA 6 dB.
-/// Callers can construct partial manual gain updates explicitly.
 ///
 /// Building a config validates static RFOne and USB protocol constraints
 /// without opening hardware. It does not prove that connected firmware
@@ -311,31 +311,7 @@ impl<M: SampleMode> Config<M> {
     }
 
     pub(crate) fn set_gain_internal(&mut self, value: GainConfig) {
-        self.gain = match (self.gain, value) {
-            (
-                GainConfig::Manual {
-                    lna: current_lna,
-                    mixer: current_mixer,
-                    vga: current_vga,
-                    lna_agc: current_lna_agc,
-                    mixer_agc: current_mixer_agc,
-                },
-                GainConfig::Manual {
-                    lna,
-                    mixer,
-                    vga,
-                    lna_agc,
-                    mixer_agc,
-                },
-            ) => GainConfig::Manual {
-                lna: lna.or(current_lna),
-                mixer: mixer.or(current_mixer),
-                vga: vga.or(current_vga),
-                lna_agc: lna_agc.or(current_lna_agc),
-                mixer_agc: mixer_agc.or(current_mixer_agc),
-            },
-            (_, applied) => applied,
-        };
+        self.gain = value;
     }
 
     pub(crate) fn apply_internal(&mut self, applied: &Self) {
@@ -429,7 +405,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
     /// Set the gain configuration.
     ///
     /// Preset gain indexes must be in the inclusive range `0..=21`.
-    /// Manual component gains use the ranges documented on [`GainConfig::Manual`].
+    /// Stage gains use the ranges documented on [`StageGain::Manual`].
     pub fn gain(mut self, value: impl Into<GainConfig>) -> Self {
         self.config.gain = value.into();
         self
@@ -528,53 +504,24 @@ pub(crate) fn validate_gain(gain: GainConfig) -> Result<()> {
                 "RFOne preset gain must be in 0..=21",
             ))
         }
-        GainConfig::Manual {
-            lna: Some(value), ..
+        GainConfig::Stages {
+            lna: StageGain::Manual(value),
+            ..
         } if value > RFONE_LNA_MAX_GAIN => Err(Error::invalid_config(
             "gain",
             "manual LNA gain must be in 0..=14",
         )),
-        GainConfig::Manual {
-            mixer: Some(value), ..
+        GainConfig::Stages {
+            mixer: StageGain::Manual(value),
+            ..
         } if value > RFONE_MIXER_MAX_GAIN => Err(Error::invalid_config(
             "gain",
             "manual mixer gain must be in 0..=15",
         )),
-        GainConfig::Manual {
-            vga: Some(value), ..
-        } if value > RFONE_VGA_MAX_GAIN => Err(Error::invalid_config(
+        GainConfig::Stages { vga, .. } if vga > RFONE_VGA_MAX_GAIN => Err(Error::invalid_config(
             "gain",
             "manual VGA gain must be in 0..=15",
         )),
         _ => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn applied_manual_gain_merges_unspecified_stages() {
-        let mut active = Config::default();
-
-        active.set_gain_internal(GainConfig::Manual {
-            lna: Some(3),
-            mixer: None,
-            vga: None,
-            lna_agc: None,
-            mixer_agc: Some(true),
-        });
-
-        assert_eq!(
-            active.gain(),
-            GainConfig::Manual {
-                lna: Some(3),
-                mixer: Some(15),
-                vga: Some(6),
-                lna_agc: Some(false),
-                mixer_agc: Some(true),
-            }
-        );
     }
 }

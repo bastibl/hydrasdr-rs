@@ -1,7 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use hydrasdr_rs::{Device, GainConfig, GainPreset, MaybeFuture, RfPort};
+use hydrasdr_rs::{Device, GainConfig, GainPreset, MaybeFuture, RfPort, StageGain};
 
 static HARDWARE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -34,12 +34,10 @@ fn hardware_open_and_query_device_info() {
     assert_eq!(config.rf_port(), Some(RfPort::Rx0));
     assert_eq!(
         config.gain(),
-        GainConfig::Manual {
-            lna: Some(14),
-            mixer: Some(15),
-            vga: Some(6),
-            lna_agc: Some(false),
-            mixer_agc: Some(false),
+        GainConfig::Stages {
+            lna: StageGain::Manual(14),
+            mixer: StageGain::Manual(15),
+            vga: 6,
         }
     );
     assert_eq!(config.bias_tee(), Some(false));

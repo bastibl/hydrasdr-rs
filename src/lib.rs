@@ -72,6 +72,7 @@ mod usb;
 
 pub use config::{
     Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat, SampleMode,
+    StageGain,
 };
 pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
 pub use discovery::DeviceDescriptor;

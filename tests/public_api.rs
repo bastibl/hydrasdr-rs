@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
     Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq, GainConfig, GainPreset,
-    RawAdc, RfPort, SampleFormat,
+    RawAdc, RfPort, SampleFormat, StageGain,
 };
 
 fn assert_f32_builder(_: DeviceBuilder<F32Iq>) {}
@@ -24,12 +24,10 @@ fn public_default_config_initializes_all_hardware_settings() {
     assert_eq!(config.rf_port(), Some(RfPort::Rx0));
     assert_eq!(
         config.gain(),
-        GainConfig::Manual {
-            lna: Some(14),
-            mixer: Some(15),
-            vga: Some(6),
-            lna_agc: Some(false),
-            mixer_agc: Some(false),
+        GainConfig::Stages {
+            lna: StageGain::Manual(14),
+            mixer: StageGain::Manual(15),
+            vga: 6,
         }
     );
     assert_eq!(config.bias_tee(), Some(false));
@@ -116,38 +114,30 @@ fn public_config_builder_validates_vendor_parameter_ranges() {
 fn public_config_builder_validates_manual_gain_ranges() {
     assert!(
         Config::builder()
-            .gain(GainConfig::Manual {
-                lna: Some(14),
-                mixer: Some(15),
-                vga: Some(15),
-                lna_agc: Some(true),
-                mixer_agc: Some(false),
+            .gain(GainConfig::Stages {
+                lna: StageGain::Agc,
+                mixer: StageGain::Manual(15),
+                vga: 15,
             })
             .build()
             .is_ok()
     );
 
     for gain in [
-        GainConfig::Manual {
-            lna: Some(15),
-            mixer: None,
-            vga: None,
-            lna_agc: None,
-            mixer_agc: None,
+        GainConfig::Stages {
+            lna: StageGain::Manual(15),
+            mixer: StageGain::Agc,
+            vga: 0,
         },
-        GainConfig::Manual {
-            lna: None,
-            mixer: Some(16),
-            vga: None,
-            lna_agc: None,
-            mixer_agc: None,
+        GainConfig::Stages {
+            lna: StageGain::Agc,
+            mixer: StageGain::Manual(16),
+            vga: 0,
         },
-        GainConfig::Manual {
-            lna: None,
-            mixer: None,
-            vga: Some(16),
-            lna_agc: None,
-            mixer_agc: None,
+        GainConfig::Stages {
+            lna: StageGain::Agc,
+            mixer: StageGain::Agc,
+            vga: 16,
         },
         GainConfig::Preset(GainPreset::Linearity(22)),
     ] {

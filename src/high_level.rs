@@ -202,7 +202,7 @@ impl<M: SampleMode> Device<M> {
         })
     }
 
-    /// Apply only the supplied gain update.
+    /// Replace the complete gain configuration.
     pub fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> {
         let config = &mut self.config;
         self.inner.set_gain(gain).map(move |result| {
@@ -432,7 +432,7 @@ impl<M: SampleMode> DeviceBuilder<M> {
     /// Set the gain configuration.
     ///
     /// Preset gain indexes must be in the inclusive range `0..=21`.
-    /// Manual component gains use the ranges documented on [`crate::GainConfig::Manual`].
+    /// Stage gains use the ranges documented on [`crate::StageGain::Manual`].
     pub fn gain(mut self, value: impl Into<crate::GainConfig>) -> Self {
         self.config = self.config.gain(value);
         self
