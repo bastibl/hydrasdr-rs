@@ -1,7 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use hydrasdr_rs::{Device, GainPreset, GainStage, MaybeFuture, RfPort};
+use hydrasdr_rs::{Device, GainConfig, GainPreset, MaybeFuture, RfPort};
 
 static HARDWARE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -30,13 +30,19 @@ fn hardware_open_and_query_device_info() {
             .collect::<Vec<_>>(),
         [(RfPort::Rx0, "ANT")]
     );
-    let state = dev.active_state();
-    assert_eq!(state.rf_port().unwrap(), RfPort::Rx0);
-    assert_eq!(state.gain(GainStage::Lna).unwrap(), Some(14));
-    assert_eq!(state.gain(GainStage::Mixer).unwrap(), Some(15));
-    assert_eq!(state.gain(GainStage::Vga).unwrap(), Some(6));
-    assert!(!state.agc_enabled().unwrap());
-    assert!(!state.bias_tee().unwrap());
+    let config = dev.config();
+    assert_eq!(config.rf_port(), Some(RfPort::Rx0));
+    assert_eq!(
+        config.gain(),
+        GainConfig::Manual {
+            lna: Some(14),
+            mixer: Some(15),
+            vga: Some(6),
+            lna_agc: Some(false),
+            mixer_agc: Some(false),
+        }
+    );
+    assert_eq!(config.bias_tee(), Some(false));
     dev.shutdown().wait().expect("explicitly shut down device");
 }
 
@@ -55,7 +61,7 @@ fn hardware_configure_frequency_sample_rate_and_gains() {
         .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    assert_eq!(dev.active_state().sample_rate_hz().unwrap(), 10_000_000);
+    assert_eq!(dev.config().sample_rate_hz(), 10_000_000);
 }
 
 #[test]

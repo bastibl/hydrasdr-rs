@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
-    ActiveState, Bandwidth, Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq,
-    GainConfig, GainPreset, RawAdc, RfPort, SampleFormat,
+    Bandwidth, Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq, GainConfig,
+    GainPreset, RawAdc, RfPort, SampleFormat,
 };
 
 fn assert_f32_builder(_: DeviceBuilder<F32Iq>) {}
@@ -196,9 +196,4 @@ fn public_error_and_metadata_are_ergonomic() {
     };
 
     assert_eq!(info.serial, Some(0x1234));
-    let active_state = ActiveState::default();
-    assert_eq!(
-        active_state.sample_format().unwrap_err().kind(),
-        ErrorKind::StateUnavailable
-    );
 }

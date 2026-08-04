@@ -67,6 +67,8 @@ cargo check --target wasm32-unknown-unknown
 
 `Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before they touch hardware. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
+`Device::config()` returns the typed configuration last successfully applied through the driver; `RxStream::config()` carries the same snapshot while the stream owns the device. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged.
+
 The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
 
 Manual analog bandwidth uses the same kind of capability-gated vendor protocol. Current RFOne firmware does not advertise bandwidth control, so `Bandwidth::ManualHz`, `Device::bandwidths()`, and the focused bandwidth setters return `Error::Unsupported` when applied. The `1_000..=65_535_999` Hz validation bound is only the request encoding range for firmware that implements that capability.

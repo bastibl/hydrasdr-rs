@@ -328,6 +328,66 @@ impl<M: SampleMode> Config<M> {
     pub(crate) const fn packing_internal(&self) -> bool {
         self.packing
     }
+
+    pub(crate) fn set_frequency_hz_internal(&mut self, value: u64) {
+        self.frequency_hz = value;
+    }
+
+    pub(crate) fn set_sample_rate_hz_internal(&mut self, value: u32) {
+        self.sample_rate_hz = value;
+    }
+
+    pub(crate) fn set_bandwidth_internal(&mut self, value: Bandwidth) {
+        self.bandwidth = value;
+    }
+
+    pub(crate) fn set_rf_port_internal(&mut self, value: RfPort) {
+        self.rf_port = Some(value);
+    }
+
+    pub(crate) fn set_gain_internal(&mut self, value: GainConfig) {
+        self.gain = match (self.gain, value) {
+            (current, GainConfig::Unchanged) => current,
+            (
+                GainConfig::Manual {
+                    lna: current_lna,
+                    mixer: current_mixer,
+                    vga: current_vga,
+                    lna_agc: current_lna_agc,
+                    mixer_agc: current_mixer_agc,
+                },
+                GainConfig::Manual {
+                    lna,
+                    mixer,
+                    vga,
+                    lna_agc,
+                    mixer_agc,
+                },
+            ) => GainConfig::Manual {
+                lna: lna.or(current_lna),
+                mixer: mixer.or(current_mixer),
+                vga: vga.or(current_vga),
+                lna_agc: lna_agc.or(current_lna_agc),
+                mixer_agc: mixer_agc.or(current_mixer_agc),
+            },
+            (_, applied) => applied,
+        };
+    }
+
+    pub(crate) fn apply_internal(&mut self, applied: &Self) {
+        self.frequency_hz = applied.frequency_hz;
+        self.sample_rate_hz = applied.sample_rate_hz;
+        self.bandwidth = applied.bandwidth;
+        self.decimation_mode = applied.decimation_mode;
+        if let Some(port) = applied.rf_port {
+            self.rf_port = Some(port);
+        }
+        self.set_gain_internal(applied.gain);
+        if let Some(enabled) = applied.bias_tee {
+            self.bias_tee = Some(enabled);
+        }
+        self.packing = applied.packing;
+    }
 }
 
 impl Config<RawAdc> {
@@ -565,5 +625,49 @@ pub(crate) fn validate_gain(gain: GainConfig) -> Result<()> {
             "manual VGA gain must be in 0..=15",
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applied_config_preserves_unchanged_gain() {
+        let mut active = Config::default();
+        let applied = Config::builder()
+            .frequency_hz(144_500_000)
+            .gain(GainConfig::Unchanged)
+            .build()
+            .expect("valid partial configuration");
+
+        active.apply_internal(&applied);
+
+        assert_eq!(active.frequency_hz(), 144_500_000);
+        assert_eq!(active.gain(), GainConfig::default());
+    }
+
+    #[test]
+    fn applied_manual_gain_merges_unspecified_stages() {
+        let mut active = Config::default();
+
+        active.set_gain_internal(GainConfig::Manual {
+            lna: Some(3),
+            mixer: None,
+            vga: None,
+            lna_agc: None,
+            mixer_agc: Some(true),
+        });
+
+        assert_eq!(
+            active.gain(),
+            GainConfig::Manual {
+                lna: Some(3),
+                mixer: Some(15),
+                vga: Some(6),
+                lna_agc: Some(false),
+                mixer_agc: Some(true),
+            }
+        );
     }
 }

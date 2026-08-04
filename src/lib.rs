@@ -53,7 +53,6 @@
 
 #![deny(missing_docs)]
 
-mod active_state;
 mod commands;
 mod config;
 mod constants;
@@ -68,7 +67,6 @@ mod streaming;
 mod types;
 mod usb;
 
-pub use active_state::{ActiveState, GainStage};
 pub use config::{
     Bandwidth, Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat,
     SampleMode,

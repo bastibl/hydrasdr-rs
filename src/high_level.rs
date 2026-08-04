@@ -1,4 +1,4 @@
-//! HydraSDR RFOne sync and async APIs.
+//! High-level synchronous and asynchronous HydraSDR RFOne driver interface.
 
 use nusb::MaybeFuture;
 use std::future::{Future, IntoFuture};
@@ -14,7 +14,6 @@ use crate::config::{
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
-use core::marker::PhantomData;
 use std::time::Duration;
 
 use crate::streaming::{
@@ -64,7 +63,6 @@ use crate::usb::control::{ControlBackend, NusbControl};
 pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
     direct: HydraSdr<C>,
     info: DeviceInfo,
-    active_state: crate::ActiveState,
     #[cfg(not(target_arch = "wasm32"))]
     shutdown_on_drop: bool,
 }
@@ -73,7 +71,7 @@ pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
 #[derive(Debug)]
 pub struct Device<M: SampleMode = F32Iq> {
     inner: DeviceInner<NusbControl>,
-    mode: PhantomData<fn() -> M>,
+    config: Config<M>,
 }
 
 impl Device<F32Iq> {
@@ -113,12 +111,12 @@ impl<M: SampleMode> Device<M> {
         self.inner.info()
     }
 
-    /// Return the receiver state maintained by this driver.
+    /// Return the configuration last successfully applied through this driver.
     ///
-    /// Cloned handles share the same state, which is updated after every
-    /// configuration operation attempted through this device.
-    pub fn active_state(&self) -> crate::ActiveState {
-        self.inner.active_state()
+    /// RFOne's write-only controls do not provide hardware readback. A failed or
+    /// cancelled configuration operation leaves this snapshot unchanged.
+    pub fn config(&self) -> &Config<M> {
+        &self.config
     }
 
     /// Return the cached sample rates advertised for the active sample format.
@@ -149,13 +147,31 @@ impl<M: SampleMode> Device<M> {
     ///     device.configure(&f32_config).wait().unwrap();
     /// }
     /// ```
-    pub fn configure(&mut self, config: &Config<M>) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.configure(config)
+    pub fn configure<'a>(
+        &'a mut self,
+        config: &'a Config<M>,
+    ) -> impl MaybeFuture<Output = Result<()>> + 'a {
+        let applied = config.clone();
+        let active = &mut self.config;
+        self.inner.configure(config).map(move |result| {
+            if result.is_ok() {
+                active.apply_internal(&applied);
+            }
+            result
+        })
     }
 
     /// Set only the tuned center frequency.
     pub fn set_frequency_hz(&mut self, frequency_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.set_frequency_hz(frequency_hz)
+        let config = &mut self.config;
+        self.inner
+            .set_frequency_hz(frequency_hz)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_frequency_hz_internal(frequency_hz);
+                }
+                result
+            })
     }
 
     /// Set only the requested sample rate.
@@ -168,24 +184,52 @@ impl<M: SampleMode> Device<M> {
         &mut self,
         sample_rate_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.set_sample_rate_hz(sample_rate_hz)
+        let config = &mut self.config;
+        self.inner
+            .set_sample_rate_hz(sample_rate_hz, M::FORMAT)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_sample_rate_hz_internal(sample_rate_hz);
+                }
+                result
+            })
     }
 
     /// Set only the manual analog bandwidth on firmware that advertises it.
     ///
     /// Current RFOne firmware returns [`Error::Unsupported`].
     pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.set_bandwidth_hz(bandwidth_hz)
+        let config = &mut self.config;
+        self.inner
+            .set_bandwidth_hz(bandwidth_hz)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_bandwidth_internal(Bandwidth::ManualHz(bandwidth_hz));
+                }
+                result
+            })
     }
 
     /// Set only the selected RF input port.
     pub fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.set_rf_port(port)
+        let config = &mut self.config;
+        self.inner.set_rf_port(port).map(move |result| {
+            if result.is_ok() {
+                config.set_rf_port_internal(port);
+            }
+            result
+        })
     }
 
     /// Apply only the supplied gain update.
     pub fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.set_gain(gain)
+        let config = &mut self.config;
+        self.inner.set_gain(gain).map(move |result| {
+            if result.is_ok() {
+                config.set_gain_internal(gain);
+            }
+            result
+        })
     }
 
     /// Consume the device after turning off reception and RF input bias power.
@@ -207,7 +251,7 @@ impl<M: SampleMode> Device<M> {
     ///
     /// The stream starts lazily when [`RxStream::start`] is waited or awaited.
     pub fn into_rx_stream(self) -> RxStream<M> {
-        RxStream::new(self.inner)
+        RxStream::new(self.inner, self.config)
     }
 }
 
@@ -216,37 +260,6 @@ impl<C: ControlBackend> DeviceInner<C> {
     pub(crate) fn info(&self) -> &DeviceInfo {
         &self.info
     }
-
-    fn active_state(&self) -> crate::ActiveState {
-        self.active_state.clone()
-    }
-
-    fn ensure_raw_adc_stream_format(&self) -> Result<()> {
-        let state = &self.active_state;
-        if state.sample_format()? != SampleFormat::RawAdc {
-            return Err(Error::invalid_config(
-                "sample_format",
-                "raw block streams require SampleFormat::RawAdc",
-            ));
-        }
-        state.sample_rate_hz()?;
-        state.packing()?;
-        Ok(())
-    }
-
-    fn ensure_f32_iq_stream_format(&self) -> Result<()> {
-        let state = &self.active_state;
-        if state.sample_format()? != SampleFormat::F32Iq {
-            return Err(Error::invalid_config(
-                "sample_format",
-                "F32 IQ streams require SampleFormat::F32Iq",
-            ));
-        }
-        state.sample_rate_hz()?;
-        state.decimation_mode()?;
-        state.packing()?;
-        Ok(())
-    }
 }
 
 impl<C> DeviceInner<C>
@@ -254,9 +267,6 @@ where
     C: ControlBackend,
 {
     fn shutdown_operation(&self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_bias_tee_update();
-
         let receiver_off = self
             .direct
             .receiver_mode(ReceiverMode::Off)
@@ -264,11 +274,7 @@ where
         let bias_off = self
             .direct
             .set_rf_bias(false)
-            .map_err(|error| error.at("turning off RF bias power during shutdown"))
-            .map(move |result| {
-                active_state.set_bias_tee_result(false, result.is_ok());
-                result
-            });
+            .map_err(|error| error.at("turning off RF bias power during shutdown"));
 
         receiver_off
             .map(Ok::<_, Error>)
@@ -301,20 +307,7 @@ where
         &mut self,
         config: &Config<M>,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C, M> {
-        let active_state = self.active_state.clone();
-        active_state.begin_config(config);
-        let operation = self.direct.configure(config);
-        let config = config.clone();
-        operation.map(move |result| match result {
-            Ok(()) => {
-                active_state.apply_config(&config);
-                Ok(())
-            }
-            Err(error) => {
-                active_state.fail_config(&config);
-                Err(error)
-            }
-        })
+        self.direct.configure(config)
     }
 
     fn sample_rates(&self) -> Vec<u32> {
@@ -329,72 +322,36 @@ where
         &mut self,
         frequency_hz: u64,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_frequency_update();
         let operation = self.direct.set_freq(frequency_hz);
-        ready(validate_frequency(frequency_hz))
-            .and_then(move |()| operation)
-            .map(move |result| {
-                active_state.set_frequency_result(frequency_hz, result.is_ok());
-                result
-            })
+        ready(validate_frequency(frequency_hz)).and_then(move |()| operation)
     }
 
     fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
+        sample_format: SampleFormat,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_sample_rate_update();
-        let validation = self
-            .active_state
-            .sample_format()
-            .and_then(|sample_format| validate_sample_rate(sample_rate_hz, sample_format));
+        let validation = validate_sample_rate(sample_rate_hz, sample_format);
         let operation = self.direct.set_samplerate(sample_rate_hz);
-        ready(validation)
-            .and_then(move |()| operation)
-            .map(move |result| {
-                active_state.set_sample_rate_result(sample_rate_hz, result.is_ok());
-                result
-            })
+        ready(validation).and_then(move |()| operation)
     }
 
     fn set_bandwidth_hz(
         &mut self,
         bandwidth_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_bandwidth_update();
         let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
         let operation = self.direct.set_bandwidth(bandwidth_hz);
-        ready(validate_bandwidth(bandwidth))
-            .and_then(move |()| operation)
-            .map(move |result| {
-                active_state.set_bandwidth_result(bandwidth_hz, result.is_ok());
-                result
-            })
+        ready(validate_bandwidth(bandwidth)).and_then(move |()| operation)
     }
 
     fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_rf_port_update();
-        let operation = self.direct.set_rf_port(port);
-        operation.map(move |result| {
-            active_state.set_rf_port_result(port, result.is_ok());
-            result
-        })
+        self.direct.set_rf_port(port)
     }
 
     fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.active_state.clone();
-        active_state.begin_gain_update(gain);
         let operation = self.direct.set_gain_config(gain);
-        ready(validate_gain(gain))
-            .and_then(move |()| operation)
-            .map(move |result| {
-                active_state.set_gain_result(gain, result.is_ok());
-                result
-            })
+        ready(validate_gain(gain)).and_then(move |()| operation)
     }
 }
 
@@ -553,17 +510,14 @@ impl<M: SampleMode> DeviceBuilder<M> {
                             .map_err(|error| error.at("applying initial HydraSDR configuration"))
                             .map(move |result| {
                                 let direct = result?;
-                                let active_state = crate::ActiveState::default();
-                                active_state.apply_config(&saved_config);
                                 Ok(Device {
                                     inner: DeviceInner {
                                         direct,
                                         info,
-                                        active_state,
                                         #[cfg(not(target_arch = "wasm32"))]
                                         shutdown_on_drop: true,
                                     },
-                                    mode: PhantomData,
+                                    config: saved_config,
                                 })
                             })
                     })
@@ -679,7 +633,6 @@ where
             .device
             .as_mut()
             .expect("owned raw stream retains its device");
-        device.ensure_raw_adc_stream_format()?;
         self.state = SyncReceiverState::StopRequired;
         self.stream = Some(device.direct.start_raw_rx_stream()?);
         self.state = SyncReceiverState::Running;
@@ -766,13 +719,6 @@ where
         }
     }
 
-    fn active_state(&self) -> crate::ActiveState {
-        self.device
-            .as_ref()
-            .expect("owned synchronous stream retains its device")
-            .active_state()
-    }
-
     fn start(&mut self) -> Result<()> {
         if self.state == SyncReceiverState::Running {
             return Ok(());
@@ -781,7 +727,6 @@ where
             .device
             .as_mut()
             .expect("owned synchronous stream retains its device");
-        device.ensure_f32_iq_stream_format()?;
         self.state = SyncReceiverState::StopRequired;
         self.stream = Some(device.direct.start_rx_stream()?);
         self.state = SyncReceiverState::Running;
@@ -878,13 +823,6 @@ where
         }
     }
 
-    fn active_state(&self) -> crate::ActiveState {
-        self.device
-            .as_ref()
-            .expect("owned async stream retains its device")
-            .active_state()
-    }
-
     fn current_stats(&self) -> StreamingStats {
         self.stream
             .as_ref()
@@ -913,7 +851,6 @@ where
             .device
             .as_mut()
             .expect("owned async stream retains its device");
-        device.ensure_raw_adc_stream_format()?;
         self.state = AsyncReceiverState::StopRequired;
         if stream_reusable {
             device.direct.receiver_mode(ReceiverMode::Rx).await?;
@@ -996,13 +933,6 @@ where
         }
     }
 
-    fn active_state(&self) -> crate::ActiveState {
-        self.device
-            .as_ref()
-            .expect("owned async stream retains its device")
-            .active_state()
-    }
-
     fn current_stats(&self) -> StreamingStats {
         self.stream
             .as_ref()
@@ -1024,7 +954,6 @@ where
             .device
             .as_mut()
             .expect("owned async stream retains its device");
-        device.ensure_f32_iq_stream_format()?;
         if let Some(stream) = self.stream.as_mut() {
             stream.set_decimation_factor(device.direct.streaming_decimation_factor())?;
             self.state = AsyncReceiverState::StopRequired;
@@ -1132,33 +1061,22 @@ enum RxStreamState {
 #[must_use = "RX streams own the device; call shutdown() for explicit hardware cleanup"]
 pub struct RxStream<M: SampleMode = F32Iq> {
     state: RxStreamState,
-    mode: PhantomData<fn() -> M>,
+    config: Config<M>,
 }
 
 impl<M: SampleMode> RxStream<M> {
-    fn new(device: DeviceInner<NusbControl>) -> Self {
+    fn new(device: DeviceInner<NusbControl>, config: Config<M>) -> Self {
         Self {
             state: RxStreamState::Dormant(device),
-            mode: PhantomData,
+            config,
         }
     }
 
-    /// Return a shared handle to the authoritative active receiver state.
-    pub fn active_state(&self) -> crate::ActiveState {
-        match &self.state {
-            RxStreamState::Dormant(device) => device.active_state(),
-            RxStreamState::Poisoned => panic!("RX stream state transition was interrupted"),
-            #[cfg(not(target_arch = "wasm32"))]
-            RxStreamState::BlockingRaw(stream) => stream
-                .device
-                .as_ref()
-                .expect("owned raw stream retains its device")
-                .active_state(),
-            #[cfg(not(target_arch = "wasm32"))]
-            RxStreamState::BlockingF32(stream) => stream.active_state(),
-            RxStreamState::AsyncRaw(stream) => stream.active_state(),
-            RxStreamState::AsyncF32(stream) => stream.active_state(),
-        }
+    /// Return the configuration applied before this stream was created.
+    ///
+    /// RFOne's write-only controls do not provide hardware readback.
+    pub fn config(&self) -> &Config<M> {
+        &self.config
     }
 
     /// Start reception and the persistent USB transfer queue.
@@ -1179,16 +1097,15 @@ impl<M: SampleMode> RxStream<M> {
     /// Call [`RxStream::stop`] first when asynchronous receiver-off cleanup is
     /// required. Consuming a running native blocking stream stops it best-effort.
     pub fn into_device(self) -> Device<M> {
-        Device {
-            inner: self.into_device_inner(),
-            mode: PhantomData,
-        }
+        let (inner, config) = self.into_parts();
+        Device { inner, config }
     }
 
     /// Consume the stream and explicitly turn off reception and RF bias power.
     #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
     pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
-        self.into_device_inner().shutdown()
+        let (inner, _) = self.into_parts();
+        inner.shutdown()
     }
 
     fn initialize_async(&mut self) -> Result<()> {
@@ -1288,8 +1205,9 @@ impl<M: SampleMode> RxStream<M> {
         }
     }
 
-    fn into_device_inner(self) -> DeviceInner<NusbControl> {
-        match self.state {
+    fn into_parts(self) -> (DeviceInner<NusbControl>, Config<M>) {
+        let Self { state, config } = self;
+        let inner = match state {
             RxStreamState::Dormant(device) => device,
             RxStreamState::Poisoned => panic!("RX stream state transition was interrupted"),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1298,7 +1216,8 @@ impl<M: SampleMode> RxStream<M> {
             RxStreamState::BlockingF32(stream) => (*stream).into_device(),
             RxStreamState::AsyncRaw(stream) => stream.into_device(),
             RxStreamState::AsyncF32(stream) => (*stream).into_device(),
-        }
+        };
+        (inner, config)
     }
 }
 
@@ -1693,18 +1612,7 @@ mod tests {
         }
     }
 
-    fn fake_device(control: FakeControl, sample_format: SampleFormat) -> DeviceInner<FakeControl> {
-        let active_state = crate::ActiveState::default();
-        match sample_format {
-            SampleFormat::RawAdc => {
-                let config = Config::builder()
-                    .raw_adc()
-                    .build()
-                    .expect("valid raw fake configuration");
-                active_state.apply_config(&config);
-            }
-            SampleFormat::F32Iq => active_state.apply_config(&Config::default()),
-        }
+    fn fake_device(control: FakeControl) -> DeviceInner<FakeControl> {
         DeviceInner {
             direct: HydraSdr::from_control(control),
             info: DeviceInfo {
@@ -1715,7 +1623,6 @@ mod tests {
                 max_frequency: 1_800_000_000,
                 rf_ports: Vec::new(),
             },
-            active_state,
             #[cfg(not(target_arch = "wasm32"))]
             shutdown_on_drop: true,
         }
@@ -1726,8 +1633,7 @@ mod tests {
     fn explicit_shutdown_turns_off_receiver_and_bias_power() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control, SampleFormat::RawAdc);
-        let active_state = device.active_state();
+        let device = fake_device(control);
 
         device.shutdown().wait().expect("explicit shutdown");
 
@@ -1741,7 +1647,6 @@ mod tests {
                 VendorControlRequest::set_rf_bias(0),
             ]
         );
-        assert!(!active_state.bias_tee().expect("bias state after shutdown"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1750,8 +1655,7 @@ mod tests {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
         state.fail_control_out_at.store(1, Ordering::SeqCst);
-        let device = fake_device(control, SampleFormat::RawAdc);
-        let active_state = device.active_state();
+        let device = fake_device(control);
 
         let error = device
             .shutdown()
@@ -1778,7 +1682,6 @@ mod tests {
                 VendorControlRequest::set_rf_bias(0),
             ]
         );
-        assert!(!active_state.bias_tee().expect("successful bias-off state"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1812,7 +1715,7 @@ mod tests {
     fn dropping_unpolled_shutdown_runs_native_fallback() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control, SampleFormat::RawAdc);
+        let device = fake_device(control);
 
         let shutdown = device.shutdown();
         assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
@@ -1838,7 +1741,7 @@ mod tests {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
         state.pause_control_out_at.store(1, Ordering::SeqCst);
-        let device = fake_device(control, SampleFormat::RawAdc);
+        let device = fake_device(control);
         let mut shutdown = Box::pin(device.shutdown().into_future());
 
         assert!(block_on(futures_lite::future::poll_once(shutdown.as_mut())).is_none());
@@ -1863,7 +1766,7 @@ mod tests {
     fn native_device_drop_performs_best_effort_shutdown() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control, SampleFormat::RawAdc);
+        let device = fake_device(control);
 
         drop(device);
 
@@ -1884,7 +1787,7 @@ mod tests {
     fn owned_raw_stream_drop_retries_failed_receiver_off() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control, SampleFormat::RawAdc);
+        let device = fake_device(control);
 
         {
             let mut stream = OwnedRawRxStreamInner::new(device);
@@ -1917,7 +1820,7 @@ mod tests {
     fn owned_synchronous_f32_stream_keeps_queue_between_reads() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control, SampleFormat::F32Iq);
+        let device = fake_device(control);
         let mut stream = F32RxStreamInner::new(device);
         stream.start().expect("start owned synchronous F32 stream");
 
@@ -1948,7 +1851,7 @@ mod tests {
     #[test]
     fn owned_synchronous_stream_stats_accumulate_across_restarts() {
         let control = FakeControl::default();
-        let device = fake_device(control, SampleFormat::F32Iq);
+        let device = fake_device(control);
         let mut stream = F32RxStreamInner::new(device);
         let mut sample = [Complex32::default(); 1];
 
@@ -1982,7 +1885,7 @@ mod tests {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
             stream.start().await.expect("start owned async F32 stream");
 
@@ -2005,7 +1908,7 @@ mod tests {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
 
             stream.start().await.expect("start owned async F32 stream");
@@ -2046,7 +1949,7 @@ mod tests {
     fn owned_async_stream_stats_survive_queue_recreation() {
         block_on(async {
             let control = FakeControl::default();
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
             let mut sample = [Complex32::default(); 1];
 
@@ -2075,33 +1978,12 @@ mod tests {
     }
 
     #[test]
-    fn owned_async_stream_start_error_returns_device() {
-        block_on(async {
-            let control = FakeControl::default();
-            let state = Arc::clone(&control.state);
-            let device = fake_device(control, SampleFormat::RawAdc);
-            let mut stream = AsyncF32RxStreamInner::new(device);
-            let error = stream
-                .start()
-                .await
-                .expect_err("F32 stream must reject raw ADC configuration");
-            let device = stream.into_device();
-            assert_eq!(error.kind(), crate::ErrorKind::InvalidConfig);
-            assert_eq!(
-                device.active_state.sample_format().unwrap(),
-                SampleFormat::RawAdc
-            );
-            assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
-        });
-    }
-
-    #[test]
     fn cancelled_owned_async_raw_start_can_be_stopped() {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
             state.pause_control_out_at.store(2, Ordering::SeqCst);
-            let device = fake_device(control, SampleFormat::RawAdc);
+            let device = fake_device(control);
             let mut stream = AsyncRawRxStreamInner::new(device);
 
             let mut start = Box::pin(stream.start());
@@ -2124,7 +2006,7 @@ mod tests {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
             state.pause_control_out_at.store(2, Ordering::SeqCst);
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
 
             let mut start = Box::pin(stream.start());
@@ -2146,7 +2028,7 @@ mod tests {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
             stream.start().await.expect("start owned async F32 stream");
             state.fail_control_out.store(true, Ordering::SeqCst);
@@ -2157,11 +2039,7 @@ mod tests {
                     .await
                     .is_err_and(|error| error.kind() == crate::ErrorKind::Usb)
             );
-            let device = stream.into_device();
-            assert_eq!(
-                device.active_state.sample_format().unwrap(),
-                SampleFormat::F32Iq
-            );
+            let _device = stream.into_device();
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
         });
     }
@@ -2172,7 +2050,7 @@ mod tests {
         block_on(async {
             let control = FakeControl::default();
             let state = Arc::clone(&control.state);
-            let device = fake_device(control, SampleFormat::F32Iq);
+            let device = fake_device(control);
             let mut stream = AsyncF32RxStreamInner::new(device);
             stream.start().await.expect("start owned async F32 stream");
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
