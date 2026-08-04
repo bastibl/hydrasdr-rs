@@ -50,7 +50,10 @@ use crate::usb::control::{ControlBackend, NusbControl};
 ///
 ///     let mut rx = dev.rx_stream()?;
 ///     rx.start().wait()?;
-///     if let Some(block) = rx.next_block(Duration::from_secs(1)).wait()? {
+///     if let Some(block) = rx
+///         .next_block(Some(Duration::from_secs(1)))
+///         .wait()?
+///     {
 ///         println!("{} raw bytes", block.raw_bytes().len());
 ///     }
 ///     let stats = rx.stop().wait()?;
@@ -1462,12 +1465,12 @@ impl RxStream<RawAdc> {
     /// Read the next zero-copy raw ADC USB block.
     ///
     /// The returned block borrows one buffer from the fixed transfer pool. Its
-    /// buffer is resubmitted on the next call. `timeout` applies only to
-    /// blocking operation; it is ignored when this operation is awaited, which
-    /// waits for the next USB completion.
+    /// buffer is resubmitted on the next call. For blocking operation, `timeout`
+    /// bounds the wait and [`None`] waits indefinitely. The timeout is ignored
+    /// when this operation is awaited, which waits for the next USB completion.
     pub fn next_block(
         &mut self,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<Option<SampleBlock<'_>>>> + '_ {
         NextBlockOperation {
             stream: self,
@@ -1498,14 +1501,15 @@ impl RxStream<RawAdc> {
 impl RxStream<F32Iq> {
     /// Convert samples directly into the caller-provided complex output slice.
     ///
-    /// Blocking operation fills the slice until its total `timeout` expires.
-    /// Asynchronous operation drains buffered data or waits for at most one new
-    /// USB completion, so it may return fewer samples than the slice can hold;
-    /// `timeout` is ignored when this operation is awaited.
+    /// Blocking operation fills the slice until its total `timeout` expires;
+    /// [`None`] waits indefinitely. Asynchronous operation drains buffered data
+    /// or waits for at most one new USB completion, so it may return fewer
+    /// samples than the slice can hold; the timeout is ignored when this
+    /// operation is awaited.
     pub fn read<'a>(
         &'a mut self,
         out: &'a mut [Complex32],
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
         ReadOperation {
             stream: self,
@@ -1581,7 +1585,7 @@ impl<M: SampleMode> MaybeFuture for StopOperation<'_, M> {
 
 struct NextBlockOperation<'a> {
     stream: &'a mut RxStream<RawAdc>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 impl<'a> IntoFuture for NextBlockOperation<'a> {
@@ -1597,14 +1601,15 @@ impl<'a> IntoFuture for NextBlockOperation<'a> {
 impl MaybeFuture for NextBlockOperation<'_> {
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(self) -> Self::Output {
-        self.stream.next_block_blocking(self.timeout)
+        self.stream
+            .next_block_blocking(self.timeout.unwrap_or(Duration::MAX))
     }
 }
 
 struct ReadOperation<'a> {
     stream: &'a mut RxStream<F32Iq>,
     out: &'a mut [Complex32],
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 impl<'a> IntoFuture for ReadOperation<'a> {
@@ -1620,7 +1625,8 @@ impl<'a> IntoFuture for ReadOperation<'a> {
 impl MaybeFuture for ReadOperation<'_> {
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(self) -> Self::Output {
-        self.stream.read_blocking(self.out, self.timeout)
+        self.stream
+            .read_blocking(self.out, self.timeout.unwrap_or(Duration::MAX))
     }
 }
 

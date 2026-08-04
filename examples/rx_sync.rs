@@ -44,7 +44,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         rx.start().wait()?;
         let mut samples = [Complex32::default(); 32];
         let count = rx
-            .read(&mut samples, std::time::Duration::from_secs(1))
+            .read(&mut samples, Some(std::time::Duration::from_secs(1)))
             .wait()?;
         let stats = rx.stop().wait()?;
         drop(rx);

@@ -96,7 +96,10 @@ fn main() -> hydrasdr_rs::Result<()> {
     dev.set_frequency_hz(101_000_000).wait()?;
     let mut samples = [Complex32::default(); 32];
     let count = rx
-        .read(&mut samples, std::time::Duration::from_secs(1))
+        .read(
+            &mut samples,
+            Some(std::time::Duration::from_secs(1)),
+        )
         .wait()?;
     println!("read {count} IQ samples");
     let stats = rx.stop().wait()?;
@@ -130,7 +133,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         rx.start().await?;
         dev.set_frequency_hz(145_000_000).await?;
         let mut samples = [Complex32::default(); 32];
-        let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
+        let count = rx.read(&mut samples, None).await?;
         println!("async samples: {count}");
         let stats = rx.stop().await?;
         drop(rx);

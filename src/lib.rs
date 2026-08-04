@@ -43,7 +43,9 @@
 //!     rx.start().wait()?;
 //!     dev.set_frequency_hz(101_000_000).wait()?;
 //!     let mut samples = [Complex32::default(); 1024];
-//!     let count = rx.read(&mut samples, Duration::from_secs(1)).wait()?;
+//!     let count = rx
+//!         .read(&mut samples, Some(Duration::from_secs(1)))
+//!         .wait()?;
 //!     let stats = rx.stop().wait()?;
 //!     println!("{count} samples");
 //!     println!("{stats:?}");

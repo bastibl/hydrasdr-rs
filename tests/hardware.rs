@@ -80,7 +80,7 @@ fn hardware_short_rx_stream_smoke_test() {
     rx.start().wait().expect("start RX stream");
     {
         let block = rx
-            .next_block(Duration::from_secs(1))
+            .next_block(Some(Duration::from_secs(1)))
             .wait()
             .expect("read RX block")
             .expect("one RX block");
@@ -109,7 +109,7 @@ fn hardware_f32_rx_stream_smoke_test() {
     rx.start().wait().expect("start F32 IQ stream");
     let mut samples = [hydrasdr_rs::Complex32::default(); 32];
     let count = rx
-        .read(&mut samples, std::time::Duration::from_secs(1))
+        .read(&mut samples, Some(std::time::Duration::from_secs(1)))
         .wait()
         .expect("read F32 IQ samples");
     let stats = rx.stop().wait().expect("stop F32 IQ stream");

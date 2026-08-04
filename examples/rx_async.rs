@@ -64,7 +64,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
         let mut rx = dev.rx_stream()?;
         rx.start().await?;
         let mut samples = [Complex32::default(); 32];
-        let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
+        let count = rx.read(&mut samples, None).await?;
         let stats = rx.stop().await?;
         drop(rx);
         dev.shutdown().await?;
