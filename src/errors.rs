@@ -18,6 +18,8 @@ pub enum Error {
     },
     /// No matching HydraSDR device was found.
     DeviceNotFound,
+    /// The logical device session has been shut down.
+    DeviceClosed,
     /// The device or USB resource is already in use.
     Busy,
     /// The requested operation is not supported by the backend or device.
@@ -54,6 +56,8 @@ pub enum ErrorKind {
     InvalidConfig,
     /// No matching HydraSDR device was found.
     NotFound,
+    /// The logical device session has been shut down.
+    DeviceClosed,
     /// The device or USB resource is already in use.
     Busy,
     /// The requested operation is not supported by the backend or device.
@@ -95,6 +99,7 @@ impl Error {
         match self {
             Self::InvalidConfig { .. } => ErrorKind::InvalidConfig,
             Self::DeviceNotFound => ErrorKind::NotFound,
+            Self::DeviceClosed => ErrorKind::DeviceClosed,
             Self::Busy => ErrorKind::Busy,
             Self::Unsupported => ErrorKind::Unsupported,
             Self::StreamClosed { .. } => ErrorKind::StreamClosed,
@@ -118,6 +123,7 @@ impl fmt::Display for Error {
                 write!(f, "invalid configuration for {field}: {reason}")
             }
             Self::DeviceNotFound => f.write_str("no matching HydraSDR device found"),
+            Self::DeviceClosed => f.write_str("HydraSDR device is closed"),
             Self::Busy => f.write_str("HydraSDR device or USB resource is busy"),
             Self::Unsupported => f.write_str("operation is unsupported"),
             Self::StreamClosed { reason } => write!(f, "stream closed: {reason}"),
@@ -198,5 +204,11 @@ mod tests {
                 .starts_with("applying receiver configuration: USB transfer error:")
         );
         assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn closed_device_has_its_own_error_category() {
+        assert_eq!(Error::DeviceClosed.kind(), ErrorKind::DeviceClosed);
+        assert_eq!(Error::DeviceClosed.to_string(), "HydraSDR device is closed");
     }
 }

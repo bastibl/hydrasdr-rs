@@ -20,7 +20,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let run_rx = args.iter().any(|arg| arg == "--rx");
     // DeviceBuilder validates the receiver configuration before opening and
     // applying it to the hardware.
-    let dev = Device::builder()
+    let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
         .rf_port(RfPort::Rx0)

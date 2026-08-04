@@ -41,7 +41,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     let run_rx = args.iter().any(|arg| arg == "--rx");
     // DeviceBuilder mirrors the synchronous API while staying
     // executor-agnostic at this crate layer.
-    let dev = Device::builder()
+    let mut dev = Device::builder()
         .frequency_hz(EXAMPLE_FREQ_HZ)
         .sample_rate_hz(EXAMPLE_SAMPLE_RATE_HZ)
         .rf_port(RfPort::Rx0)

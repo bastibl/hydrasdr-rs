@@ -15,7 +15,7 @@ fn hardware_test_lock() -> MutexGuard<'static, ()> {
 #[ignore = "requires a connected HydraSDR RFOne and USB permissions; run with `cargo test --test hardware -- --ignored --nocapture`"]
 fn hardware_open_and_query_device_info() {
     let _lock = hardware_test_lock();
-    let dev = Device::open().wait().expect("open HydraSDR RFOne");
+    let mut dev = Device::open().wait().expect("open HydraSDR RFOne");
     let info = dev.info();
 
     assert!(

@@ -4,8 +4,7 @@ use core::marker::PhantomData;
 use nusb::MaybeFuture;
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::Complex32;
 use crate::commands::ReceiverMode;
@@ -70,12 +69,85 @@ pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
     shutdown_on_drop: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeviceLifecycle {
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamLifecycle {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    CleanupRequired,
+}
+
+#[derive(Debug)]
+struct SharedDeviceState {
+    device: DeviceLifecycle,
+    stream: StreamLifecycle,
+    stream_claimed: bool,
+}
+
+impl Default for SharedDeviceState {
+    fn default() -> Self {
+        Self {
+            device: DeviceLifecycle::Open,
+            stream: StreamLifecycle::Stopped,
+            stream_claimed: false,
+        }
+    }
+}
+
+type SharedState = Arc<Mutex<SharedDeviceState>>;
+
+fn lock_shared(state: &SharedState) -> MutexGuard<'_, SharedDeviceState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn ensure_device_open(state: &SharedState) -> Result<()> {
+    if lock_shared(state).device == DeviceLifecycle::Open {
+        Ok(())
+    } else {
+        Err(Error::DeviceClosed)
+    }
+}
+
+fn begin_shutdown(state: &SharedState) -> Result<bool> {
+    let mut shared = lock_shared(state);
+    match shared.device {
+        DeviceLifecycle::Closed => Ok(false),
+        DeviceLifecycle::Closing => Ok(true),
+        DeviceLifecycle::Open => {
+            if shared.stream_claimed && shared.stream != StreamLifecycle::Stopped {
+                return Err(Error::Busy);
+            }
+            shared.device = DeviceLifecycle::Closing;
+            Ok(true)
+        }
+    }
+}
+
+fn finish_shutdown(state: &SharedState) {
+    lock_shared(state).device = DeviceLifecycle::Closed;
+}
+
+fn complete_shutdown(state: &SharedState, result: Result<()>) -> Result<()> {
+    if result.is_ok() {
+        finish_shutdown(state);
+    }
+    result
+}
+
 /// High-level owned HydraSDR RFOne device handle.
 #[derive(Debug)]
 pub struct Device<M: SampleMode = F32Iq> {
     inner: DeviceInner<NusbControl>,
     config: Config<M>,
-    stream_claimed: Arc<AtomicBool>,
+    shared: SharedState,
 }
 
 impl Device<F32Iq> {
@@ -147,21 +219,27 @@ impl<M: SampleMode> Device<M> {
         &'a mut self,
         config: &'a Config<M>,
     ) -> impl MaybeFuture<Output = Result<()>> + 'a {
+        let lifecycle = ensure_device_open(&self.shared);
         let applied = config.clone();
         let active = &mut self.config;
-        self.inner.configure(config).map(move |result| {
-            if result.is_ok() {
-                active.apply_internal(&applied);
-            }
-            result
-        })
+        let operation = self.inner.configure(config);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    active.apply_internal(&applied);
+                }
+                result
+            })
     }
 
     /// Set only the tuned center frequency.
     pub fn set_frequency_hz(&mut self, frequency_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
         let config = &mut self.config;
-        self.inner
-            .set_frequency_hz(frequency_hz)
+        let operation = self.inner.set_frequency_hz(frequency_hz);
+        ready(lifecycle)
+            .and_then(move |()| operation)
             .map(move |result| {
                 if result.is_ok() {
                     config.set_frequency_hz_internal(frequency_hz);
@@ -180,9 +258,11 @@ impl<M: SampleMode> Device<M> {
         &mut self,
         sample_rate_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
         let config = &mut self.config;
-        self.inner
-            .set_sample_rate_hz(sample_rate_hz, M::FORMAT)
+        let operation = self.inner.set_sample_rate_hz(sample_rate_hz, M::FORMAT);
+        ready(lifecycle)
+            .and_then(move |()| operation)
             .map(move |result| {
                 if result.is_ok() {
                     config.set_sample_rate_hz_internal(sample_rate_hz);
@@ -193,27 +273,40 @@ impl<M: SampleMode> Device<M> {
 
     /// Set only the selected RF input port.
     pub fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
         let config = &mut self.config;
-        self.inner.set_rf_port(port).map(move |result| {
-            if result.is_ok() {
-                config.set_rf_port_internal(port);
-            }
-            result
-        })
+        let operation = self.inner.set_rf_port(port);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_rf_port_internal(port);
+                }
+                result
+            })
     }
 
     /// Replace the complete gain configuration.
     pub fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> {
+        let lifecycle = ensure_device_open(&self.shared);
         let config = &mut self.config;
-        self.inner.set_gain(gain).map(move |result| {
-            if result.is_ok() {
-                config.set_gain_internal(gain);
-            }
-            result
-        })
+        let operation = self.inner.set_gain(gain);
+        ready(lifecycle)
+            .and_then(move |()| operation)
+            .map(move |result| {
+                if result.is_ok() {
+                    config.set_gain_internal(gain);
+                }
+                result
+            })
     }
 
-    /// Consume the device after turning off reception and RF input bias power.
+    /// Turn off reception and RF input bias power.
+    ///
+    /// Returns [`Error::Busy`] without sending shutdown commands while the
+    /// receive stream is active or still requires cleanup. Stop the stream and
+    /// retry. A stopped stream may remain claimed, but cannot be restarted once
+    /// shutdown begins.
     ///
     /// Both shutdown commands are attempted even if turning off the receiver
     /// fails. Await this operation in async code, or call [`MaybeFuture::wait`]
@@ -224,8 +317,17 @@ impl<M: SampleMode> Device<M> {
     /// callers must poll it to completion to guarantee both commands are
     /// attempted.
     #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
-    pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.shutdown()
+    pub fn shutdown(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        let decision = begin_shutdown(&self.shared);
+        let shared = Arc::clone(&self.shared);
+        let operation = self.inner.shutdown();
+        ready(decision).and_then(move |run| {
+            if run {
+                Either::left(operation.map(move |result| complete_shutdown(&shared, result)))
+            } else {
+                Either::right(ready(Ok(())))
+            }
+        })
     }
 
     /// Create the device's exclusively claimed typed receive stream.
@@ -235,8 +337,18 @@ impl<M: SampleMode> Device<M> {
     /// when [`RxStream::start`] is waited or awaited. Only one stream may be
     /// claimed at a time; dropping it releases the claim.
     pub fn rx_stream(&self) -> Result<RxStream<M>> {
-        let claim = RxStreamClaim::acquire(&self.stream_claimed)?;
-        Ok(RxStream::new(self.inner.stream_handle(), claim))
+        let claim = RxStreamClaim::acquire(&self.shared)?;
+        Ok(RxStream::new(
+            self.inner.stream_handle(),
+            Arc::clone(&self.shared),
+            claim,
+        ))
+    }
+}
+
+impl<M: SampleMode> Drop for Device<M> {
+    fn drop(&mut self) {
+        finish_shutdown(&self.shared);
     }
 }
 
@@ -277,16 +389,15 @@ where
             })
     }
 
-    fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+    fn shutdown(&mut self) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut device = self;
-            let operation = device.shutdown_operation();
+            let operation = self.shutdown_operation();
+            let shutdown_on_drop = &mut self.shutdown_on_drop;
             operation.map(move |result| {
                 if result.is_ok() {
-                    device.shutdown_on_drop = false;
+                    *shutdown_on_drop = false;
                 }
-                drop(device);
                 result
             })
         }
@@ -478,7 +589,7 @@ impl<M: SampleMode> DeviceBuilder<M> {
                                         shutdown_on_drop: true,
                                     },
                                     config: saved_config,
-                                    stream_claimed: Arc::new(AtomicBool::new(false)),
+                                    shared: Arc::new(Mutex::new(SharedDeviceState::default())),
                                 })
                             })
                     })
@@ -559,7 +670,7 @@ impl<'a> SampleBlock<'a> {
 #[cfg(not(target_arch = "wasm32"))]
 enum SyncReceiverState {
     Stopped,
-    StopRequired,
+    CleanupRequired,
     Running,
 }
 
@@ -594,7 +705,7 @@ where
             .device
             .as_mut()
             .expect("owned raw stream retains its device");
-        self.state = SyncReceiverState::StopRequired;
+        self.state = SyncReceiverState::CleanupRequired;
         self.stream = Some(device.direct.start_raw_rx_stream()?);
         self.state = SyncReceiverState::Running;
         Ok(())
@@ -619,7 +730,7 @@ where
                 .device
                 .as_mut()
                 .expect("owned raw stream retains its control handle");
-            self.state = SyncReceiverState::StopRequired;
+            self.state = SyncReceiverState::CleanupRequired;
             let stream = self.stream.take().expect("running raw stream exists");
             let (stats, result) = device.direct.close_raw_rx_stream(stream);
             self.stats.accumulate(stats);
@@ -657,7 +768,7 @@ where
                 Ok(self.stats)
             }
             Err(error) => {
-                self.state = SyncReceiverState::StopRequired;
+                self.state = SyncReceiverState::CleanupRequired;
                 Err(error)
             }
         }
@@ -705,7 +816,7 @@ where
             .device
             .as_mut()
             .expect("owned synchronous stream retains its device");
-        self.state = SyncReceiverState::StopRequired;
+        self.state = SyncReceiverState::CleanupRequired;
         self.stream = Some(device.direct.start_rx_stream()?);
         self.state = SyncReceiverState::Running;
         Ok(())
@@ -729,7 +840,7 @@ where
         stream.set_decimation_factor(factor)?;
         let result = stream.read_float32_iq(out, timeout);
         if result.is_err() {
-            self.state = SyncReceiverState::StopRequired;
+            self.state = SyncReceiverState::CleanupRequired;
         }
         result
     }
@@ -756,7 +867,7 @@ where
                 Ok(self.stats)
             }
             Err(error) => {
-                self.state = SyncReceiverState::StopRequired;
+                self.state = SyncReceiverState::CleanupRequired;
                 Err(error)
             }
         }
@@ -777,7 +888,7 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AsyncReceiverState {
     Stopped,
-    StopRequired,
+    CleanupRequired,
     Running,
 }
 
@@ -834,7 +945,7 @@ where
             .device
             .as_mut()
             .expect("owned async stream retains its device");
-        self.state = AsyncReceiverState::StopRequired;
+        self.state = AsyncReceiverState::CleanupRequired;
         if stream_reusable {
             device.direct.receiver_mode(ReceiverMode::Rx).await?;
             self.state = AsyncReceiverState::Running;
@@ -867,7 +978,7 @@ where
                 .device
                 .as_mut()
                 .expect("owned async stream retains its control handle");
-            self.state = AsyncReceiverState::StopRequired;
+            self.state = AsyncReceiverState::CleanupRequired;
             self.stream = Some(device.direct.start_raw_rx_stream_async().await?);
             self.state = AsyncReceiverState::Running;
         }
@@ -958,12 +1069,12 @@ where
             .expect("owned async stream retains its device");
         if let Some(stream) = self.stream.as_mut() {
             stream.set_decimation_factor(device.direct.streaming_decimation_factor())?;
-            self.state = AsyncReceiverState::StopRequired;
+            self.state = AsyncReceiverState::CleanupRequired;
             device.direct.receiver_mode(ReceiverMode::Rx).await?;
             self.state = AsyncReceiverState::Running;
             return Ok(());
         }
-        self.state = AsyncReceiverState::StopRequired;
+        self.state = AsyncReceiverState::CleanupRequired;
         let stream = device.direct.start_rx_stream_async().await?;
         self.stream = Some(stream);
         self.state = AsyncReceiverState::Running;
@@ -991,7 +1102,7 @@ where
             Ok(written) => Ok(written),
             Err(error) => {
                 self.retire_stream();
-                self.state = AsyncReceiverState::StopRequired;
+                self.state = AsyncReceiverState::CleanupRequired;
                 Err(error)
             }
         }
@@ -1043,23 +1154,107 @@ enum RxStreamState {
 
 #[derive(Debug)]
 struct RxStreamClaim {
-    claimed: Arc<AtomicBool>,
+    shared: SharedState,
 }
 
 impl RxStreamClaim {
-    fn acquire(claimed: &Arc<AtomicBool>) -> Result<Self> {
-        claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Error::Busy)?;
+    fn acquire(shared: &SharedState) -> Result<Self> {
+        let mut state = lock_shared(shared);
+        if state.device != DeviceLifecycle::Open {
+            return Err(Error::DeviceClosed);
+        }
+        if state.stream_claimed {
+            return Err(Error::Busy);
+        }
+        state.stream_claimed = true;
+        state.stream = StreamLifecycle::Stopped;
         Ok(Self {
-            claimed: Arc::clone(claimed),
+            shared: Arc::clone(shared),
         })
     }
 }
 
 impl Drop for RxStreamClaim {
     fn drop(&mut self) {
-        self.claimed.store(false, Ordering::Release);
+        let mut state = lock_shared(&self.shared);
+        state.stream_claimed = false;
+        state.stream = StreamLifecycle::Stopped;
+    }
+}
+
+struct StreamTransition {
+    shared: SharedState,
+    fallback: StreamLifecycle,
+    armed: bool,
+}
+
+impl StreamTransition {
+    fn new(shared: &SharedState, fallback: StreamLifecycle) -> Self {
+        Self {
+            shared: Arc::clone(shared),
+            fallback,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self, state: StreamLifecycle) {
+        lock_shared(&self.shared).stream = state;
+        self.armed = false;
+    }
+
+    fn finish_start(mut self) -> bool {
+        let mut shared = lock_shared(&self.shared);
+        let open = shared.device == DeviceLifecycle::Open;
+        shared.stream = if open {
+            StreamLifecycle::Running
+        } else {
+            StreamLifecycle::CleanupRequired
+        };
+        self.armed = false;
+        open
+    }
+}
+
+impl Drop for StreamTransition {
+    fn drop(&mut self) {
+        if self.armed {
+            lock_shared(&self.shared).stream = self.fallback;
+        }
+    }
+}
+
+fn begin_stream_start(shared: &SharedState) -> Result<Option<StreamTransition>> {
+    let mut state = lock_shared(shared);
+    if state.device != DeviceLifecycle::Open {
+        return Err(Error::DeviceClosed);
+    }
+    match state.stream {
+        StreamLifecycle::Stopped => {
+            state.stream = StreamLifecycle::Starting;
+            Ok(Some(StreamTransition::new(
+                shared,
+                StreamLifecycle::CleanupRequired,
+            )))
+        }
+        StreamLifecycle::Running => Ok(None),
+        StreamLifecycle::Starting
+        | StreamLifecycle::Stopping
+        | StreamLifecycle::CleanupRequired => Err(Error::Busy),
+    }
+}
+
+fn begin_stream_stop(shared: &SharedState) -> Result<Option<StreamTransition>> {
+    let mut state = lock_shared(shared);
+    match state.stream {
+        StreamLifecycle::Stopped => Ok(None),
+        StreamLifecycle::Running | StreamLifecycle::CleanupRequired => {
+            state.stream = StreamLifecycle::Stopping;
+            Ok(Some(StreamTransition::new(
+                shared,
+                StreamLifecycle::CleanupRequired,
+            )))
+        }
+        StreamLifecycle::Starting | StreamLifecycle::Stopping => Err(Error::Busy),
     }
 }
 
@@ -1072,20 +1267,25 @@ impl Drop for RxStreamClaim {
 #[must_use = "RX streams retain the device's exclusive stream claim until dropped"]
 pub struct RxStream<M: SampleMode = F32Iq> {
     state: RxStreamState,
+    shared: SharedState,
     _claim: RxStreamClaim,
     mode: PhantomData<fn() -> M>,
 }
 
 impl<M: SampleMode> RxStream<M> {
-    fn new(device: DeviceInner<NusbControl>, claim: RxStreamClaim) -> Self {
+    fn new(device: DeviceInner<NusbControl>, shared: SharedState, claim: RxStreamClaim) -> Self {
         Self {
             state: RxStreamState::Dormant(device),
+            shared,
             _claim: claim,
             mode: PhantomData,
         }
     }
 
     /// Start reception and the persistent USB transfer queue.
+    ///
+    /// Returns [`Error::DeviceClosed`] after the owning device has begun
+    /// shutdown. A stream requiring cleanup must be stopped before restarting.
     ///
     /// Call [`MaybeFuture::wait`] for blocking operation on native targets, or
     /// await the returned operation for asynchronous operation.
@@ -1128,22 +1328,53 @@ impl<M: SampleMode> RxStream<M> {
 
     async fn start_async(&mut self) -> Result<()> {
         self.initialize_async()?;
-        match &mut self.state {
+        let Some(transition) = begin_stream_start(&self.shared)? else {
+            return Ok(());
+        };
+        let result = match &mut self.state {
             RxStreamState::AsyncRaw(stream) => stream.start().await,
             RxStreamState::AsyncF32(stream) => stream.start().await,
             _ => Err(Error::Busy),
+        };
+        if let Err(error) = result {
+            transition.finish(StreamLifecycle::CleanupRequired);
+            return Err(error);
         }
+        if transition.finish_start() {
+            return Ok(());
+        }
+
+        let cleanup = match &mut self.state {
+            RxStreamState::AsyncRaw(stream) => stream.stop().await,
+            RxStreamState::AsyncF32(stream) => stream.stop().await,
+            _ => Err(Error::Busy),
+        };
+        lock_shared(&self.shared).stream = if cleanup.is_ok() {
+            StreamLifecycle::Stopped
+        } else {
+            StreamLifecycle::CleanupRequired
+        };
+        Err(Error::DeviceClosed)
     }
 
     async fn stop_async(&mut self) -> Result<StreamingStats> {
-        match &mut self.state {
+        let transition = begin_stream_stop(&self.shared)?;
+        let result = match &mut self.state {
             RxStreamState::Dormant(_) => Ok(StreamingStats::default()),
             RxStreamState::AsyncRaw(stream) => stream.stop().await,
             RxStreamState::AsyncF32(stream) => stream.stop().await,
             #[cfg(not(target_arch = "wasm32"))]
             RxStreamState::BlockingRaw(_) | RxStreamState::BlockingF32(_) => Err(Error::Busy),
             RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
+        };
+        if let Some(transition) = transition {
+            transition.finish(if result.is_ok() {
+                StreamLifecycle::Stopped
+            } else {
+                StreamLifecycle::CleanupRequired
+            });
         }
+        result
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1177,22 +1408,53 @@ impl<M: SampleMode> RxStream<M> {
     #[cfg(not(target_arch = "wasm32"))]
     fn start_blocking(&mut self) -> Result<()> {
         self.initialize_blocking()?;
-        match &mut self.state {
+        let Some(transition) = begin_stream_start(&self.shared)? else {
+            return Ok(());
+        };
+        let result = match &mut self.state {
             RxStreamState::BlockingRaw(stream) => stream.start(),
             RxStreamState::BlockingF32(stream) => stream.start(),
             _ => Err(Error::Busy),
+        };
+        if let Err(error) = result {
+            transition.finish(StreamLifecycle::CleanupRequired);
+            return Err(error);
         }
+        if transition.finish_start() {
+            return Ok(());
+        }
+
+        let cleanup = match &mut self.state {
+            RxStreamState::BlockingRaw(stream) => stream.stop(),
+            RxStreamState::BlockingF32(stream) => stream.stop(),
+            _ => Err(Error::Busy),
+        };
+        lock_shared(&self.shared).stream = if cleanup.is_ok() {
+            StreamLifecycle::Stopped
+        } else {
+            StreamLifecycle::CleanupRequired
+        };
+        Err(Error::DeviceClosed)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn stop_blocking(&mut self) -> Result<StreamingStats> {
-        match &mut self.state {
+        let transition = begin_stream_stop(&self.shared)?;
+        let result = match &mut self.state {
             RxStreamState::Dormant(_) => Ok(StreamingStats::default()),
             RxStreamState::BlockingRaw(stream) => stream.stop(),
             RxStreamState::BlockingF32(stream) => stream.stop(),
             RxStreamState::AsyncRaw(_) | RxStreamState::AsyncF32(_) => Err(Error::Busy),
             RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
+        };
+        if let Some(transition) = transition {
+            transition.finish(if result.is_ok() {
+                StreamLifecycle::Stopped
+            } else {
+                StreamLifecycle::CleanupRequired
+            });
         }
+        result
     }
 }
 
@@ -1378,15 +1640,105 @@ mod tests {
 
     #[test]
     fn receive_stream_claim_is_exclusive_and_released_on_drop() {
-        let claimed = Arc::new(AtomicBool::new(false));
-        let claim = RxStreamClaim::acquire(&claimed).expect("acquire first stream claim");
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let claim = RxStreamClaim::acquire(&shared).expect("acquire first stream claim");
 
         assert!(
-            RxStreamClaim::acquire(&claimed)
+            RxStreamClaim::acquire(&shared)
                 .is_err_and(|error| error.kind() == crate::ErrorKind::Busy)
         );
         drop(claim);
-        assert!(RxStreamClaim::acquire(&claimed).is_ok());
+        assert!(RxStreamClaim::acquire(&shared).is_ok());
+    }
+
+    #[test]
+    fn shutdown_rejects_every_active_stream_state() {
+        for stream in [
+            StreamLifecycle::Starting,
+            StreamLifecycle::Running,
+            StreamLifecycle::Stopping,
+            StreamLifecycle::CleanupRequired,
+        ] {
+            let shared = Arc::new(Mutex::new(SharedDeviceState {
+                device: DeviceLifecycle::Open,
+                stream,
+                stream_claimed: true,
+            }));
+
+            assert!(
+                begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy)
+            );
+            assert_eq!(lock_shared(&shared).device, DeviceLifecycle::Open);
+        }
+    }
+
+    #[test]
+    fn stopped_stream_is_invalidated_when_shutdown_begins() {
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let _claim = RxStreamClaim::acquire(&shared).expect("claim stopped stream");
+
+        assert!(begin_shutdown(&shared).expect("begin shutdown"));
+        assert!(matches!(
+            begin_stream_start(&shared),
+            Err(Error::DeviceClosed)
+        ));
+        finish_shutdown(&shared);
+        assert!(matches!(
+            begin_stream_start(&shared),
+            Err(Error::DeviceClosed)
+        ));
+    }
+
+    #[test]
+    fn failed_shutdown_remains_closing_and_can_be_retried() {
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+
+        assert!(begin_shutdown(&shared).expect("begin first shutdown"));
+        assert!(complete_shutdown(&shared, Err(Error::Unsupported)).is_err());
+        assert_eq!(lock_shared(&shared).device, DeviceLifecycle::Closing);
+
+        assert!(begin_shutdown(&shared).expect("retry shutdown"));
+        complete_shutdown(&shared, Ok(())).expect("complete retry");
+        assert_eq!(lock_shared(&shared).device, DeviceLifecycle::Closed);
+        assert!(!begin_shutdown(&shared).expect("closed shutdown is a no-op"));
+    }
+
+    #[test]
+    fn closed_device_takes_precedence_over_a_stale_running_stream_state() {
+        let shared = Arc::new(Mutex::new(SharedDeviceState {
+            device: DeviceLifecycle::Closed,
+            stream: StreamLifecycle::Running,
+            stream_claimed: true,
+        }));
+
+        assert!(matches!(
+            begin_stream_start(&shared),
+            Err(Error::DeviceClosed)
+        ));
+    }
+
+    #[test]
+    fn cancelled_start_requires_cleanup_before_shutdown() {
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let _claim = RxStreamClaim::acquire(&shared).expect("claim stream");
+        let transition = begin_stream_start(&shared)
+            .expect("begin start")
+            .expect("start transition");
+
+        assert_eq!(lock_shared(&shared).stream, StreamLifecycle::Starting);
+        assert!(begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy));
+        drop(transition);
+        assert_eq!(
+            lock_shared(&shared).stream,
+            StreamLifecycle::CleanupRequired
+        );
+        assert!(begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy));
+
+        begin_stream_stop(&shared)
+            .expect("begin cleanup")
+            .expect("cleanup transition")
+            .finish(StreamLifecycle::Stopped);
+        assert!(begin_shutdown(&shared).expect("begin shutdown after cleanup"));
     }
 
     #[derive(Debug, Default)]
@@ -1619,7 +1971,7 @@ mod tests {
     fn explicit_shutdown_turns_off_receiver_and_bias_power() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control);
+        let mut device = fake_device(control);
 
         device.shutdown().wait().expect("explicit shutdown");
 
@@ -1641,7 +1993,7 @@ mod tests {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
         state.fail_control_out_at.store(1, Ordering::SeqCst);
-        let device = fake_device(control);
+        let mut device = fake_device(control);
 
         let error = device
             .shutdown()
@@ -1655,7 +2007,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
         assert_eq!(
             *state
                 .control_out_requests
@@ -1664,10 +2016,11 @@ mod tests {
             [
                 VendorControlRequest::receiver_mode(ReceiverMode::Off),
                 VendorControlRequest::set_rf_bias(0),
-                VendorControlRequest::receiver_mode(ReceiverMode::Off),
-                VendorControlRequest::set_rf_bias(0),
             ]
         );
+
+        drop(device);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1697,14 +2050,16 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn dropping_unpolled_shutdown_runs_native_fallback() {
+    fn dropping_unpolled_shutdown_keeps_native_fallback_armed() {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
-        let device = fake_device(control);
+        let mut device = fake_device(control);
 
         let shutdown = device.shutdown();
         assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
         drop(shutdown);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
+        drop(device);
 
         assert_eq!(
             *state
@@ -1720,17 +2075,19 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn canceling_polled_shutdown_runs_native_fallback() {
+    fn canceling_polled_shutdown_keeps_native_fallback_armed() {
         use std::future::IntoFuture;
 
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
         state.pause_control_out_at.store(1, Ordering::SeqCst);
-        let device = fake_device(control);
+        let mut device = fake_device(control);
         let mut shutdown = Box::pin(device.shutdown().into_future());
 
         assert!(block_on(futures_lite::future::poll_once(shutdown.as_mut())).is_none());
         drop(shutdown);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 1);
+        drop(device);
 
         assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
         assert_eq!(
