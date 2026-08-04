@@ -7,8 +7,8 @@ use std::pin::Pin;
 use crate::Complex32;
 use crate::commands::ReceiverMode;
 use crate::config::{
-    Bandwidth, Config, ConfigBuilder, ConfigData, DeviceSelector, F32Iq, GainConfig, RawAdc,
-    RfPort, SampleFormat, SampleMode, validate_bandwidth, validate_frequency, validate_gain,
+    Bandwidth, Config, ConfigBuilder, DeviceSelector, F32Iq, GainConfig, RawAdc, RfPort,
+    SampleFormat, SampleMode, validate_bandwidth, validate_frequency, validate_gain,
     validate_sample_rate,
 };
 use crate::device::HydraSdr;
@@ -151,7 +151,7 @@ impl<M: SampleMode> Device<M> {
     /// }
     /// ```
     pub fn configure(&mut self, config: &Config<M>) -> impl MaybeFuture<Output = Result<()>> {
-        self.inner.configure(&config.data)
+        self.inner.configure(config)
     }
 
     /// Set only the tuned center frequency.
@@ -294,10 +294,10 @@ where
     }
 
     /// Apply a high-level receiver configuration through the direct layer.
-    pub(crate) fn configure(
+    pub(crate) fn configure<M: SampleMode>(
         &mut self,
-        config: &ConfigData,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        config: &Config<M>,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C, M> {
         let active_state = self.info.active_state.clone();
         active_state.begin_config(config);
         let operation = self.direct.configure(config);
@@ -560,9 +560,9 @@ impl<M: SampleMode> DeviceBuilder<M> {
                     .into_device_info()
                     .map_err(|error| error.at("reading HydraSDR device metadata"))
                     .and_then(move |(direct, info)| {
-                        let saved_config = config.data.clone();
+                        let saved_config = config.clone();
                         direct
-                            .into_configured(config.data)
+                            .into_configured(config)
                             .map_err(|error| error.at("applying initial HydraSDR configuration"))
                             .map(move |result| {
                                 let direct = result?;
@@ -624,7 +624,7 @@ impl<'a> SampleBlock<'a> {
         }
     }
 
-    fn from_transfer(transfer: &Transfer<'a>) -> Self {
+    fn from_transfer(transfer: Transfer<'a>) -> Self {
         Self::new(
             transfer.samples,
             transfer.sample_count,
@@ -706,7 +706,7 @@ where
             .as_mut()
             .ok_or(Error::stream_closed("raw RX stream is closed"))?
             .next_transfer(timeout)?
-            .map(|transfer| SampleBlock::from_transfer(&transfer)))
+            .map(SampleBlock::from_transfer))
     }
 
     fn stop(&mut self) -> Result<StreamingStats> {
@@ -719,7 +719,7 @@ where
             .expect("owned raw stream retains its device");
         let result = if let Some(stream) = self.stream.take() {
             let (stats, result) = device.direct.close_raw_rx_stream(stream);
-            self.stats = stats;
+            self.stats.accumulate(stats);
             result
         } else {
             device.direct.receiver_mode(ReceiverMode::Off).wait()
@@ -756,7 +756,7 @@ where
 
 /// Owned synchronous converted `F32Iq` stream state.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct F32RxStreamInner<C: ControlBackend + StreamingBackend> {
+struct F32RxStreamInner<C: ControlBackend + StreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<DirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -802,7 +802,7 @@ where
     }
 
     /// Read converted complex samples into `out`.
-    pub(crate) fn read(&mut self, out: &mut [Complex32], timeout: Duration) -> Result<usize> {
+    fn read(&mut self, out: &mut [Complex32], timeout: Duration) -> Result<usize> {
         if self.state != SyncReceiverState::Running {
             return Err(Error::stream_closed("synchronous F32 RX stream is stopped"));
         }
@@ -818,7 +818,7 @@ where
     }
 
     /// Request receiver-off cleanup. Repeated calls are no-ops.
-    pub(crate) fn stop(&mut self) -> Result<StreamingStats> {
+    fn stop(&mut self) -> Result<StreamingStats> {
         if self.state == SyncReceiverState::Stopped {
             return Ok(self.stats);
         }
@@ -828,7 +828,7 @@ where
             .expect("owned synchronous stream retains its device");
         let result = if let Some(stream) = self.stream.take() {
             let (stats, result) = device.direct.close_rx_stream(stream);
-            self.stats = stats;
+            self.stats.accumulate(stats);
             result
         } else {
             device.direct.receiver_mode(ReceiverMode::Off).wait()
@@ -871,7 +871,7 @@ enum AsyncReceiverState {
     Running,
 }
 
-pub(crate) struct AsyncRawRxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
+struct AsyncRawRxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<DirectAsyncRawRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -900,6 +900,19 @@ where
             .clone()
     }
 
+    fn current_stats(&self) -> StreamingStats {
+        self.stream
+            .as_ref()
+            .map_or(self.stats, |stream| self.stats.combined(stream.stats()))
+    }
+
+    fn retire_stream(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            let stats = stream.close();
+            self.stats.accumulate(stats);
+        }
+    }
+
     async fn start(&mut self) -> Result<()> {
         let stream_reusable = self
             .stream
@@ -907,6 +920,9 @@ where
             .is_some_and(|stream| !stream.is_closed());
         if self.state == AsyncReceiverState::Running && stream_reusable {
             return Ok(());
+        }
+        if !stream_reusable {
+            self.retire_stream();
         }
         let device = self
             .device
@@ -919,7 +935,6 @@ where
             self.state = AsyncReceiverState::Running;
             return Ok(());
         }
-        self.stream = None;
         let stream = device.direct.start_raw_rx_stream_async().await?;
         self.stream = Some(stream);
         self.state = AsyncReceiverState::Running;
@@ -927,7 +942,7 @@ where
     }
 
     /// Read the next sample block.
-    pub(crate) async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
+    async fn next_block(&mut self) -> Result<Option<SampleBlock<'_>>> {
         if self.state != AsyncReceiverState::Running {
             return Err(Error::stream_closed("async raw RX stream is stopped"));
         }
@@ -938,12 +953,12 @@ where
         Ok(stream
             .next_transfer()
             .await?
-            .map(|transfer| SampleBlock::from_transfer(&transfer)))
+            .map(SampleBlock::from_transfer))
     }
 
     async fn stop(&mut self) -> Result<StreamingStats> {
         if self.state == AsyncReceiverState::Stopped {
-            return Ok(self.stats);
+            return Ok(self.current_stats());
         }
         self.device
             .as_ref()
@@ -954,15 +969,12 @@ where
         self.state = AsyncReceiverState::Stopped;
         if let Some(stream) = self.stream.as_mut() {
             stream.pause()?;
-            self.stats = stream.stats();
         }
-        Ok(self.stats)
+        Ok(self.current_stats())
     }
 
     fn into_device(mut self) -> DeviceInner<C> {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
+        self.retire_stream();
         self.device
             .take()
             .expect("owned async stream retains its device")
@@ -974,14 +986,12 @@ where
     C: ControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
+        self.retire_stream();
     }
 }
 
 /// Owned async stream state for converted `F32Iq` samples.
-pub(crate) struct AsyncF32RxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
+struct AsyncF32RxStreamInner<C: ControlBackend + AsyncStreamingBackend> {
     device: Option<DeviceInner<C>>,
     stream: Option<AsyncDirectRxStream<C::BulkIn>>,
     stats: StreamingStats,
@@ -1010,6 +1020,19 @@ where
             .clone()
     }
 
+    fn current_stats(&self) -> StreamingStats {
+        self.stream
+            .as_ref()
+            .map_or(self.stats, |stream| self.stats.combined(stream.stats()))
+    }
+
+    fn retire_stream(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            let stats = stream.close();
+            self.stats.accumulate(stats);
+        }
+    }
+
     async fn start(&mut self) -> Result<()> {
         if self.state == AsyncReceiverState::Running {
             return Ok(());
@@ -1034,7 +1057,7 @@ where
     }
 
     /// Read converted complex samples into `out`.
-    pub(crate) async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
+    async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
         if self.state != AsyncReceiverState::Running {
             return Err(Error::stream_closed("async F32 RX stream is stopped"));
         }
@@ -1047,8 +1070,7 @@ where
         match result {
             Ok(written) => Ok(written),
             Err(error) => {
-                let mut stream = self.stream.take().expect("stream was borrowed above");
-                self.stats = stream.close();
+                self.retire_stream();
                 self.state = AsyncReceiverState::StopRequired;
                 Err(error)
             }
@@ -1057,7 +1079,7 @@ where
 
     async fn stop(&mut self) -> Result<StreamingStats> {
         if self.state == AsyncReceiverState::Stopped {
-            return Ok(self.stats);
+            return Ok(self.current_stats());
         }
         self.device
             .as_ref()
@@ -1068,15 +1090,12 @@ where
         self.state = AsyncReceiverState::Stopped;
         if let Some(stream) = self.stream.as_mut() {
             stream.pause()?;
-            self.stats = stream.stats();
         }
-        Ok(self.stats)
+        Ok(self.current_stats())
     }
 
     fn into_device(mut self) -> DeviceInner<C> {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
+        self.retire_stream();
         self.device
             .take()
             .expect("owned async stream retains its device")
@@ -1088,9 +1107,7 @@ where
     C: ControlBackend + AsyncStreamingBackend,
 {
     fn drop(&mut self) {
-        if let Some(mut stream) = self.stream.take() {
-            self.stats = stream.close();
-        }
+        self.retire_stream();
     }
 }
 
@@ -1308,8 +1325,9 @@ impl RxStream<RawAdc> {
     /// Read the next zero-copy raw ADC USB block.
     ///
     /// The returned block borrows one buffer from the fixed transfer pool. Its
-    /// buffer is resubmitted on the next call. `timeout` applies to blocking
-    /// operation; asynchronous operation waits for the next USB completion.
+    /// buffer is resubmitted on the next call. `timeout` applies only to
+    /// blocking operation; it is ignored when this operation is awaited, which
+    /// waits for the next USB completion.
     pub fn next_block(
         &mut self,
         timeout: Duration,
@@ -1343,8 +1361,10 @@ impl RxStream<RawAdc> {
 impl RxStream<F32Iq> {
     /// Convert samples directly into the caller-provided complex output slice.
     ///
-    /// `timeout` applies to blocking operation; asynchronous operation waits
-    /// for a USB completion when no converted samples are already buffered.
+    /// Blocking operation fills the slice until its total `timeout` expires.
+    /// Asynchronous operation drains buffered data or waits for at most one new
+    /// USB completion, so it may return fewer samples than the slice can hold;
+    /// `timeout` is ignored when this operation is awaited.
     pub fn read<'a>(
         &'a mut self,
         out: &'a mut [Complex32],
@@ -1694,17 +1714,16 @@ mod tests {
 
     fn fake_device(control: FakeControl, sample_format: SampleFormat) -> DeviceInner<FakeControl> {
         let active_state = crate::ActiveState::default();
-        let config = match sample_format {
+        match sample_format {
             SampleFormat::RawAdc => {
-                Config::builder()
+                let config = Config::builder()
                     .raw_adc()
                     .build()
-                    .expect("valid raw fake configuration")
-                    .data
+                    .expect("valid raw fake configuration");
+                active_state.apply_config(&config);
             }
-            SampleFormat::F32Iq => Config::default().data,
-        };
-        active_state.apply_config(&config);
+            SampleFormat::F32Iq => active_state.apply_config(&Config::default()),
+        }
         DeviceInner {
             direct: HydraSdr::from_control(control),
             info: DeviceInfo {
@@ -1794,7 +1813,7 @@ mod tests {
             .expect("valid fake configuration");
 
         HydraSdr::from_control(control)
-            .into_configured(config.data)
+            .into_configured(config)
             .wait()
             .expect_err("packing should fail before enabling bias power");
 
@@ -1944,6 +1963,39 @@ mod tests {
         assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_synchronous_stream_stats_accumulate_across_restarts() {
+        let control = FakeControl::default();
+        let device = fake_device(control, SampleFormat::F32Iq);
+        let mut stream = F32RxStreamInner::new(device);
+        let mut sample = [Complex32::default(); 1];
+
+        stream.start().expect("start first synchronous run");
+        stream
+            .read(&mut sample, Duration::from_secs(1))
+            .expect("read first synchronous run");
+        assert_eq!(
+            stream
+                .stop()
+                .expect("stop first synchronous run")
+                .buffers_received,
+            1
+        );
+
+        stream.start().expect("start second synchronous run");
+        stream
+            .read(&mut sample, Duration::from_secs(1))
+            .expect("read second synchronous run");
+        assert_eq!(
+            stream
+                .stop()
+                .expect("stop second synchronous run")
+                .buffers_received,
+            2
+        );
+    }
+
     #[test]
     fn owned_async_f32_stream_reuses_queue_and_returns_device() {
         block_on(async {
@@ -2006,6 +2058,38 @@ mod tests {
 
             let _device = stream.into_device();
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 3);
+        });
+    }
+
+    #[test]
+    fn owned_async_stream_stats_survive_queue_recreation() {
+        block_on(async {
+            let control = FakeControl::default();
+            let device = fake_device(control, SampleFormat::F32Iq);
+            let mut stream = AsyncF32RxStreamInner::new(device);
+            let mut sample = [Complex32::default(); 1];
+
+            stream.start().await.expect("start first async queue");
+            stream
+                .read(&mut sample)
+                .await
+                .expect("read first async queue");
+            stream.stop().await.expect("stop first async queue");
+            stream.retire_stream();
+
+            stream.start().await.expect("start replacement async queue");
+            stream
+                .read(&mut sample)
+                .await
+                .expect("read replacement async queue");
+            assert_eq!(
+                stream
+                    .stop()
+                    .await
+                    .expect("stop replacement async queue")
+                    .buffers_received,
+                2
+            );
         });
     }
 

@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::config::ConfigData;
-use crate::{Bandwidth, DecimationMode, Error, GainConfig, Result, RfPort, SampleFormat};
+use crate::{
+    Bandwidth, Config, DecimationMode, Error, GainConfig, Result, RfPort, SampleFormat, SampleMode,
+};
 
 /// Physical RFOne gain stage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,13 +214,13 @@ impl ActiveState {
         self.lock().packing.get("packing")
     }
 
-    pub(crate) fn apply_config(&self, config: &ConfigData) {
+    pub(crate) fn apply_config<M: SampleMode>(&self, config: &Config<M>) {
         let mut state = self.lock();
         state.frequency_hz = ActiveValue::Known(config.frequency_hz());
         state.sample_rate_hz = ActiveValue::Known(config.sample_rate_hz());
         state.bandwidth = ActiveValue::Known(config.bandwidth());
         state.sample_format = ActiveValue::Known(config.sample_format());
-        state.decimation_mode = ActiveValue::Known(config.decimation_mode());
+        state.decimation_mode = ActiveValue::Known(config.decimation_mode_internal());
         if let Some(port) = config.rf_port() {
             state.rf_port = ActiveValue::Known(port);
         }
@@ -227,14 +228,14 @@ impl ActiveState {
         if let Some(enabled) = config.bias_tee() {
             state.bias_tee = ActiveValue::Known(enabled);
         }
-        state.packing = ActiveValue::Known(config.packing());
+        state.packing = ActiveValue::Known(config.packing_internal());
     }
 
-    pub(crate) fn begin_config(&self, config: &ConfigData) {
+    pub(crate) fn begin_config<M: SampleMode>(&self, config: &Config<M>) {
         invalidate_config(&mut self.lock(), config, UPDATE_INCOMPLETE);
     }
 
-    pub(crate) fn fail_config(&self, config: &ConfigData) {
+    pub(crate) fn fail_config<M: SampleMode>(&self, config: &Config<M>) {
         invalidate_config(&mut self.lock(), config, LAST_UPDATE_FAILED);
     }
 
@@ -292,7 +293,11 @@ impl ActiveState {
     }
 }
 
-fn invalidate_config(state: &mut ActiveStateInner, config: &ConfigData, reason: UnavailableReason) {
+fn invalidate_config<M: SampleMode>(
+    state: &mut ActiveStateInner,
+    config: &Config<M>,
+    reason: UnavailableReason,
+) {
     state.frequency_hz = ActiveValue::Unknown(reason);
     state.sample_rate_hz = ActiveValue::Unknown(reason);
     state.bandwidth = ActiveValue::Unknown(reason);

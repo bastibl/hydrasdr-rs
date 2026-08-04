@@ -46,6 +46,20 @@ pub struct StreamingStats {
     pub buffers_discarded_on_restart: u64,
 }
 
+impl StreamingStats {
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.buffers_received += other.buffers_received;
+        self.buffers_processed += other.buffers_processed;
+        self.buffers_dropped += other.buffers_dropped;
+        self.buffers_discarded_on_restart += other.buffers_discarded_on_restart;
+    }
+
+    pub(crate) fn combined(mut self, other: Self) -> Self {
+        self.accumulate(other);
+        self
+    }
+}
+
 /// Completed bulk-IN transfer from a backend.
 #[derive(Debug)]
 pub(crate) struct BulkInCompletion<B> {
@@ -498,14 +512,14 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
             }
 
             let buffer = self.current.as_ref().expect("current buffer set");
-            let (consumed, produced, pending) = self.converter.process_u16le_to_f32iq_slice(
+            let progress = self.converter.process_u16le_to_f32iq_slice(
                 &buffer[self.current_offset..self.current_len],
                 self.config.decimation_factor,
                 &mut out[written..],
             );
-            self.current_offset += consumed;
-            written += produced;
-            self.pending_iq = pending;
+            self.current_offset += progress.consumed_bytes;
+            written += progress.written;
+            self.pending_iq = progress.pending;
 
             if self.current_offset == self.current_len {
                 let buffer = self.current.take().expect("current buffer set");
@@ -516,7 +530,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
                 self.current_len = 0;
                 self.current_offset = 0;
                 return Ok(written);
-            } else if consumed == 0 {
+            } else if progress.consumed_bytes == 0 {
                 return Err(Error::protocol(
                     "convert F32 IQ samples",
                     "USB buffer ended with an incomplete conversion group",
@@ -612,14 +626,14 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             }
 
             let buffer = self.current.as_ref().expect("current buffer set");
-            let (consumed, produced, pending) = self.converter.process_u16le_to_f32iq_slice(
+            let progress = self.converter.process_u16le_to_f32iq_slice(
                 &buffer[self.current_offset..self.current_len],
                 self.config.decimation_factor,
                 &mut out[written..],
             );
-            self.current_offset += consumed;
-            written += produced;
-            self.pending_iq = pending;
+            self.current_offset += progress.consumed_bytes;
+            written += progress.written;
+            self.pending_iq = progress.pending;
 
             if self.current_offset == self.current_len {
                 let buffer = self.current.take().expect("current buffer set");
@@ -629,7 +643,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
                     .submit(buffer);
                 self.current_len = 0;
                 self.current_offset = 0;
-            } else if consumed == 0 {
+            } else if progress.consumed_bytes == 0 {
                 return Err(Error::protocol(
                     "convert F32 IQ samples",
                     "USB buffer ended with an incomplete conversion group",

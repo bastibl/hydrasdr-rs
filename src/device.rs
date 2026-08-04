@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nusb::MaybeFuture;
 
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
-use crate::config::{Bandwidth, ConfigData, RfPort};
+use crate::config::{Bandwidth, Config, RfPort, SampleMode};
 use crate::discovery;
 use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
@@ -244,10 +244,10 @@ impl<C: ControlBackend> HydraSdr<C> {
             })
     }
 
-    pub(crate) fn configure(
+    pub(crate) fn configure<M: SampleMode>(
         &mut self,
-        config: &ConfigData,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        config: &Config<M>,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C, M> {
         let operation = self.prepare_config(config);
         operation.map(move |result| {
             self.apply_config_state(result?);
@@ -255,10 +255,10 @@ impl<C: ControlBackend> HydraSdr<C> {
         })
     }
 
-    pub(crate) fn into_configured(
+    pub(crate) fn into_configured<M: SampleMode>(
         mut self,
-        config: ConfigData,
-    ) -> impl MaybeFuture<Output = Result<Self>> + use<C> {
+        config: Config<M>,
+    ) -> impl MaybeFuture<Output = Result<Self>> + use<C, M> {
         let operation = self.prepare_config(&config);
         operation.map(move |result| {
             self.apply_config_state(result?);
@@ -266,20 +266,20 @@ impl<C: ControlBackend> HydraSdr<C> {
         })
     }
 
-    fn prepare_config(
+    fn prepare_config<M: SampleMode>(
         &self,
-        config: &ConfigData,
-    ) -> impl MaybeFuture<Output = Result<AppliedConfig>> + use<C> {
+        config: &Config<M>,
+    ) -> impl MaybeFuture<Output = Result<AppliedConfig>> + use<C, M> {
         let validation = config.validate();
         let frequency = config.frequency_hz();
         let sample_rate = config.sample_rate_hz();
-        let sample_type = config.sample_format().sample_type();
-        let decimation_mode = config.decimation_mode();
+        let sample_type = M::FORMAT.sample_type();
+        let decimation_mode = config.decimation_mode_internal();
         let bandwidth = config.bandwidth();
         let port = config.rf_port();
         let gain = config.gain();
         let bias_tee = config.bias_tee();
-        let packing = config.packing();
+        let packing = config.packing_internal();
 
         let bandwidths = match bandwidth {
             Bandwidth::Auto => Either::left(ready(Ok(Vec::new()))),

@@ -53,7 +53,10 @@ pub enum RfPort {
     Rx2 = 2,
 }
 
-/// High-level sample format names.
+/// Runtime view of the high-level sample format.
+///
+/// Configuration uses the [`RawAdc`] and [`F32Iq`] marker types instead. This
+/// enum is derived from that marker and is exposed for runtime state reporting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
     /// Raw ADC USB blocks measured in real ADC samples per second.
@@ -199,37 +202,42 @@ impl From<GainPreset> for GainConfig {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config<M: SampleMode = F32Iq> {
-    pub(crate) data: ConfigData,
-    mode: PhantomData<fn() -> M>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ConfigData {
     frequency_hz: u64,
     sample_rate_hz: u32,
     bandwidth: Bandwidth,
-    sample_format: SampleFormat,
     decimation_mode: DecimationMode,
     rf_port: Option<RfPort>,
     gain: GainConfig,
     bias_tee: Option<bool>,
     packing: bool,
+    mode: PhantomData<fn() -> M>,
 }
 
 impl<M: SampleMode> Config<M> {
     fn standard() -> Self {
         Self {
-            data: ConfigData {
-                frequency_hz: DEFAULT_FREQUENCY_HZ,
-                sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
-                bandwidth: Bandwidth::Auto,
-                sample_format: M::FORMAT,
-                decimation_mode: DecimationMode::LowBandwidth,
-                rf_port: Some(RfPort::Rx0),
-                gain: GainConfig::default(),
-                bias_tee: Some(false),
-                packing: false,
-            },
+            frequency_hz: DEFAULT_FREQUENCY_HZ,
+            sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
+            bandwidth: Bandwidth::Auto,
+            decimation_mode: DecimationMode::LowBandwidth,
+            rf_port: Some(RfPort::Rx0),
+            gain: GainConfig::default(),
+            bias_tee: Some(false),
+            packing: false,
+            mode: PhantomData,
+        }
+    }
+
+    fn into_mode<N: SampleMode>(self) -> Config<N> {
+        Config {
+            frequency_hz: self.frequency_hz,
+            sample_rate_hz: self.sample_rate_hz,
+            bandwidth: self.bandwidth,
+            decimation_mode: self.decimation_mode,
+            rf_port: self.rf_port,
+            gain: self.gain,
+            bias_tee: self.bias_tee,
+            packing: self.packing,
             mode: PhantomData,
         }
     }
@@ -264,7 +272,7 @@ impl Config<F32Iq> {
 impl<M: SampleMode> Config<M> {
     /// Tuned center frequency in Hz.
     pub const fn frequency_hz(&self) -> u64 {
-        self.data.frequency_hz
+        self.frequency_hz
     }
 
     /// Requested sample rate in Hz.
@@ -273,32 +281,32 @@ impl<M: SampleMode> Config<M> {
     /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
     /// host-side decimation.
     pub const fn sample_rate_hz(&self) -> u32 {
-        self.data.sample_rate_hz
+        self.sample_rate_hz
     }
 
     /// Configured bandwidth policy.
     pub const fn bandwidth(&self) -> Bandwidth {
-        self.data.bandwidth
+        self.bandwidth
     }
 
-    /// Configured high-level sample format.
+    /// Runtime view of the compile-time sample mode `M`.
     pub const fn sample_format(&self) -> SampleFormat {
         M::FORMAT
     }
 
     /// Configured RF port, if explicitly selected.
     pub const fn rf_port(&self) -> Option<RfPort> {
-        self.data.rf_port
+        self.rf_port
     }
 
     /// Configured gain plan.
     pub const fn gain(&self) -> GainConfig {
-        self.data.gain
+        self.gain
     }
 
     /// Configured bias tee state, if explicitly selected.
     pub const fn bias_tee(&self) -> Option<bool> {
-        self.data.bias_tee
+        self.bias_tee
     }
 
     /// Validate static RFOne and USB protocol constraints without touching USB.
@@ -306,69 +314,33 @@ impl<M: SampleMode> Config<M> {
     /// This does not query device-advertised sample rates or optional
     /// capabilities; those require an opened device and firmware interaction.
     pub fn validate(&self) -> Result<()> {
-        self.data.validate()
+        validate_frequency(self.frequency_hz)?;
+        validate_sample_rate(self.sample_rate_hz, M::FORMAT)?;
+        validate_bandwidth(self.bandwidth)?;
+        validate_gain(self.gain)?;
+        Ok(())
+    }
+
+    pub(crate) const fn decimation_mode_internal(&self) -> DecimationMode {
+        self.decimation_mode
+    }
+
+    pub(crate) const fn packing_internal(&self) -> bool {
+        self.packing
     }
 }
 
 impl Config<RawAdc> {
     /// Whether packed samples should be requested.
     pub const fn packing(&self) -> bool {
-        self.data.packing
+        self.packing
     }
 }
 
 impl Config<F32Iq> {
     /// Virtual IQ-rate hardware/host decimation policy.
     pub const fn decimation_mode(&self) -> DecimationMode {
-        self.data.decimation_mode
-    }
-}
-
-impl ConfigData {
-    pub(crate) const fn frequency_hz(&self) -> u64 {
-        self.frequency_hz
-    }
-
-    pub(crate) const fn sample_rate_hz(&self) -> u32 {
-        self.sample_rate_hz
-    }
-
-    pub(crate) const fn bandwidth(&self) -> Bandwidth {
-        self.bandwidth
-    }
-
-    pub(crate) const fn sample_format(&self) -> SampleFormat {
-        self.sample_format
-    }
-
-    pub(crate) const fn decimation_mode(&self) -> DecimationMode {
         self.decimation_mode
-    }
-
-    pub(crate) const fn rf_port(&self) -> Option<RfPort> {
-        self.rf_port
-    }
-
-    pub(crate) const fn gain(&self) -> GainConfig {
-        self.gain
-    }
-
-    pub(crate) const fn bias_tee(&self) -> Option<bool> {
-        self.bias_tee
-    }
-
-    pub(crate) const fn packing(&self) -> bool {
-        self.packing
-    }
-
-    pub(crate) fn validate(&self) -> Result<()> {
-        validate_frequency(self.frequency_hz)?;
-        validate_sample_rate(self.sample_rate_hz, self.sample_format)?;
-        validate_bandwidth(self.bandwidth)?;
-        validate_gain(self.gain)?;
-        validate_format_decimation(self.sample_format, self.decimation_mode)?;
-        validate_format_packing(self.sample_format, self.packing)?;
-        Ok(())
     }
 }
 
@@ -408,7 +380,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
     /// RFOne accepts center frequencies in the inclusive range
     /// `24_000_000..=1_800_000_000` Hz.
     pub fn frequency_hz(mut self, value: u64) -> Self {
-        self.config.data.frequency_hz = value;
+        self.config.frequency_hz = value;
         self
     }
 
@@ -423,7 +395,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
     /// device for its advertised rates; other encodable values are left for
     /// firmware to accept or reject.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
-        self.config.data.sample_rate_hz = value;
+        self.config.sample_rate_hz = value;
         self
     }
 
@@ -433,7 +405,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
     /// reflects the vendor request encoding; current RFOne firmware does not
     /// advertise manual bandwidth control.
     pub fn bandwidth(mut self, value: Bandwidth) -> Self {
-        self.config.data.bandwidth = value;
+        self.config.bandwidth = value;
         self
     }
 
@@ -450,7 +422,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
 
     /// Select the RF input port.
     pub fn rf_port(mut self, value: RfPort) -> Self {
-        self.config.data.rf_port = Some(value);
+        self.config.rf_port = Some(value);
         self
     }
 
@@ -459,13 +431,13 @@ impl<M: SampleMode> ConfigBuilder<M> {
     /// Preset gain indexes must be in the inclusive range `0..=21`.
     /// Manual component gains use the ranges documented on [`GainConfig::Manual`].
     pub fn gain(mut self, value: impl Into<GainConfig>) -> Self {
-        self.config.data.gain = value.into();
+        self.config.gain = value.into();
         self
     }
 
     /// Enable or disable the RF port bias tee.
     pub fn bias_tee(mut self, enabled: bool) -> Self {
-        self.config.data.bias_tee = Some(enabled);
+        self.config.bias_tee = Some(enabled);
         self
     }
 
@@ -479,7 +451,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
 impl ConfigBuilder<RawAdc> {
     /// Enable or disable packed raw-sample transfers.
     pub fn packing(mut self, enabled: bool) -> Self {
-        self.config.data.packing = enabled;
+        self.config.packing = enabled;
         self
     }
 }
@@ -494,13 +466,9 @@ impl ConfigBuilder<F32Iq> {
     /// let _ = Config::builder().packing(true);
     /// ```
     pub fn raw_adc(mut self) -> ConfigBuilder<RawAdc> {
-        self.config.data.sample_format = SampleFormat::RawAdc;
-        self.config.data.decimation_mode = DecimationMode::LowBandwidth;
+        self.config.decimation_mode = DecimationMode::LowBandwidth;
         ConfigBuilder {
-            config: Config {
-                data: self.config.data,
-                mode: PhantomData,
-            },
+            config: self.config.into_mode(),
         }
     }
 
@@ -513,7 +481,7 @@ impl ConfigBuilder<F32Iq> {
     ///     .decimation_mode(DecimationMode::HighDefinition);
     /// ```
     pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
-        self.config.data.decimation_mode = value;
+        self.config.decimation_mode = value;
         self
     }
 }
@@ -543,29 +511,6 @@ pub(crate) fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> R
         return Err(Error::invalid_config(
             "sample_rate_hz",
             "must fit the HydraSDR vendor request parameter",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_format_decimation(
-    sample_format: SampleFormat,
-    decimation_mode: DecimationMode,
-) -> Result<()> {
-    if sample_format == SampleFormat::RawAdc && decimation_mode == DecimationMode::HighDefinition {
-        return Err(Error::invalid_config(
-            "decimation_mode",
-            "HighDefinition is only valid for converted F32Iq streams",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_format_packing(sample_format: SampleFormat, packing: bool) -> Result<()> {
-    if sample_format == SampleFormat::F32Iq && packing {
-        return Err(Error::invalid_config(
-            "packing",
-            "packed samples are only valid for raw ADC streams",
         ));
     }
     Ok(())

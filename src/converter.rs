@@ -135,6 +135,12 @@ pub(crate) struct Float32IqConverter {
     delay_index: usize,
 }
 
+pub(crate) struct ConversionProgress {
+    pub(crate) consumed_bytes: usize,
+    pub(crate) written: usize,
+    pub(crate) pending: Option<Complex32>,
+}
+
 impl Default for Float32IqConverter {
     fn default() -> Self {
         let mut fir_kernel = [0.0; 24];
@@ -184,9 +190,13 @@ impl Float32IqConverter {
         raw: &[u8],
         decimation_factor: usize,
         out: &mut [Complex32],
-    ) -> (usize, usize, Option<Complex32>) {
+    ) -> ConversionProgress {
         if out.is_empty() {
-            return (0, 0, None);
+            return ConversionProgress {
+                consumed_bytes: 0,
+                written: 0,
+                pending: None,
+            };
         }
 
         let decimation_factor = decimation_factor.max(1);
@@ -196,7 +206,11 @@ impl Float32IqConverter {
         let requested_pairs = out.len().saturating_add(1) & !1;
         let pairs = available_pairs.min(requested_pairs);
         if pairs == 0 {
-            return (0, 0, None);
+            return ConversionProgress {
+                consumed_bytes: 0,
+                written: 0,
+                pending: None,
+            };
         }
 
         let raw_samples = pairs * 2 * decimation_factor;
@@ -215,7 +229,11 @@ impl Float32IqConverter {
             Complex32::new(pair[0], pair[1])
         });
 
-        (raw_samples * 2, written, pending)
+        ConversionProgress {
+            consumed_bytes: raw_samples * 2,
+            written,
+            pending,
+        }
     }
 
     fn process_u16le(&mut self, raw: &[u8], decimation_factor: usize) -> &[f32] {
@@ -597,15 +615,15 @@ mod tests {
                     written = 1;
                 }
                 if written != out.len() && offset != input.len() {
-                    let (consumed, produced, carry) = sliced.process_u16le_to_f32iq_slice(
+                    let progress = sliced.process_u16le_to_f32iq_slice(
                         &input[offset..],
                         decimation,
                         &mut out[written..],
                     );
-                    assert_ne!(consumed, 0);
-                    offset += consumed;
-                    written += produced;
-                    pending = carry;
+                    assert_ne!(progress.consumed_bytes, 0);
+                    offset += progress.consumed_bytes;
+                    written += progress.written;
+                    pending = progress.pending;
                 }
                 actual.extend_from_slice(&out[..written]);
             }
