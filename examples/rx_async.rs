@@ -61,12 +61,13 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     );
 
     if run_rx {
-        let mut rx = dev.into_rx_stream();
+        let mut rx = dev.rx_stream()?;
         rx.start().await?;
         let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
         let stats = rx.stop().await?;
-        rx.shutdown().await?;
+        drop(rx);
+        dev.shutdown().await?;
         println!("rx samples: {count}, first={:?}", samples.first());
         println!("short async RX complete: {stats:?}");
     } else {

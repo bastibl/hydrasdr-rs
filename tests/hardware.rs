@@ -78,7 +78,7 @@ fn hardware_short_rx_stream_smoke_test() {
         .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    let mut rx = dev.into_rx_stream();
+    let mut rx = dev.rx_stream().expect("claim RX stream");
     rx.start().wait().expect("start RX stream");
     {
         let block = rx
@@ -107,7 +107,7 @@ fn hardware_f32_rx_stream_smoke_test() {
         .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    let mut rx = dev.into_rx_stream();
+    let mut rx = dev.rx_stream().expect("claim F32 IQ stream");
     rx.start().wait().expect("start F32 IQ stream");
     let mut samples = [hydrasdr_rs::Complex32::default(); 32];
     let count = rx

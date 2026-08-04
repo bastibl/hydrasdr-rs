@@ -124,6 +124,24 @@ impl<C> HydraSdr<C> {
     pub(crate) fn streaming_decimation_factor(&self) -> usize {
         self.streaming.decimation_factor()
     }
+
+    /// Return whether packed raw transfers are currently configured.
+    pub(crate) fn streaming_packing_enabled(&self) -> bool {
+        self.streaming.packing_enabled()
+    }
+
+    /// Create an independently owned streaming handle over the same USB interface.
+    pub(crate) fn stream_handle(&self) -> Self {
+        Self {
+            control: Arc::clone(&self.control),
+            sample_type: self.sample_type,
+            sample_rates: self.sample_rates.clone(),
+            features: self.features,
+            decimation_mode: self.decimation_mode,
+            packing_enabled: self.packing_enabled,
+            streaming: self.streaming.clone(),
+        }
+    }
 }
 
 impl<C: ControlBackend> HydraSdr<C> {

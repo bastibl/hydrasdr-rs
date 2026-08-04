@@ -1,8 +1,9 @@
 //! Rust-native HydraSDR RFOne driver built on `nusb`.
 //!
 //! One-shot USB operations implement [`MaybeFuture`]: await them in async code,
-//! or call [`MaybeFuture::wait`] on native targets. Receive streams own their
-//! device and retain a persistent USB transfer queue.
+//! or call [`MaybeFuture::wait`] on native targets. Devices remain available
+//! while their independently owned receive stream retains a persistent USB
+//! transfer queue.
 //!
 //! The synchronous API uses [`nusb::MaybeFuture::wait`] for blocking operation.
 //! Awaited operations are executor-agnostic at this crate layer. Bulk/control
@@ -30,7 +31,7 @@
 //! use std::time::Duration;
 //!
 //! fn main() -> hydrasdr_rs::Result<()> {
-//!     let dev = Device::builder()
+//!     let mut dev = Device::builder()
 //!         .frequency_hz(100_000_000)
 //!         .sample_rate_hz(10_000_000)
 //!         .rf_port(RfPort::Rx0)
@@ -38,14 +39,16 @@
 //!         .open()
 //!         .wait()?;
 //!
-//!     let mut rx = dev.into_rx_stream();
+//!     let mut rx = dev.rx_stream()?;
 //!     rx.start().wait()?;
+//!     dev.set_frequency_hz(101_000_000).wait()?;
 //!     let mut samples = [Complex32::default(); 1024];
 //!     let count = rx.read(&mut samples, Duration::from_secs(1)).wait()?;
 //!     let stats = rx.stop().wait()?;
 //!     println!("{count} samples");
 //!     println!("{stats:?}");
-//!     rx.shutdown().wait()?;
+//!     drop(rx);
+//!     dev.shutdown().wait()?;
 //!
 //!     Ok(())
 //! }

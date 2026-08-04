@@ -66,7 +66,7 @@ cargo check --target wasm32-unknown-unknown
 
 `Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before returning a `Config` or touching hardware. Every `Config` obtainable through the public API is therefore valid; applying one does not repeat its static validation. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
-`Device::config()` returns the typed configuration last successfully applied through the driver; `RxStream::config()` carries the same snapshot while the stream owns the device. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged.
+`Device::config()` returns the typed configuration last successfully applied through the driver. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged. The device remains the authoritative control handle while its typed stream exists.
 
 The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
 
@@ -80,7 +80,7 @@ The builder opens the selected RFOne, applies the receiver configuration, and ca
 use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort};
 
 fn main() -> hydrasdr_rs::Result<()> {
-    let dev = Device::builder()
+    let mut dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
         .rf_port(RfPort::Rx0)
@@ -91,15 +91,17 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     println!("opened {} ({})", dev.info().board_name, dev.info().firmware_version);
 
-    let mut rx = dev.into_rx_stream();
+    let mut rx = dev.rx_stream()?;
     rx.start().wait()?;
+    dev.set_frequency_hz(101_000_000).wait()?;
     let mut samples = [Complex32::default(); 32];
     let count = rx
         .read(&mut samples, std::time::Duration::from_secs(1))
         .wait()?;
     println!("read {count} IQ samples");
     let stats = rx.stop().wait()?;
-    rx.shutdown().wait()?;
+    drop(rx);
+    dev.shutdown().wait()?;
     println!("{stats:?}");
 
     Ok(())
@@ -116,7 +118,7 @@ use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort};
 
 fn main() -> hydrasdr_rs::Result<()> {
     block_on(async {
-        let dev = Device::builder()
+        let mut dev = Device::builder()
             .frequency_hz(144_500_000)
             .sample_rate_hz(10_000_000)
             .rf_port(RfPort::Rx0)
@@ -124,13 +126,15 @@ fn main() -> hydrasdr_rs::Result<()> {
             .open()
             .await?;
 
-        let mut rx = dev.into_rx_stream();
+        let mut rx = dev.rx_stream()?;
         rx.start().await?;
+        dev.set_frequency_hz(145_000_000).await?;
         let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples, std::time::Duration::ZERO).await?;
         println!("async samples: {count}");
         let stats = rx.stop().await?;
-        rx.shutdown().await?;
+        drop(rx);
+        dev.shutdown().await?;
         println!("{stats:?}");
 
         Ok(())
@@ -138,7 +142,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-Call `stop().await` to pause the receiver while retaining its transfer queue for restart; use `into_device()` afterward if the device handle is still needed. Call `shutdown().await` to consume the stream, close its queue, and explicitly turn off both reception and RF input bias power. Native drops run the same hardware shutdown sequence best-effort. WebUSB cannot issue asynchronous control transfers from `Drop`, so browser applications must await explicit shutdown. Because start and stop borrow the owned stream, canceling either future does not discard the device handle. `into_device()` remains available after receiver-off reports an error. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
+The device remains available while its stream is active, so frequency, sample-rate, RF-port, and gain controls do not require a receiver stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. Drop the stream to release its exclusive claim, then call `Device::shutdown().await` to explicitly turn off both reception and RF input bias power. Native device drops run the same hardware shutdown sequence best-effort. WebUSB cannot issue asynchronous control transfers from `Drop`, so browser applications must await explicit device shutdown. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 

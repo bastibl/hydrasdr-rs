@@ -2,6 +2,8 @@
 
 use std::future::Future;
 use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -137,10 +139,27 @@ pub(crate) struct PreparedBulkIn<B, T> {
     config: StreamingConfig,
 }
 
-/// Mutable streaming configuration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct StreamingParameters {
+    packing_enabled: AtomicBool,
+    decimation_factor: AtomicUsize,
+}
+
+/// Streaming parameters shared by the device control plane and receive queue.
+#[derive(Clone, Debug)]
 pub(crate) struct StreamingState {
-    config: StreamingConfig,
+    parameters: Arc<StreamingParameters>,
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self {
+            parameters: Arc::new(StreamingParameters {
+                packing_enabled: AtomicBool::new(false),
+                decimation_factor: AtomicUsize::new(1),
+            }),
+        }
+    }
 }
 
 impl StreamingState {
@@ -151,23 +170,36 @@ impl StreamingState {
 
     /// Return the current streaming configuration.
     pub(crate) fn config(&self) -> StreamingConfig {
-        self.config
+        StreamingConfig {
+            packing_enabled: self.parameters.packing_enabled.load(Ordering::Acquire),
+            decimation_factor: self.parameters.decimation_factor.load(Ordering::Acquire),
+            ..StreamingConfig::default()
+        }
     }
 
     /// Return the configured host-side DDC decimation factor.
     pub(crate) fn decimation_factor(&self) -> usize {
-        self.config.decimation_factor
+        self.parameters.decimation_factor.load(Ordering::Acquire)
     }
 
-    /// Enable or disable packed samples before streaming starts.
-    pub(crate) fn set_packing(&mut self, enabled: bool) {
-        self.config.packing_enabled = enabled;
+    /// Return whether packed raw transfers are enabled.
+    pub(crate) fn packing_enabled(&self) -> bool {
+        self.parameters.packing_enabled.load(Ordering::Acquire)
     }
 
-    /// Set the DDC decimation factor before streaming starts.
-    pub(crate) fn set_decimation(&mut self, factor: usize) -> Result<()> {
+    /// Enable or disable packed samples.
+    pub(crate) fn set_packing(&self, enabled: bool) {
+        self.parameters
+            .packing_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    /// Set the DDC decimation factor observed by converted streams.
+    pub(crate) fn set_decimation(&self, factor: usize) -> Result<()> {
         validate_decimation_factor(factor)?;
-        self.config.decimation_factor = factor;
+        self.parameters
+            .decimation_factor
+            .store(factor, Ordering::Release);
         Ok(())
     }
 }
@@ -255,6 +287,10 @@ impl<B: BulkInBackend> RawRxStream<B> {
             self.closed = true;
         }
         self.stats
+    }
+
+    pub(crate) fn packing_enabled(&self) -> bool {
+        self.config.packing_enabled
     }
 
     fn bulk_in_mut(&mut self) -> Result<&mut B> {
@@ -367,6 +403,10 @@ impl<B: AsyncBulkInBackend> AsyncRawRxStream<B> {
         self.stats
     }
 
+    pub(crate) fn packing_enabled(&self) -> bool {
+        self.config.packing_enabled
+    }
+
     pub(crate) fn is_closed(&self) -> bool {
         self.closed
     }
@@ -426,6 +466,18 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
     /// Update host-side decimation while preserving the existing WebUSB transfer queue.
     pub(crate) fn set_decimation_factor(&mut self, factor: usize) -> Result<()> {
         validate_decimation_factor(factor)?;
+        if self.config.decimation_factor != factor {
+            self.converter = Float32IqConverter::default();
+            self.pending_iq = None;
+            self.current_len = 0;
+            self.current_offset = 0;
+            if let Some(buffer) = self.current.take()
+                && let Some(bulk_in) = self.bulk_in.as_mut()
+            {
+                bulk_in.submit(buffer);
+                self.stats.buffers_dropped += 1;
+            }
+        }
         self.config.decimation_factor = factor;
         Ok(())
     }
@@ -570,6 +622,24 @@ impl<B: BulkInBackend> DirectRxStream<B> {
             self.closed = true;
         }
         self.stats
+    }
+
+    pub(crate) fn set_decimation_factor(&mut self, factor: usize) -> Result<()> {
+        validate_decimation_factor(factor)?;
+        if self.config.decimation_factor != factor {
+            self.converter = Float32IqConverter::default();
+            self.pending_iq = None;
+            self.current_len = 0;
+            self.current_offset = 0;
+            if let Some(buffer) = self.current.take()
+                && let Some(bulk_in) = self.bulk_in.as_mut()
+            {
+                bulk_in.submit(buffer);
+                self.stats.buffers_dropped += 1;
+            }
+            self.config.decimation_factor = factor;
+        }
+        Ok(())
     }
 
     /// Read converted complex float samples into `out`.
@@ -833,6 +903,20 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn streaming_parameters_are_shared_between_device_and_stream_handles() {
+        let device_state = StreamingState::new();
+        let stream_state = device_state.clone();
+
+        device_state.set_packing(true);
+        device_state
+            .set_decimation(8)
+            .expect("set shared decimation");
+
+        assert!(stream_state.packing_enabled());
+        assert_eq!(stream_state.decimation_factor(), 8);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[derive(Debug, Default)]
