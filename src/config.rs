@@ -187,9 +187,9 @@ pub struct Config<M: SampleMode = F32Iq> {
     frequency_hz: u64,
     sample_rate_hz: u32,
     decimation_policy: DecimationPolicy,
-    rf_port: Option<RfPort>,
+    rf_port: RfPort,
     gain: GainConfig,
-    bias_tee: Option<bool>,
+    bias_tee: bool,
     packing: bool,
     mode: PhantomData<fn() -> M>,
 }
@@ -200,9 +200,9 @@ impl<M: SampleMode> Config<M> {
             frequency_hz: DEFAULT_FREQUENCY_HZ,
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
             decimation_policy: DecimationPolicy::LowBandwidth,
-            rf_port: Some(RfPort::Rx0),
+            rf_port: RfPort::Rx0,
             gain: GainConfig::default(),
-            bias_tee: Some(false),
+            bias_tee: false,
             packing: false,
             mode: PhantomData,
         }
@@ -268,8 +268,8 @@ impl<M: SampleMode> Config<M> {
         M::FORMAT
     }
 
-    /// Configured RF port, if explicitly selected.
-    pub const fn rf_port(&self) -> Option<RfPort> {
+    /// Configured RF port.
+    pub const fn rf_port(&self) -> RfPort {
         self.rf_port
     }
 
@@ -278,8 +278,8 @@ impl<M: SampleMode> Config<M> {
         self.gain
     }
 
-    /// Configured bias tee state, if explicitly selected.
-    pub const fn bias_tee(&self) -> Option<bool> {
+    /// Configured bias tee state.
+    pub const fn bias_tee(&self) -> bool {
         self.bias_tee
     }
 
@@ -307,7 +307,7 @@ impl<M: SampleMode> Config<M> {
     }
 
     pub(crate) fn set_rf_port_internal(&mut self, value: RfPort) {
-        self.rf_port = Some(value);
+        self.rf_port = value;
     }
 
     pub(crate) fn set_gain_internal(&mut self, value: GainConfig) {
@@ -318,13 +318,9 @@ impl<M: SampleMode> Config<M> {
         self.frequency_hz = applied.frequency_hz;
         self.sample_rate_hz = applied.sample_rate_hz;
         self.decimation_policy = applied.decimation_policy;
-        if let Some(port) = applied.rf_port {
-            self.rf_port = Some(port);
-        }
+        self.rf_port = applied.rf_port;
         self.set_gain_internal(applied.gain);
-        if let Some(enabled) = applied.bias_tee {
-            self.bias_tee = Some(enabled);
-        }
+        self.bias_tee = applied.bias_tee;
         self.packing = applied.packing;
     }
 }
@@ -398,7 +394,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
 
     /// Select the RF input port.
     pub fn rf_port(mut self, value: RfPort) -> Self {
-        self.config.rf_port = Some(value);
+        self.config.rf_port = value;
         self
     }
 
@@ -413,7 +409,7 @@ impl<M: SampleMode> ConfigBuilder<M> {
 
     /// Enable or disable the RF port bias tee.
     pub fn bias_tee(mut self, enabled: bool) -> Self {
-        self.config.bias_tee = Some(enabled);
+        self.config.bias_tee = enabled;
         self
     }
 

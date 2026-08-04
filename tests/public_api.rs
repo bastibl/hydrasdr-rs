@@ -21,7 +21,7 @@ fn public_default_config_initializes_all_hardware_settings() {
     let config = Config::default();
 
     assert_eq!(config.sample_format(), SampleFormat::F32Iq);
-    assert_eq!(config.rf_port(), Some(RfPort::Rx0));
+    assert_eq!(config.rf_port(), RfPort::Rx0);
     assert_eq!(
         config.gain(),
         GainConfig::Stages {
@@ -30,7 +30,7 @@ fn public_default_config_initializes_all_hardware_settings() {
             vga: 6,
         }
     );
-    assert_eq!(config.bias_tee(), Some(false));
+    assert!(!config.bias_tee());
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn public_config_builder_uses_ergonomic_types() {
 
     assert_eq!(config.frequency_hz(), 144_500_000);
     assert_eq!(config.sample_rate_hz(), 10_000_000);
-    assert_eq!(config.rf_port(), Some(RfPort::Rx0));
+    assert_eq!(config.rf_port(), RfPort::Rx0);
     assert_eq!(config.sample_format(), SampleFormat::RawAdc);
     assert!(config.packing());
 }

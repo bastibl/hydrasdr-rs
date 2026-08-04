@@ -31,7 +31,7 @@ fn hardware_open_and_query_device_info() {
         [(RfPort::Rx0, "ANT")]
     );
     let config = dev.config();
-    assert_eq!(config.rf_port(), Some(RfPort::Rx0));
+    assert_eq!(config.rf_port(), RfPort::Rx0);
     assert_eq!(
         config.gain(),
         GainConfig::Stages {
@@ -40,7 +40,7 @@ fn hardware_open_and_query_device_info() {
             vga: 6,
         }
     );
-    assert_eq!(config.bias_tee(), Some(false));
+    assert!(!config.bias_tee());
     dev.shutdown().wait().expect("explicitly shut down device");
 }
 

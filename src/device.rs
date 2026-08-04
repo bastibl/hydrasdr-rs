@@ -325,18 +325,17 @@ impl<C: ControlBackend> HydraSdr<C> {
             .and_then({
                 let control = Arc::clone(&control);
                 move |state| {
-                    optional_control_in(control, port.map(VendorControlRequest::set_rf_port)).map(
-                        move |result| {
+                    Self::control_in_exact_with(control, VendorControlRequest::set_rf_port(port), 1)
+                        .map(move |result| {
                             let response = result?;
-                            if port.is_some() && response.first().copied() != Some(1) {
+                            if response.first().copied() != Some(1) {
                                 return Err(Error::protocol(
                                     "set RF port",
                                     "firmware rejected the requested RF port",
                                 ));
                             }
                             Ok(state)
-                        },
-                    )
+                        })
                 }
             })
             .and_then({
@@ -371,9 +370,9 @@ impl<C: ControlBackend> HydraSdr<C> {
                 }
             })
             .and_then(move |state| {
-                optional_control_out(
+                Self::control_out_with(
                     control,
-                    bias_tee.map(|enabled| VendorControlRequest::set_rf_bias(u8::from(enabled))),
+                    VendorControlRequest::set_rf_bias(u8::from(bias_tee)),
                 )
                 .map_ok(move |_| state)
             })
@@ -861,26 +860,6 @@ fn build_device_info(
         board_name: "HydraSDR RFOne",
         firmware_version,
         rf_ports: rf_port_infos(),
-    }
-}
-
-fn optional_control_in<C: ControlBackend>(
-    control: Arc<C>,
-    request: Option<VendorControlRequest>,
-) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<C> {
-    match request {
-        Some(request) => Either::left(HydraSdr::<C>::control_in_exact_with(control, request, 1)),
-        None => Either::right(ready(Ok(Vec::new()))),
-    }
-}
-
-fn optional_control_out<C: ControlBackend>(
-    control: Arc<C>,
-    request: Option<VendorControlRequest>,
-) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-    match request {
-        Some(request) => Either::left(HydraSdr::<C>::control_out_with(control, request)),
-        None => Either::right(ready(Ok(()))),
     }
 }
 
