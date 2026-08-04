@@ -1607,8 +1607,6 @@ mod tests {
                 board_name: "fake HydraSDR",
                 firmware_version: "fake firmware".to_owned(),
                 serial: None,
-                min_frequency: 24_000_000,
-                max_frequency: 1_800_000_000,
                 rf_ports: Vec::new(),
             },
             #[cfg(not(target_arch = "wasm32"))]

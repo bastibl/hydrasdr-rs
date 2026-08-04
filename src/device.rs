@@ -9,9 +9,9 @@ use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
 use crate::rfone::{
     RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
-    RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
-    RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT, RFONE_SENSITIVITY_LNA_GAINS,
-    RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_VGA_MAX_GAIN, rf_port_infos,
+    RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT,
+    RFONE_SENSITIVITY_LNA_GAINS, RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS,
+    RFONE_VGA_MAX_GAIN, rf_port_infos,
 };
 use crate::streaming::{
     AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, StreamingState,
@@ -860,8 +860,6 @@ fn build_device_info(
         serial: serial_from_part_id(&part_serial),
         board_name: "HydraSDR RFOne",
         firmware_version,
-        min_frequency: RFONE_MIN_FREQ_HZ,
-        max_frequency: RFONE_MAX_FREQ_HZ,
         rf_ports: rf_port_infos(),
     }
 }

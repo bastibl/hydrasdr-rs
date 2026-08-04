@@ -176,8 +176,6 @@ fn public_error_and_metadata_are_ergonomic() {
         board_name: "HydraSDR RFOne",
         firmware_version: "test".to_string(),
         serial: Some(0x1234),
-        min_frequency: 24_000_000,
-        max_frequency: 1_800_000_000,
         rf_ports: Vec::new(),
     };
 

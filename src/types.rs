@@ -87,10 +87,6 @@ pub struct DeviceInfo {
     pub firmware_version: String,
     /// Parsed 64-bit serial number, if available.
     pub serial: Option<u64>,
-    /// Minimum tunable device frequency in Hz.
-    pub min_frequency: u64,
-    /// Maximum tunable device frequency in Hz.
-    pub max_frequency: u64,
     /// RF ports reported for this device.
     pub rf_ports: Vec<RfPortInfo>,
 }
