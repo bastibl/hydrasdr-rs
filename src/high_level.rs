@@ -161,8 +161,10 @@ impl Device {
     /// fails. Await this operation in async code, or call [`MaybeFuture::wait`]
     /// on native targets. Native drops perform the same sequence best-effort;
     /// WebUSB callers must explicitly await shutdown because `Drop` cannot run
-    /// asynchronous USB operations. Poll the returned operation to completion;
-    /// canceling it does not guarantee that both commands reached the device.
+    /// asynchronous USB operations. On native targets, dropping or canceling
+    /// the returned operation keeps that best-effort fallback armed. WebUSB
+    /// callers must poll it to completion to guarantee both commands are
+    /// attempted.
     #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
     pub fn shutdown(self) -> impl MaybeFuture<Output = Result<()>> {
         self.inner.shutdown()
@@ -290,8 +292,14 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut device = self;
-            device.shutdown_on_drop = false;
-            device.shutdown_operation()
+            let operation = device.shutdown_operation();
+            operation.map(move |result| {
+                if result.is_ok() {
+                    device.shutdown_on_drop = false;
+                }
+                drop(device);
+                result
+            })
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1703,8 +1711,71 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
         assert!(!active_state.bias_tee().expect("successful bias-off state"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropping_unpolled_shutdown_runs_native_fallback() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let device = fake_device(control, SampleFormat::RawAdc);
+
+        let shutdown = device.shutdown();
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
+        drop(shutdown);
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn canceling_polled_shutdown_runs_native_fallback() {
+        use std::future::IntoFuture;
+
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        state.pause_control_out_at.store(1, Ordering::SeqCst);
+        let device = fake_device(control, SampleFormat::RawAdc);
+        let mut shutdown = Box::pin(device.shutdown().into_future());
+
+        assert!(block_on(futures_lite::future::poll_once(shutdown.as_mut())).is_none());
+        drop(shutdown);
+
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
