@@ -85,7 +85,7 @@ pub enum GainPreset {
 pub enum GainConfig {
     /// Leave direct gain state unchanged.
     ///
-    /// This is opt-in. The standard [`Config`] default explicitly sets 10 dB
+    /// This is opt-in. The standard [`Config`] default explicitly sets 35 dB
     /// total gain and disables both AGCs.
     Unchanged,
     /// Apply one RFOne preset.
@@ -115,9 +115,9 @@ pub enum GainConfig {
 impl Default for GainConfig {
     fn default() -> Self {
         Self::Manual {
-            lna: Some(10),
-            mixer: Some(0),
-            vga: Some(0),
+            lna: Some(14),
+            mixer: Some(15),
+            vga: Some(6),
             lna_agc: Some(false),
             mixer_agc: Some(false),
         }
@@ -133,7 +133,7 @@ impl From<GainPreset> for GainConfig {
 /// Reusable high-level receiver configuration.
 ///
 /// The default is complete: it selects RX0, disables the bias tee and both
-/// AGCs, and sets 10 dB total gain as LNA 10 dB, mixer 0 dB, and VGA 0 dB.
+/// AGCs, and sets 35 dB total gain as LNA 14 dB, mixer 15 dB, and VGA 6 dB.
 /// Callers can opt out of gain writes with [`GainConfig::Unchanged`] or
 /// construct partial manual gain updates explicitly.
 ///

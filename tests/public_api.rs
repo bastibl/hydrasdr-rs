@@ -11,9 +11,9 @@ fn public_default_config_initializes_all_hardware_settings() {
     assert_eq!(
         config.gain(),
         GainConfig::Manual {
-            lna: Some(10),
-            mixer: Some(0),
-            vga: Some(0),
+            lna: Some(14),
+            mixer: Some(15),
+            vga: Some(6),
             lna_agc: Some(false),
             mixer_agc: Some(false),
         }

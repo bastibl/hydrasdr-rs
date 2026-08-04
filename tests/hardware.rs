@@ -31,9 +31,9 @@ fn hardware_open_and_query_device_info() {
         [(RfPort::Rx0, "ANT")]
     );
     assert_eq!(info.active_state.rf_port().unwrap(), RfPort::Rx0);
-    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(10));
-    assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(0));
-    assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(0));
+    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(14));
+    assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(15));
+    assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(6));
     assert!(!info.active_state.agc_enabled().unwrap());
     assert!(!info.active_state.bias_tee().unwrap());
 }
