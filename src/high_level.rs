@@ -629,12 +629,12 @@ impl DeviceBuilder<F32Iq> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SampleBlock<'a> {
     raw: &'a [u8],
-    sample_count: i32,
+    sample_count: usize,
     dropped_samples: u64,
 }
 
 impl<'a> SampleBlock<'a> {
-    pub(crate) const fn new(raw: &'a [u8], sample_count: i32, dropped_samples: u64) -> Self {
+    pub(crate) const fn new(raw: &'a [u8], sample_count: usize, dropped_samples: u64) -> Self {
         Self {
             raw,
             sample_count,
@@ -656,7 +656,7 @@ impl<'a> SampleBlock<'a> {
     }
 
     /// Sample count reported for this block.
-    pub const fn sample_count(&self) -> i32 {
+    pub const fn sample_count(&self) -> usize {
         self.sample_count
     }
 

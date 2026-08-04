@@ -20,7 +20,7 @@ use crate::rfone::RFONE_TRANSFER_COUNT;
 #[derive(Debug)]
 pub(crate) struct Transfer<'a> {
     pub(crate) samples: &'a [u8],
-    pub(crate) sample_count: i32,
+    pub(crate) sample_count: usize,
     pub(crate) dropped_samples: u64,
 }
 
@@ -842,11 +842,11 @@ fn prepare_async_bulk_in<B: AsyncBulkInBackend>(
     }
 }
 
-fn sample_count_for_buffer(buffer_len: usize, packing_enabled: bool) -> i32 {
+fn sample_count_for_buffer(buffer_len: usize, packing_enabled: bool) -> usize {
     if packing_enabled {
-        (((buffer_len / 2) * 4) / 3) as i32
+        ((buffer_len / 2) * 4) / 3
     } else {
-        (buffer_len / 2) as i32
+        buffer_len / 2
     }
 }
 
