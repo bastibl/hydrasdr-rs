@@ -51,6 +51,7 @@ pub enum Error {
 
 /// Stable high-level error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// A provided configuration value failed validation.
     InvalidConfig,
