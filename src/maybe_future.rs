@@ -50,9 +50,96 @@ pub(crate) trait MaybeFutureExt: MaybeFuture + Sized {
             next: PhantomData,
         }
     }
+
+    fn continue_with<C, U, N>(self, continuation: C) -> ContinueWith<Self, C, N>
+    where
+        C: FnOnce(Self::Output) -> N + NonWasmSend,
+        N: MaybeFuture<Output = U>,
+    {
+        ContinueWith {
+            wrapped: self,
+            continuation,
+            next: PhantomData,
+        }
+    }
 }
 
 impl<F: MaybeFuture> MaybeFutureExt for F {}
+
+pub(crate) struct ContinueWith<F, C, N> {
+    wrapped: F,
+    continuation: C,
+    next: PhantomData<fn() -> N>,
+}
+
+impl<F, C, N, U> IntoFuture for ContinueWith<F, C, N>
+where
+    F: MaybeFuture,
+    C: FnOnce(F::Output) -> N + NonWasmSend,
+    N: MaybeFuture<Output = U>,
+{
+    type Output = U;
+    type IntoFuture = ContinueWithFuture<F::IntoFuture, C, N::IntoFuture>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        ContinueWithFuture {
+            first: Some(Box::pin(self.wrapped.into_future())),
+            continuation: Some(self.continuation),
+            second: None,
+        }
+    }
+}
+
+impl<F, C, N, U> MaybeFuture for ContinueWith<F, C, N>
+where
+    F: MaybeFuture,
+    C: FnOnce(F::Output) -> N + NonWasmSend,
+    N: MaybeFuture<Output = U>,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait(self) -> Self::Output {
+        (self.continuation)(self.wrapped.wait()).wait()
+    }
+}
+
+pub(crate) struct ContinueWithFuture<F, C, N> {
+    first: Option<Pin<Box<F>>>,
+    continuation: Option<C>,
+    second: Option<Pin<Box<N>>>,
+}
+
+impl<F, C, N> Unpin for ContinueWithFuture<F, C, N> {}
+
+impl<F, C, N, Next, U> Future for ContinueWithFuture<F, C, N>
+where
+    F: Future,
+    C: FnOnce(F::Output) -> Next,
+    Next: IntoFuture<Output = U, IntoFuture = N>,
+    N: Future<Output = U>,
+{
+    type Output = U;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            if let Some(second) = self.second.as_mut() {
+                return second.as_mut().poll(cx);
+            }
+
+            let first = self.first.as_mut().expect("polled after completion");
+            match first.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(value) => {
+                    self.first = None;
+                    let continuation = self
+                        .continuation
+                        .take()
+                        .expect("continuation missing after first operation completed");
+                    self.second = Some(Box::pin(continuation(value).into_future()));
+                }
+            }
+        }
+    }
+}
 
 struct AndThen<F, C, N> {
     wrapped: F,

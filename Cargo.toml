@@ -19,5 +19,8 @@ smol = ["nusb/smol"]
 nusb = "0.2.7"
 num-complex = "0.4"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
 [dev-dependencies]
 futures-lite = "2"
