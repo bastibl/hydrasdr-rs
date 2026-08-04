@@ -169,14 +169,20 @@ impl Float32IqConverter {
         decimation_factor: usize,
         out: &mut Vec<u8>,
     ) -> i32 {
-        let output = self.process_u16le(raw, decimation_factor);
+        let decimation_factor = decimation_factor.max(1);
+        let mut output = vec![Complex32::default(); (raw.len() / 2) / (2 * decimation_factor)];
+        let progress = self.process_u16le_to_f32iq_slice(raw, decimation_factor, &mut output);
+        debug_assert_eq!(progress.consumed_bytes, raw.len());
+        debug_assert_eq!(progress.written, output.len());
+        debug_assert!(progress.pending.is_none());
 
-        out.reserve(core::mem::size_of_val(output));
+        out.reserve(output.len() * core::mem::size_of::<Complex32>());
         for value in output {
-            out.extend_from_slice(&value.to_le_bytes());
+            out.extend_from_slice(&value.re.to_le_bytes());
+            out.extend_from_slice(&value.im.to_le_bytes());
         }
 
-        (output.len() / 2) as i32
+        progress.written as i32
     }
 
     /// Convert a prefix of `raw` directly into `out`.
@@ -213,75 +219,89 @@ impl Float32IqConverter {
             };
         }
 
-        let raw_samples = pairs * 2 * decimation_factor;
-        let output = self.process_u16le(&raw[..raw_samples * 2], decimation_factor);
-        debug_assert_eq!(output.len(), pairs * 2);
-
+        let raw_bytes = pairs * 2 * decimation_factor * 2;
         let written = out.len().min(pairs);
-        for (dst, pair) in out[..written]
-            .iter_mut()
-            .zip(output.as_chunks::<2>().0.iter())
-        {
-            *dst = Complex32::new(pair[0], pair[1]);
-        }
-        let pending = (written != pairs).then(|| {
-            let pair = &output[written * 2..written * 2 + 2];
-            Complex32::new(pair[0], pair[1])
-        });
+        let raw = &raw[..raw_bytes];
+        let pending = if decimation_factor == 1 {
+            self.process_baseband_to_complex(raw, &mut out[..written])
+        } else {
+            self.process_baseband_to_scratch(raw);
+            let source_is_a = self.process_intermediate_decimation_stages(
+                decimation_factor.trailing_zeros() as usize - 1,
+            );
+            let final_stage = decimation_factor.trailing_zeros() as usize - 1;
+            if source_is_a {
+                self.decimation_stages[final_stage]
+                    .process_to_complex(&self.scratch_a, &mut out[..written])
+            } else {
+                self.decimation_stages[final_stage]
+                    .process_to_complex(&self.scratch_b, &mut out[..written])
+            }
+        };
+        debug_assert_eq!(pending.is_some(), written != pairs);
 
         ConversionProgress {
-            consumed_bytes: raw_samples * 2,
+            consumed_bytes: raw_bytes,
             written,
             pending,
         }
     }
 
-    fn process_u16le(&mut self, raw: &[u8], decimation_factor: usize) -> &[f32] {
-        let decimation_factor = decimation_factor.max(1);
-        let num_stages = decimation_factor.trailing_zeros() as usize;
-        let sample_count = raw.len() / 2;
-        let usable_samples = sample_count & !(decimation_factor.max(4) - 1);
+    fn process_baseband_to_scratch(&mut self, raw: &[u8]) {
         self.scratch_a.clear();
-        self.scratch_a.reserve(usable_samples);
+        self.scratch_a.reserve(raw.len() / 2);
 
-        for chunk in raw[..usable_samples * 2].as_chunks::<8>().0 {
-            let s0 = u16::from_le_bytes([chunk[0], chunk[1]]);
-            let s1 = u16::from_le_bytes([chunk[2], chunk[3]]);
-            let s2 = u16::from_le_bytes([chunk[4], chunk[5]]);
-            let s3 = u16::from_le_bytes([chunk[6], chunk[7]]);
+        for chunk in raw.as_chunks::<8>().0 {
+            let output = self.convert_adc_chunk(chunk);
+            self.scratch_a.extend_from_slice(&output);
+        }
+    }
 
-            let x0 = adc_to_float_12(s0) - self.avg;
-            self.avg += DC_REMOVAL_ALPHA * x0;
-            let x1 = adc_to_float_12(s1) - self.avg;
-            self.avg += DC_REMOVAL_ALPHA * x1;
-            let x2 = adc_to_float_12(s2) - self.avg;
-            self.avg += DC_REMOVAL_ALPHA * x2;
-            let x3 = adc_to_float_12(s3) - self.avg;
-            self.avg += DC_REMOVAL_ALPHA * x3;
+    fn process_baseband_to_complex(
+        &mut self,
+        raw: &[u8],
+        out: &mut [Complex32],
+    ) -> Option<Complex32> {
+        let raw_chunks = raw.as_chunks::<8>().0;
+        let (out_chunks, out_tail) = out.as_chunks_mut::<2>();
+        debug_assert_eq!(
+            raw_chunks.len(),
+            out_chunks.len() + usize::from(!out_tail.is_empty())
+        );
 
-            let fir_in0 = -x0;
-            let dly_in0 = -x1 * 0.5;
-            let fir_in1 = x2;
-            let dly_in1 = x3 * 0.5;
-
-            let acc0 = self.push_fir(fir_in0);
-            let acc1 = self.push_fir(fir_in1);
-            let q0 = self.push_delay(dly_in0);
-            let q1 = self.push_delay(dly_in1);
-
-            self.scratch_a.extend_from_slice(&[acc0, q0, acc1, q1]);
+        for (raw_chunk, out_chunk) in raw_chunks.iter().zip(out_chunks) {
+            let [i0, q0, i1, q1] = self.convert_adc_chunk(raw_chunk);
+            *out_chunk = [Complex32::new(i0, q0), Complex32::new(i1, q1)];
         }
 
-        if num_stages == 0 {
-            &self.scratch_a
-        } else {
-            let output_is_a = self.process_decimation_stages(num_stages);
-            if output_is_a {
-                &self.scratch_a
-            } else {
-                &self.scratch_b
-            }
-        }
+        out_tail.first_mut().map(|last| {
+            let [i0, q0, i1, q1] = self.convert_adc_chunk(&raw_chunks[raw_chunks.len() - 1]);
+            *last = Complex32::new(i0, q0);
+            Complex32::new(i1, q1)
+        })
+    }
+
+    fn convert_adc_chunk(&mut self, chunk: &[u8; 8]) -> [f32; 4] {
+        let s0 = u16::from_le_bytes([chunk[0], chunk[1]]);
+        let s1 = u16::from_le_bytes([chunk[2], chunk[3]]);
+        let s2 = u16::from_le_bytes([chunk[4], chunk[5]]);
+        let s3 = u16::from_le_bytes([chunk[6], chunk[7]]);
+
+        let x0 = adc_to_float_12(s0) - self.avg;
+        self.avg += DC_REMOVAL_ALPHA * x0;
+        let x1 = adc_to_float_12(s1) - self.avg;
+        self.avg += DC_REMOVAL_ALPHA * x1;
+        let x2 = adc_to_float_12(s2) - self.avg;
+        self.avg += DC_REMOVAL_ALPHA * x2;
+        let x3 = adc_to_float_12(s3) - self.avg;
+        self.avg += DC_REMOVAL_ALPHA * x3;
+
+        let acc0 = self.push_fir(-x0);
+        let acc1 = self.push_fir(x2);
+        let q0 = self.push_delay(-x1 * 0.5);
+        let q1 = self.push_delay(x3 * 0.5);
+
+        [acc0, q0, acc1, q1]
     }
 
     fn push_fir(&mut self, value: f32) -> f32 {
@@ -310,10 +330,10 @@ impl Float32IqConverter {
         out
     }
 
-    fn process_decimation_stages(&mut self, num_stages: usize) -> bool {
-        let mut output_is_a = true;
+    fn process_intermediate_decimation_stages(&mut self, num_stages: usize) -> bool {
+        let mut source_is_a = true;
         for stage_idx in 0..num_stages {
-            if output_is_a {
+            if source_is_a {
                 self.scratch_b.clear();
                 self.scratch_b.reserve(self.scratch_a.len() / 2);
                 self.decimation_stages[stage_idx].process(&self.scratch_a, &mut self.scratch_b);
@@ -322,9 +342,9 @@ impl Float32IqConverter {
                 self.scratch_a.reserve(self.scratch_b.len() / 2);
                 self.decimation_stages[stage_idx].process(&self.scratch_b, &mut self.scratch_a);
             }
-            output_is_a = !output_is_a;
+            source_is_a = !source_is_a;
         }
-        output_is_a
+        source_is_a
     }
 }
 
@@ -350,13 +370,36 @@ impl DecimationStage {
     }
 
     fn process(&mut self, src: &[f32], dest: &mut Vec<f32>) {
+        self.process_outputs(src, |values| dest.extend_from_slice(&values));
+    }
+
+    fn process_to_complex(&mut self, src: &[f32], out: &mut [Complex32]) -> Option<Complex32> {
+        let (out_chunks, out_tail) = out.as_chunks_mut::<2>();
+        let mut out_chunks = out_chunks.iter_mut();
+        let mut out_tail = out_tail.first_mut();
+        let mut pending = None;
+        self.process_outputs(src, |[i0, q0, i1, q1]| {
+            if let Some(out_chunk) = out_chunks.next() {
+                *out_chunk = [Complex32::new(i0, q0), Complex32::new(i1, q1)];
+            } else {
+                let last = out_tail.take().expect("decimator produced excess output");
+                *last = Complex32::new(i0, q0);
+                pending = Some(Complex32::new(i1, q1));
+            }
+        });
+        debug_assert!(out_chunks.next().is_none());
+        debug_assert!(out_tail.is_none());
+        pending
+    }
+
+    fn process_outputs(&mut self, src: &[f32], mut emit: impl FnMut([f32; 4])) {
         match self.filter {
-            DecimationFilter::Hb33 => self.process_hb33(src, dest),
-            DecimationFilter::Hb17 => self.process_hb17(src, dest),
+            DecimationFilter::Hb33 => self.process_hb33(src, &mut emit),
+            DecimationFilter::Hb17 => self.process_hb17(src, &mut emit),
         }
     }
 
-    fn process_hb33(&mut self, src: &[f32], dest: &mut Vec<f32>) {
+    fn process_hb33(&mut self, src: &[f32], emit: &mut impl FnMut([f32; 4])) {
         let pairs = (src.len() / 2) & !3;
         let mut idx = self.fir_index;
         for i in (0..pairs).step_by(4) {
@@ -376,12 +419,12 @@ impl DecimationStage {
 
             let (i0, q0) = self.acc_hb33(idx0);
             let (i1, q1) = self.acc_hb33(idx1);
-            dest.extend_from_slice(&[i0, q0, i1, q1]);
+            emit([i0, q0, i1, q1]);
         }
         self.fir_index = idx;
     }
 
-    fn process_hb17(&mut self, src: &[f32], dest: &mut Vec<f32>) {
+    fn process_hb17(&mut self, src: &[f32], emit: &mut impl FnMut([f32; 4])) {
         let pairs = (src.len() / 2) & !3;
         let mut idx = self.fir_index;
         for i in (0..pairs).step_by(4) {
@@ -401,7 +444,7 @@ impl DecimationStage {
 
             let (i0, q0) = self.acc_hb17(idx0);
             let (i1, q1) = self.acc_hb17(idx1);
-            dest.extend_from_slice(&[i0, q0, i1, q1]);
+            emit([i0, q0, i1, q1]);
         }
         self.fir_index = idx;
     }
@@ -586,19 +629,47 @@ mod tests {
     }
 
     #[test]
+    fn undecimated_slice_conversion_does_not_allocate_scratch_buffers() {
+        let input = adc_bytes(&[2048; 128]);
+        let mut output = [Complex32::default(); 64];
+        let mut converter = Float32IqConverter::default();
+
+        let progress = converter.process_u16le_to_f32iq_slice(&input, 1, &mut output);
+
+        assert_eq!(progress.consumed_bytes, input.len());
+        assert_eq!(progress.written, output.len());
+        assert!(progress.pending.is_none());
+        assert_eq!(converter.scratch_a.capacity(), 0);
+        assert_eq!(converter.scratch_b.capacity(), 0);
+    }
+
+    #[test]
+    fn final_decimation_stage_writes_without_an_output_scratch_buffer() {
+        let input = adc_bytes(&[2048; 128]);
+        let mut output = [Complex32::default(); 32];
+        let mut converter = Float32IqConverter::default();
+
+        let progress = converter.process_u16le_to_f32iq_slice(&input, 2, &mut output);
+
+        assert_eq!(progress.consumed_bytes, input.len());
+        assert_eq!(progress.written, output.len());
+        assert!(progress.pending.is_none());
+        assert_ne!(converter.scratch_a.capacity(), 0);
+        assert_eq!(converter.scratch_b.capacity(), 0);
+    }
+
+    #[test]
     fn slice_conversion_matches_whole_transfer_for_all_decimations() {
         let samples: Vec<_> = (0..4096).map(|i| ((i * 37 + 11) % 4096) as u16).collect();
         let input = adc_bytes(&samples);
 
         for decimation in [1, 2, 4, 8, 16, 32, 64] {
             let mut whole = Float32IqConverter::default();
-            let floats = whole.process_u16le(&input, decimation);
-            let expected: Vec<_> = floats
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| Complex32::new(pair[0], pair[1]))
-                .collect();
+            let mut expected = vec![Complex32::default(); samples.len() / (2 * decimation)];
+            let progress = whole.process_u16le_to_f32iq_slice(&input, decimation, &mut expected);
+            assert_eq!(progress.consumed_bytes, input.len());
+            assert_eq!(progress.written, expected.len());
+            assert!(progress.pending.is_none());
 
             let mut sliced = Float32IqConverter::default();
             let mut actual = Vec::new();
