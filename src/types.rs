@@ -1,4 +1,4 @@
-//! Public data structures returned by the HydraSDR API.
+//! Public data structures returned by the HydraSDR driver.
 
 /// HydraSDR board identifier values mirrored from the C driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,7 +78,7 @@ pub struct RfPortInfo {
     pub bias_tee: Option<BiasTeeInfo>,
 }
 
-/// Device metadata returned by the ergonomic API.
+/// Immutable device metadata reported while opening the device.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
     /// Board name detected from the firmware board ID.
@@ -93,6 +93,4 @@ pub struct DeviceInfo {
     pub max_frequency: u64,
     /// RF ports reported for this device.
     pub rf_ports: Vec<RfPortInfo>,
-    /// Shared state of settings applied through this crate.
-    pub active_state: crate::ActiveState,
 }

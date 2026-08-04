@@ -187,18 +187,6 @@ impl<C: ControlBackend> HydraSdr<C> {
             .and_then(move |reserved| capability_word(third, reserved, 2))
     }
 
-    /// Build direct device metadata from firmware queries and RFOne static tables.
-    pub(crate) fn get_device_info(
-        &mut self,
-    ) -> impl MaybeFuture<Output = Result<DeviceInfo>> + use<'_, C> {
-        let fetch = self.fetch_device_info();
-        fetch.map(move |result| {
-            let (info, features) = result?;
-            self.features = Some(features);
-            Ok(info)
-        })
-    }
-
     pub(crate) fn into_device_info(
         mut self,
     ) -> impl MaybeFuture<Output = Result<(Self, DeviceInfo)>> + use<C> {
@@ -956,7 +944,6 @@ fn build_device_info(
         min_frequency: RFONE_MIN_FREQ_HZ,
         max_frequency: RFONE_MAX_FREQ_HZ,
         rf_ports: rf_port_infos(),
-        active_state: crate::ActiveState::default(),
     }
 }
 

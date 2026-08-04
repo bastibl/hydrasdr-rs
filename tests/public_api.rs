@@ -193,12 +193,12 @@ fn public_error_and_metadata_are_ergonomic() {
         min_frequency: 24_000_000,
         max_frequency: 1_800_000_000,
         rf_ports: Vec::new(),
-        active_state: ActiveState::default(),
     };
 
     assert_eq!(info.serial, Some(0x1234));
+    let active_state = ActiveState::default();
     assert_eq!(
-        info.active_state.sample_format().unwrap_err().kind(),
+        active_state.sample_format().unwrap_err().kind(),
         ErrorKind::StateUnavailable
     );
 }

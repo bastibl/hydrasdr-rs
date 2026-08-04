@@ -64,6 +64,7 @@ use crate::usb::control::{ControlBackend, NusbControl};
 pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
     direct: HydraSdr<C>,
     info: DeviceInfo,
+    active_state: crate::ActiveState,
     #[cfg(not(target_arch = "wasm32"))]
     shutdown_on_drop: bool,
 }
@@ -107,19 +108,17 @@ impl Device<F32Iq> {
 }
 
 impl<M: SampleMode> Device<M> {
-    /// Return cached device metadata.
+    /// Return immutable metadata read while opening the device.
     pub fn info(&self) -> &DeviceInfo {
         self.inner.info()
     }
 
-    /// Return a shared handle to the authoritative active receiver state.
+    /// Return the receiver state maintained by this driver.
+    ///
+    /// Cloned handles share the same state, which is updated after every
+    /// configuration operation attempted through this device.
     pub fn active_state(&self) -> crate::ActiveState {
-        self.info().active_state.clone()
-    }
-
-    /// Refresh and return device metadata.
-    pub fn refresh_info(&mut self) -> impl MaybeFuture<Output = Result<&DeviceInfo>> {
-        self.inner.refresh_info()
+        self.inner.active_state()
     }
 
     /// Return the cached sample rates advertised for the active sample format.
@@ -213,13 +212,17 @@ impl<M: SampleMode> Device<M> {
 }
 
 impl<C: ControlBackend> DeviceInner<C> {
-    /// Return cached device metadata.
+    /// Return immutable device metadata.
     pub(crate) fn info(&self) -> &DeviceInfo {
         &self.info
     }
 
+    fn active_state(&self) -> crate::ActiveState {
+        self.active_state.clone()
+    }
+
     fn ensure_raw_adc_stream_format(&self) -> Result<()> {
-        let state = &self.info.active_state;
+        let state = &self.active_state;
         if state.sample_format()? != SampleFormat::RawAdc {
             return Err(Error::invalid_config(
                 "sample_format",
@@ -232,7 +235,7 @@ impl<C: ControlBackend> DeviceInner<C> {
     }
 
     fn ensure_f32_iq_stream_format(&self) -> Result<()> {
-        let state = &self.info.active_state;
+        let state = &self.active_state;
         if state.sample_format()? != SampleFormat::F32Iq {
             return Err(Error::invalid_config(
                 "sample_format",
@@ -251,7 +254,7 @@ where
     C: ControlBackend,
 {
     fn shutdown_operation(&self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_bias_tee_update();
 
         let receiver_off = self
@@ -298,7 +301,7 @@ where
         &mut self,
         config: &Config<M>,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C, M> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_config(config);
         let operation = self.direct.configure(config);
         let config = config.clone();
@@ -326,7 +329,7 @@ where
         &mut self,
         frequency_hz: u64,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_frequency_update();
         let operation = self.direct.set_freq(frequency_hz);
         ready(validate_frequency(frequency_hz))
@@ -341,10 +344,9 @@ where
         &mut self,
         sample_rate_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_sample_rate_update();
         let validation = self
-            .info
             .active_state
             .sample_format()
             .and_then(|sample_format| validate_sample_rate(sample_rate_hz, sample_format));
@@ -361,7 +363,7 @@ where
         &mut self,
         bandwidth_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_bandwidth_update();
         let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
         let operation = self.direct.set_bandwidth(bandwidth_hz);
@@ -374,7 +376,7 @@ where
     }
 
     fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_rf_port_update();
         let operation = self.direct.set_rf_port(port);
         operation.map(move |result| {
@@ -384,7 +386,7 @@ where
     }
 
     fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
+        let active_state = self.active_state.clone();
         active_state.begin_gain_update(gain);
         let operation = self.direct.set_gain_config(gain);
         ready(validate_gain(gain))
@@ -393,21 +395,6 @@ where
                 active_state.set_gain_result(gain, result.is_ok());
                 result
             })
-    }
-
-    /// Refresh and return direct device metadata.
-    pub(crate) fn refresh_info(
-        &mut self,
-    ) -> impl MaybeFuture<Output = Result<&DeviceInfo>> + use<'_, C> {
-        let active_state = self.info.active_state.clone();
-        let operation = self.direct.get_device_info();
-        let info_slot = &mut self.info;
-        operation.map(move |result| {
-            let mut info = result?;
-            info.active_state = active_state;
-            *info_slot = info;
-            Ok(&*info_slot)
-        })
     }
 }
 
@@ -566,11 +553,13 @@ impl<M: SampleMode> DeviceBuilder<M> {
                             .map_err(|error| error.at("applying initial HydraSDR configuration"))
                             .map(move |result| {
                                 let direct = result?;
-                                info.active_state.apply_config(&saved_config);
+                                let active_state = crate::ActiveState::default();
+                                active_state.apply_config(&saved_config);
                                 Ok(Device {
                                     inner: DeviceInner {
                                         direct,
                                         info,
+                                        active_state,
                                         #[cfg(not(target_arch = "wasm32"))]
                                         shutdown_on_drop: true,
                                     },
@@ -781,9 +770,7 @@ where
         self.device
             .as_ref()
             .expect("owned synchronous stream retains its device")
-            .info
-            .active_state
-            .clone()
+            .active_state()
     }
 
     fn start(&mut self) -> Result<()> {
@@ -895,9 +882,7 @@ where
         self.device
             .as_ref()
             .expect("owned async stream retains its device")
-            .info
-            .active_state
-            .clone()
+            .active_state()
     }
 
     fn current_stats(&self) -> StreamingStats {
@@ -1015,9 +1000,7 @@ where
         self.device
             .as_ref()
             .expect("owned async stream retains its device")
-            .info
-            .active_state
-            .clone()
+            .active_state()
     }
 
     fn current_stats(&self) -> StreamingStats {
@@ -1163,16 +1146,14 @@ impl<M: SampleMode> RxStream<M> {
     /// Return a shared handle to the authoritative active receiver state.
     pub fn active_state(&self) -> crate::ActiveState {
         match &self.state {
-            RxStreamState::Dormant(device) => device.info.active_state.clone(),
+            RxStreamState::Dormant(device) => device.active_state(),
             RxStreamState::Poisoned => panic!("RX stream state transition was interrupted"),
             #[cfg(not(target_arch = "wasm32"))]
             RxStreamState::BlockingRaw(stream) => stream
                 .device
                 .as_ref()
                 .expect("owned raw stream retains its device")
-                .info
-                .active_state
-                .clone(),
+                .active_state(),
             #[cfg(not(target_arch = "wasm32"))]
             RxStreamState::BlockingF32(stream) => stream.active_state(),
             RxStreamState::AsyncRaw(stream) => stream.active_state(),
@@ -1733,8 +1714,8 @@ mod tests {
                 min_frequency: 24_000_000,
                 max_frequency: 1_800_000_000,
                 rf_ports: Vec::new(),
-                active_state,
             },
+            active_state,
             #[cfg(not(target_arch = "wasm32"))]
             shutdown_on_drop: true,
         }
@@ -1746,7 +1727,7 @@ mod tests {
         let control = FakeControl::default();
         let state = Arc::clone(&control.state);
         let device = fake_device(control, SampleFormat::RawAdc);
-        let active_state = device.info.active_state.clone();
+        let active_state = device.active_state();
 
         device.shutdown().wait().expect("explicit shutdown");
 
@@ -1770,7 +1751,7 @@ mod tests {
         let state = Arc::clone(&control.state);
         state.fail_control_out_at.store(1, Ordering::SeqCst);
         let device = fake_device(control, SampleFormat::RawAdc);
-        let active_state = device.info.active_state.clone();
+        let active_state = device.active_state();
 
         let error = device
             .shutdown()
@@ -2107,7 +2088,7 @@ mod tests {
             let device = stream.into_device();
             assert_eq!(error.kind(), crate::ErrorKind::InvalidConfig);
             assert_eq!(
-                device.info.active_state.sample_format().unwrap(),
+                device.active_state.sample_format().unwrap(),
                 SampleFormat::RawAdc
             );
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
@@ -2178,7 +2159,7 @@ mod tests {
             );
             let device = stream.into_device();
             assert_eq!(
-                device.info.active_state.sample_format().unwrap(),
+                device.active_state.sample_format().unwrap(),
                 SampleFormat::F32Iq
             );
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);

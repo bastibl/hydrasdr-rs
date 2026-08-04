@@ -30,12 +30,13 @@ fn hardware_open_and_query_device_info() {
             .collect::<Vec<_>>(),
         [(RfPort::Rx0, "ANT")]
     );
-    assert_eq!(info.active_state.rf_port().unwrap(), RfPort::Rx0);
-    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(14));
-    assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(15));
-    assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(6));
-    assert!(!info.active_state.agc_enabled().unwrap());
-    assert!(!info.active_state.bias_tee().unwrap());
+    let state = dev.active_state();
+    assert_eq!(state.rf_port().unwrap(), RfPort::Rx0);
+    assert_eq!(state.gain(GainStage::Lna).unwrap(), Some(14));
+    assert_eq!(state.gain(GainStage::Mixer).unwrap(), Some(15));
+    assert_eq!(state.gain(GainStage::Vga).unwrap(), Some(6));
+    assert!(!state.agc_enabled().unwrap());
+    assert!(!state.bias_tee().unwrap());
     dev.shutdown().wait().expect("explicitly shut down device");
 }
 
@@ -43,7 +44,7 @@ fn hardware_open_and_query_device_info() {
 #[ignore = "requires a connected HydraSDR RFOne and USB permissions; run with `cargo test --test hardware -- --ignored --nocapture`"]
 fn hardware_configure_frequency_sample_rate_and_gains() {
     let _lock = hardware_test_lock();
-    let mut dev = Device::builder()
+    let dev = Device::builder()
         .frequency_hz(100_000_000)
         .sample_rate_hz(10_000_000)
         .raw_adc()
@@ -54,8 +55,7 @@ fn hardware_configure_frequency_sample_rate_and_gains() {
         .wait()
         .expect("open and configure HydraSDR RFOne");
 
-    let info = dev.refresh_info().wait().expect("refresh device info");
-    assert_eq!(info.active_state.sample_rate_hz().unwrap(), 10_000_000);
+    assert_eq!(dev.active_state().sample_rate_hz().unwrap(), 10_000_000);
 }
 
 #[test]
