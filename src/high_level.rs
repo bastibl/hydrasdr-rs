@@ -2,6 +2,7 @@
 
 use nusb::MaybeFuture;
 
+use crate::Complex32;
 use crate::commands::ReceiverMode;
 use crate::config::{
     Bandwidth, Config, ConfigBuilder, DeviceSelector, GainConfig, RfPort, SampleFormat,
@@ -743,8 +744,8 @@ where
         Ok(())
     }
 
-    /// Read converted `(I, Q)` samples into `out`.
-    pub(crate) fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+    /// Read converted complex samples into `out`.
+    pub(crate) fn read(&mut self, out: &mut [Complex32], timeout: Duration) -> Result<usize> {
         if self.state != SyncReceiverState::Running {
             return Err(Error::stream_closed("synchronous F32 RX stream is stopped"));
         }
@@ -864,12 +865,12 @@ impl F32RxStream {
         self.inner.start()
     }
 
-    /// Read converted `(I, Q)` samples into `out`.
+    /// Read converted complex samples into `out`.
     ///
     /// `timeout` bounds the whole read call, including any additional USB
     /// completions needed to fill `out`. This is a pull API with no background
     /// drain task; call it continuously while receiving.
-    pub fn read(&mut self, out: &mut [(f32, f32)], timeout: Duration) -> Result<usize> {
+    pub fn read(&mut self, out: &mut [Complex32], timeout: Duration) -> Result<usize> {
         self.inner.read(out, timeout)
     }
 
@@ -1143,8 +1144,8 @@ where
         Ok(())
     }
 
-    /// Read converted `(I, Q)` samples into `out`.
-    pub(crate) async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+    /// Read converted complex samples into `out`.
+    pub(crate) async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
         if self.state != AsyncReceiverState::Running {
             return Err(Error::stream_closed("async F32 RX stream is stopped"));
         }
@@ -1269,11 +1270,11 @@ impl AsyncF32RxStream {
         self.inner.start().await
     }
 
-    /// Read converted `(I, Q)` samples into `out`.
+    /// Read converted complex samples into `out`.
     ///
     /// This future directly drains the fixed USB transfer queue. Poll it
     /// continuously while receiving; there is no background drain task.
-    pub async fn read(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+    pub async fn read(&mut self, out: &mut [Complex32]) -> Result<usize> {
         self.inner.read(out).await
     }
 
@@ -1552,8 +1553,8 @@ mod tests {
         let mut stream = F32RxStreamInner::new(device);
         stream.start().expect("start owned synchronous F32 stream");
 
-        let mut first = [(0.0, 0.0); 1];
-        let mut second = [(0.0, 0.0); 1];
+        let mut first = [Complex32::default(); 1];
+        let mut second = [Complex32::default(); 1];
         assert_eq!(
             stream
                 .read(&mut first, Duration::from_secs(1))
@@ -1628,8 +1629,8 @@ mod tests {
             let mut stream = AsyncF32RxStreamInner::new(device);
             stream.start().await.expect("start owned async F32 stream");
 
-            let mut first = [(0.0, 0.0); 1];
-            let mut second = [(0.0, 0.0); 1];
+            let mut first = [Complex32::default(); 1];
+            let mut second = [Complex32::default(); 1];
             assert_eq!(stream.read(&mut first).await.expect("first read"), 1);
             assert_eq!(stream.read(&mut second).await.expect("second read"), 1);
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 2);
@@ -1651,7 +1652,7 @@ mod tests {
             let mut stream = AsyncF32RxStreamInner::new(device);
 
             stream.start().await.expect("start owned async F32 stream");
-            let mut first = [(0.0, 0.0); 1];
+            let mut first = [Complex32::default(); 1];
             assert_eq!(stream.read(&mut first).await.expect("first read"), 1);
             stream.stop().await.expect("stop owned async F32 stream");
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);
@@ -1669,7 +1670,7 @@ mod tests {
                 .start()
                 .await
                 .expect("restart owned async F32 stream");
-            let mut second = [(0.0, 0.0); 1];
+            let mut second = [Complex32::default(); 1];
             assert_eq!(stream.read(&mut second).await.expect("second read"), 1);
             let stats = stream.stop().await.expect("stop owned async F32 stream");
             assert_eq!(state.bulk_in_count.load(Ordering::SeqCst), 1);

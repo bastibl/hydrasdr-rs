@@ -8,7 +8,7 @@ use std::env;
 #[cfg(any(feature = "smol", feature = "tokio"))]
 use futures_lite::future::block_on;
 #[cfg(any(feature = "smol", feature = "tokio"))]
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort, SampleFormat};
 
 #[cfg(any(feature = "smol", feature = "tokio"))]
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
@@ -64,7 +64,7 @@ async fn run(args: Vec<String>) -> hydrasdr_rs::Result<()> {
     if run_rx {
         let mut rx = dev.into_async_f32_rx_stream();
         rx.start().await?;
-        let mut samples = [(0.0, 0.0); 32];
+        let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples).await?;
         let stats = rx.stop().await?;
         let _dev = rx.into_device();

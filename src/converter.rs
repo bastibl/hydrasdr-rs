@@ -5,6 +5,8 @@
 
 #![allow(clippy::excessive_precision)]
 
+use crate::Complex32;
+
 const ADC_BITS: u32 = 12;
 const ADC_MIDPOINT: f32 = (1_u32 << (ADC_BITS - 1)) as f32;
 const DC_REMOVAL_ALPHA: f32 = 0.01;
@@ -175,14 +177,14 @@ impl Float32IqConverter {
         &mut self,
         raw: &[u8],
         decimation_factor: usize,
-        out: &mut Vec<(f32, f32)>,
+        out: &mut Vec<Complex32>,
     ) -> usize {
         let output = self.process_u16le(raw, decimation_factor);
         let pairs = output.len() / 2;
 
         out.reserve(pairs);
         for pair in output.as_chunks::<2>().0 {
-            out.push((pair[0], pair[1]));
+            out.push(Complex32::new(pair[0], pair[1]));
         }
 
         pairs

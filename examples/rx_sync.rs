@@ -5,7 +5,7 @@
 
 use std::env;
 
-use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 const EXAMPLE_FREQ_HZ: u64 = 100_000_000;
 const EXAMPLE_SAMPLE_RATE_HZ: u32 = 10_000_000;
@@ -43,7 +43,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     if run_rx {
         let mut rx = dev.into_f32_rx_stream();
         rx.start()?;
-        let mut samples = [(0.0, 0.0); 32];
+        let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
         let stats = rx.stop()?;
         println!("rx samples: {count}, first={:?}", samples.first());

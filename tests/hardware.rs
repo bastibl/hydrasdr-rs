@@ -101,7 +101,7 @@ fn hardware_f32_rx_stream_smoke_test() {
 
     let mut rx = dev.into_f32_rx_stream();
     rx.start().expect("start F32 IQ stream");
-    let mut samples = [(0.0, 0.0); 32];
+    let mut samples = [hydrasdr_rs::Complex32::default(); 32];
     let count = rx
         .read(&mut samples, std::time::Duration::from_secs(1))
         .expect("read F32 IQ samples");
@@ -111,7 +111,7 @@ fn hardware_f32_rx_stream_smoke_test() {
     assert!(
         samples[..count]
             .iter()
-            .all(|(i, q)| i.is_finite() && q.is_finite())
+            .all(|sample| sample.re.is_finite() && sample.im.is_finite())
     );
     assert!(stats.buffers_processed > 0);
 }

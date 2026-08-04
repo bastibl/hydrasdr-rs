@@ -5,6 +5,7 @@ use std::ops::Deref;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
+use crate::Complex32;
 use crate::constants::{DEFAULT_BUFFER_SIZE, PACKED_BUFFER_SIZE};
 use crate::converter::Float32IqConverter;
 use crate::errors::{Error, Result};
@@ -164,7 +165,7 @@ pub(crate) struct DirectRxStream<B: BulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     converter: Float32IqConverter,
-    converted: Vec<(f32, f32)>,
+    converted: Vec<Complex32>,
     converted_start: usize,
     stats: StreamingStats,
     closed: bool,
@@ -271,7 +272,7 @@ pub(crate) struct AsyncDirectRxStream<B: AsyncBulkInBackend> {
     bulk_in: Option<B>,
     config: StreamingConfig,
     converter: Float32IqConverter,
-    converted: Vec<(f32, f32)>,
+    converted: Vec<Complex32>,
     converted_start: usize,
     stats: StreamingStats,
     discard_remaining: usize,
@@ -427,12 +428,12 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         self.stats
     }
 
-    /// Read converted `(I, Q)` float samples into `out`.
+    /// Read converted complex float samples into `out`.
     ///
     /// Each call returns after copying already-converted samples or processing one
     /// USB completion. The only await occurs before stream state is consumed, so
     /// canceling a pending read leaves the queue and buffered samples intact.
-    pub(crate) async fn read_float32_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize> {
+    pub(crate) async fn read_float32_iq(&mut self, out: &mut [Complex32]) -> Result<usize> {
         if self.closed {
             return Err(Error::stream_closed("async direct RX stream is closed"));
         }
@@ -494,7 +495,7 @@ impl<B: AsyncBulkInBackend> AsyncDirectRxStream<B> {
         Ok(written)
     }
 
-    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+    fn copy_converted(&mut self, out: &mut [Complex32], written: &mut usize) {
         let converted = &self.converted[self.converted_start..];
         let take = (out.len() - *written).min(converted.len());
         if take == 0 {
@@ -537,13 +538,13 @@ impl<B: BulkInBackend> DirectRxStream<B> {
         self.stats
     }
 
-    /// Read converted `(I, Q)` float samples into `out`.
+    /// Read converted complex float samples into `out`.
     ///
     /// Returns `Ok(0)` when the backend times out before any sample is available.
     /// `timeout` is a total deadline for this read call, not a per-transfer timeout.
     pub(crate) fn read_float32_iq(
         &mut self,
-        out: &mut [(f32, f32)],
+        out: &mut [Complex32],
         timeout: Duration,
     ) -> Result<usize> {
         if self.closed {
@@ -603,7 +604,7 @@ impl<B: BulkInBackend> DirectRxStream<B> {
         }
     }
 
-    fn copy_converted(&mut self, out: &mut [(f32, f32)], written: &mut usize) {
+    fn copy_converted(&mut self, out: &mut [Complex32], written: &mut usize) {
         let converted = &self.converted[self.converted_start..];
         let take = (out.len() - *written).min(converted.len());
         if take == 0 {
@@ -929,7 +930,7 @@ mod tests {
             let initial_submit_count = stream.bulk_in.as_ref().expect("bulk in").submit_count;
             assert_eq!(initial_submit_count, RFONE_TRANSFER_COUNT as usize);
 
-            let mut out = [(0.0, 0.0); 1];
+            let mut out = [Complex32::default(); 1];
             let read = stream
                 .read_float32_iq(&mut out)
                 .await
@@ -951,7 +952,7 @@ mod tests {
                 .await
                 .expect("start fake async stream");
 
-            let mut first = [(0.0, 0.0); 1];
+            let mut first = [Complex32::default(); 1];
             assert_eq!(
                 stream
                     .read_float32_iq(&mut first)
@@ -963,7 +964,7 @@ mod tests {
             assert!(buffered > 0);
             assert_eq!(stream.stats.buffers_received, 1);
 
-            let mut out = vec![(0.0, 0.0); buffered + 1];
+            let mut out = vec![Complex32::default(); buffered + 1];
             assert_eq!(
                 stream
                     .read_float32_iq(&mut out)
@@ -986,7 +987,7 @@ mod tests {
             stream.bulk_in.as_mut().expect("bulk in").fail_next = true;
 
             let error = stream
-                .read_float32_iq(&mut [(0.0, 0.0); 1])
+                .read_float32_iq(&mut [Complex32::default(); 1])
                 .await
                 .expect_err("failed completion must be reported");
 
@@ -1009,7 +1010,7 @@ mod tests {
             stream.bulk_in.as_mut().expect("bulk in").short_next = true;
 
             let error = stream
-                .read_float32_iq(&mut [(0.0, 0.0); 1])
+                .read_float32_iq(&mut [Complex32::default(); 1])
                 .await
                 .expect_err("short completion must be reported");
 

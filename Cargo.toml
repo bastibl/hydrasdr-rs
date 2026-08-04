@@ -17,6 +17,7 @@ smol = ["nusb/smol"]
 
 [dependencies]
 nusb = "0.2.7"
+num-complex = "0.4"
 
 [dev-dependencies]
 futures-lite = "2"

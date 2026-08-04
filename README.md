@@ -73,7 +73,7 @@ Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mi
 The builder opens the selected RFOne, applies the receiver configuration, and caches device metadata:
 
 ```rust,no_run
-use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, MaybeFuture, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
     let dev = Device::builder()
@@ -90,7 +90,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
     let mut rx = dev.into_f32_rx_stream();
     rx.start()?;
-    let mut samples = [(0.0, 0.0); 32];
+    let mut samples = [Complex32::default(); 32];
     let count = rx.read(&mut samples, std::time::Duration::from_secs(1))?;
     println!("read {count} IQ samples");
     let stats = rx.stop()?;
@@ -106,7 +106,7 @@ Async receive streams own the device and keep one USB transfer queue alive for t
 
 ```rust,no_run
 use futures_lite::future::block_on;
-use hydrasdr_rs::{Device, GainPreset, RfPort, SampleFormat};
+use hydrasdr_rs::{Complex32, Device, GainPreset, RfPort, SampleFormat};
 
 fn main() -> hydrasdr_rs::Result<()> {
     block_on(async {
@@ -121,7 +121,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
         let mut rx = dev.into_async_f32_rx_stream();
         rx.start().await?;
-        let mut samples = [(0.0, 0.0); 32];
+        let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples).await?;
         println!("async samples: {count}");
         let stats = rx.stop().await?;

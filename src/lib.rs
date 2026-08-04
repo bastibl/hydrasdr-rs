@@ -75,6 +75,7 @@ pub use errors::{Error, ErrorKind, Result};
 pub use high_level::{AsyncF32RxStream, AsyncRawRxStream, Device, DeviceBuilder, SampleBlock};
 #[cfg(not(target_arch = "wasm32"))]
 pub use high_level::{F32RxStream, RawRxStream};
+pub use num_complex::Complex32;
 pub use nusb::MaybeFuture;
 pub use streaming::StreamingStats;
 pub use types::{BiasTeeInfo, DecimationMode, DeviceInfo, RfPortInfo};
