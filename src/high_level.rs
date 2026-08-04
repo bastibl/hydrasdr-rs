@@ -1440,6 +1440,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FakeState {
+        fail_packing: AtomicBool,
         control_out_count: AtomicUsize,
         control_out_requests: Mutex<Vec<VendorControlRequest>>,
         fail_control_out: AtomicBool,
@@ -1459,7 +1460,11 @@ mod tests {
             &self,
             request: VendorControlRequest,
         ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<> {
-            let result = if request == VendorControlRequest::get_samplerates_count(false) {
+            let result = if self.state.fail_packing.load(Ordering::SeqCst)
+                && request == VendorControlRequest::set_packing(0)
+            {
+                Err(nusb::transfer::TransferError::Fault.into())
+            } else if request == VendorControlRequest::get_samplerates_count(false) {
                 Ok(1u32.to_le_bytes().to_vec())
             } else if request == VendorControlRequest::get_samplerates(1, false) {
                 Ok(10_000_000u32.to_le_bytes().to_vec())
@@ -1725,6 +1730,32 @@ mod tests {
             ]
         );
         assert!(!active_state.bias_tee().expect("successful bias-off state"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn initial_packing_failure_does_not_enable_bias_power() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        state.fail_packing.store(true, Ordering::SeqCst);
+        let config = Config::builder()
+            .gain(GainConfig::Unchanged)
+            .bias_tee(true)
+            .build()
+            .expect("valid fake configuration");
+
+        HydraSdr::from_control(control)
+            .into_configured(config)
+            .wait()
+            .expect_err("packing should fail before enabling bias power");
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [VendorControlRequest::set_frequency(100_000_000)]
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

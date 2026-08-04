@@ -383,19 +383,18 @@ impl<C: ControlBackend> HydraSdr<C> {
             .and_then({
                 let control = Arc::clone(&control);
                 move |state| {
-                    optional_control_out(
+                    Self::control_in_exact_with(
                         control,
-                        bias_tee
-                            .map(|enabled| VendorControlRequest::set_rf_bias(u8::from(enabled))),
+                        VendorControlRequest::set_packing(u8::from(packing)),
+                        1,
                     )
                     .map_ok(move |_| state)
                 }
             })
             .and_then(move |state| {
-                Self::control_in_exact_with(
+                optional_control_out(
                     control,
-                    VendorControlRequest::set_packing(u8::from(packing)),
-                    1,
+                    bias_tee.map(|enabled| VendorControlRequest::set_rf_bias(u8::from(enabled))),
                 )
                 .map_ok(move |_| state)
             })
