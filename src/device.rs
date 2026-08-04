@@ -1211,7 +1211,7 @@ fn sample_rate_hardware_config(
         .map(|rate| rate.rate_hz)
     {
         for decimation in DECIMATION_FACTORS_DESC {
-            if hardware_rate / decimation == samplerate {
+            if hardware_rate % decimation == 0 && hardware_rate / decimation == samplerate {
                 best = match best {
                     None => Some((hardware_rate, decimation)),
                     Some((best_hw, best_decimation))
@@ -1394,6 +1394,9 @@ fn build_virtual_samplerates(hardware_rates: &[SampleRateInfo]) -> Vec<u32> {
         .map(|rate| rate.rate_hz)
     {
         for decimation in DECIMATION_FACTORS_ASC {
+            if hardware_rate % decimation != 0 {
+                continue;
+            }
             let effective = hardware_rate / decimation;
             if effective >= MIN_SAMPLERATE_BY_VALUE {
                 rates.push(effective);
@@ -1457,6 +1460,23 @@ mod tests {
         assert_eq!(
             build_raw_samplerates(&legacy_rates().entries),
             [20_000_000, 10_000_000, 5_000_000]
+        );
+    }
+
+    #[test]
+    fn virtual_samplerates_require_exact_integer_decimation() {
+        let rates = legacy_rates();
+        let virtual_rates = build_virtual_samplerates(&rates.entries);
+
+        assert!(!virtual_rates.contains(&39_062));
+        assert_eq!(virtual_rates.last(), Some(&78_125));
+        assert_eq!(
+            sample_rate_hardware_config(&rates, DecimationMode::HighDefinition, 39_062),
+            None
+        );
+        assert_eq!(
+            sample_rate_hardware_config(&rates, DecimationMode::HighDefinition, 78_125),
+            Some((5_000_000, 64))
         );
     }
 
