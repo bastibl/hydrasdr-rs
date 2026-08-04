@@ -80,4 +80,4 @@ pub use high_level::{Device, DeviceBuilder, RxStream, SampleBlock};
 pub use num_complex::Complex32;
 pub use nusb::MaybeFuture;
 pub use streaming::StreamingStats;
-pub use types::{BiasTeeInfo, DecimationMode, DeviceInfo, RfPortInfo};
+pub use types::{DecimationMode, DeviceInfo, RfPortInfo};

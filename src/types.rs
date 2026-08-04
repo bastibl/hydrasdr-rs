@@ -52,15 +52,6 @@ pub(crate) struct PartIdSerialNo {
     pub(crate) serial_no: [u32; 4],
 }
 
-/// Bias tee electrical limits for an RF port.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BiasTeeInfo {
-    /// Bias tee voltage in volts.
-    pub voltage: f32,
-    /// Maximum bias tee current in milliamps.
-    pub max_current_milliamp: f32,
-}
-
 /// RF port metadata returned in [`DeviceInfo`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct RfPortInfo {
@@ -74,8 +65,6 @@ pub struct RfPortInfo {
     pub max_frequency: u64,
     /// Whether this port exposes a bias tee.
     pub has_bias_tee: bool,
-    /// Bias tee electrical limits, if this port has a bias tee.
-    pub bias_tee: Option<BiasTeeInfo>,
 }
 
 /// Immutable device metadata reported while opening the device.
