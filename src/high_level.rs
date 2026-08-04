@@ -55,7 +55,6 @@ use crate::usb::control::{ControlBackend, NusbControl};
 pub(crate) struct DeviceInner<C = NusbControl> {
     direct: HydraSdr<C>,
     info: DeviceInfo,
-    sample_format: SampleFormat,
 }
 
 /// High-level owned HydraSDR RFOne device handle.
@@ -97,6 +96,11 @@ impl Device {
     /// Return cached device metadata.
     pub fn info(&self) -> &DeviceInfo {
         self.inner.info()
+    }
+
+    /// Return a shared handle to the authoritative active receiver state.
+    pub fn active_state(&self) -> crate::ActiveState {
+        self.info().active_state.clone()
     }
 
     /// Refresh and return device metadata.
@@ -191,22 +195,29 @@ impl<C> DeviceInner<C> {
     }
 
     fn ensure_raw_adc_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::RawAdc {
+        let state = &self.info.active_state;
+        if state.sample_format()? != SampleFormat::RawAdc {
             return Err(Error::invalid_config(
                 "sample_format",
                 "raw block streams require SampleFormat::RawAdc",
             ));
         }
+        state.sample_rate_hz()?;
+        state.packing()?;
         Ok(())
     }
 
     fn ensure_f32_iq_stream_format(&self) -> Result<()> {
-        if self.sample_format != SampleFormat::F32Iq {
+        let state = &self.info.active_state;
+        if state.sample_format()? != SampleFormat::F32Iq {
             return Err(Error::invalid_config(
                 "sample_format",
                 "F32 IQ streams require SampleFormat::F32Iq",
             ));
         }
+        state.sample_rate_hz()?;
+        state.decimation_mode()?;
+        state.packing()?;
         Ok(())
     }
 }
@@ -239,15 +250,19 @@ where
         &mut self,
         config: &Config,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_config(config);
         let operation = self.direct.configure(config);
-        let sample_format = &mut self.sample_format;
-        let info = &mut self.info;
         let config = config.clone();
-        operation.map(move |result| {
-            result?;
-            *sample_format = config.sample_format();
-            info.current_config = Some(config);
-            Ok(())
+        operation.map(move |result| match result {
+            Ok(()) => {
+                active_state.apply_config(&config);
+                Ok(())
+            }
+            Err(error) => {
+                active_state.fail_config(&config);
+                Err(error)
+            }
         })
     }
 
@@ -263,16 +278,14 @@ where
         &mut self,
         frequency_hz: u64,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_frequency_update();
         let operation = self.direct.set_freq(frequency_hz);
-        let info = &mut self.info;
         ready(validate_frequency(frequency_hz))
             .and_then(move |()| operation)
             .map(move |result| {
-                result?;
-                if let Some(config) = info.current_config.as_mut() {
-                    config.update_frequency_hz(frequency_hz);
-                }
-                Ok(())
+                active_state.set_frequency_result(frequency_hz, result.is_ok());
+                result
             })
     }
 
@@ -280,17 +293,19 @@ where
         &mut self,
         sample_rate_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let validation = validate_sample_rate(sample_rate_hz, self.sample_format);
+        let active_state = self.info.active_state.clone();
+        active_state.begin_sample_rate_update();
+        let validation = self
+            .info
+            .active_state
+            .sample_format()
+            .and_then(|sample_format| validate_sample_rate(sample_rate_hz, sample_format));
         let operation = self.direct.set_samplerate(sample_rate_hz);
-        let info = &mut self.info;
         ready(validation)
             .and_then(move |()| operation)
             .map(move |result| {
-                result?;
-                if let Some(config) = info.current_config.as_mut() {
-                    config.update_sample_rate_hz(sample_rate_hz);
-                }
-                Ok(())
+                active_state.set_sample_rate_result(sample_rate_hz, result.is_ok());
+                result
             })
     }
 
@@ -298,43 +313,37 @@ where
         &mut self,
         bandwidth_hz: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_bandwidth_update();
         let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
         let operation = self.direct.set_bandwidth(bandwidth_hz);
-        let info = &mut self.info;
         ready(validate_bandwidth(bandwidth))
             .and_then(move |()| operation)
             .map(move |result| {
-                result?;
-                if let Some(config) = info.current_config.as_mut() {
-                    config.update_bandwidth(bandwidth);
-                }
-                Ok(())
+                active_state.set_bandwidth_result(bandwidth_hz, result.is_ok());
+                result
             })
     }
 
     fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_rf_port_update();
         let operation = self.direct.set_rf_port(port);
-        let info = &mut self.info;
         operation.map(move |result| {
-            result?;
-            if let Some(config) = info.current_config.as_mut() {
-                config.update_rf_port(port);
-            }
-            Ok(())
+            active_state.set_rf_port_result(port, result.is_ok());
+            result
         })
     }
 
     fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
+        let active_state = self.info.active_state.clone();
+        active_state.begin_gain_update(gain);
         let operation = self.direct.set_gain_config(gain);
-        let info = &mut self.info;
         ready(validate_gain(gain))
             .and_then(move |()| operation)
             .map(move |result| {
-                result?;
-                if let Some(config) = info.current_config.as_mut() {
-                    config.update_gain(gain);
-                }
-                Ok(())
+                active_state.set_gain_result(gain, result.is_ok());
+                result
             })
     }
 
@@ -342,12 +351,12 @@ where
     pub(crate) fn refresh_info(
         &mut self,
     ) -> impl MaybeFuture<Output = Result<&DeviceInfo>> + use<'_, C> {
-        let current_config = self.info.current_config.clone();
+        let active_state = self.info.active_state.clone();
         let operation = self.direct.get_device_info();
         let info_slot = &mut self.info;
         operation.map(move |result| {
             let mut info = result?;
-            info.current_config = current_config;
+            info.active_state = active_state;
             *info_slot = info;
             Ok(&*info_slot)
         })
@@ -510,21 +519,16 @@ impl DeviceBuilder {
                 direct
                     .into_device_info()
                     .map_err(|error| error.at("reading HydraSDR device metadata"))
-                    .and_then(move |(direct, mut info)| {
-                        let sample_format = config.sample_format();
+                    .and_then(move |(direct, info)| {
                         let saved_config = config.clone();
                         direct
                             .into_configured(config)
                             .map_err(|error| error.at("applying initial HydraSDR configuration"))
                             .map(move |result| {
                                 let direct = result?;
-                                info.current_config = Some(saved_config);
+                                info.active_state.apply_config(&saved_config);
                                 Ok(Device {
-                                    inner: DeviceInner {
-                                        direct,
-                                        info,
-                                        sample_format,
-                                    },
+                                    inner: DeviceInner { direct, info },
                                 })
                             })
                     })
@@ -607,7 +611,7 @@ where
 {
     /// Read the next sample block.
     pub(crate) fn next_block(&mut self, timeout: Duration) -> Result<Option<SampleBlock<'_>>> {
-        let sample_format = self.device.sample_format;
+        let sample_format = self.device.info.active_state.sample_format()?;
         let Some(stream) = self.stream.as_mut() else {
             return Err(Error::stream_closed("RX stream is closed"));
         };
@@ -713,6 +717,15 @@ where
             stats: StreamingStats::default(),
             state: SyncReceiverState::Stopped,
         }
+    }
+
+    fn active_state(&self) -> crate::ActiveState {
+        self.device
+            .as_ref()
+            .expect("owned synchronous stream retains its device")
+            .info
+            .active_state
+            .clone()
     }
 
     fn start(&mut self) -> Result<()> {
@@ -841,6 +854,11 @@ pub struct F32RxStream {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl F32RxStream {
+    /// Return a shared handle to the authoritative active receiver state.
+    pub fn active_state(&self) -> crate::ActiveState {
+        self.inner.active_state()
+    }
+
     /// Start the receiver and USB transfer queue.
     pub fn start(&mut self) -> Result<()> {
         self.inner.start()
@@ -921,6 +939,15 @@ where
         }
     }
 
+    fn active_state(&self) -> crate::ActiveState {
+        self.device
+            .as_ref()
+            .expect("owned async stream retains its device")
+            .info
+            .active_state
+            .clone()
+    }
+
     async fn start(&mut self) -> Result<()> {
         let stream_reusable = self
             .stream
@@ -956,7 +983,9 @@ where
             .device
             .as_ref()
             .expect("owned async stream retains its device")
-            .sample_format;
+            .info
+            .active_state
+            .sample_format()?;
         let stream = self
             .stream
             .as_mut()
@@ -1021,6 +1050,11 @@ pub struct AsyncRawRxStream {
 }
 
 impl AsyncRawRxStream {
+    /// Return a shared handle to the authoritative active receiver state.
+    pub fn active_state(&self) -> crate::ActiveState {
+        self.inner.active_state()
+    }
+
     /// Start the receiver and persistent USB transfer queue.
     ///
     /// Repeated calls are no-ops while the stream is already running. Cancellation
@@ -1075,6 +1109,15 @@ where
             stats: StreamingStats::default(),
             state: AsyncReceiverState::Stopped,
         }
+    }
+
+    fn active_state(&self) -> crate::ActiveState {
+        self.device
+            .as_ref()
+            .expect("owned async stream retains its device")
+            .info
+            .active_state
+            .clone()
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -1212,6 +1255,11 @@ pub struct AsyncF32RxStream {
 }
 
 impl AsyncF32RxStream {
+    /// Return a shared handle to the authoritative active receiver state.
+    pub fn active_state(&self) -> crate::ActiveState {
+        self.inner.active_state()
+    }
+
     /// Start the receiver and persistent USB transfer queue.
     ///
     /// Repeated calls are no-ops while the stream is already running. Cancellation
@@ -1475,6 +1523,12 @@ mod tests {
     }
 
     fn fake_device(control: FakeControl, sample_format: SampleFormat) -> DeviceInner<FakeControl> {
+        let active_state = crate::ActiveState::default();
+        let config = Config::builder()
+            .sample_format(sample_format)
+            .build()
+            .expect("valid fake configuration");
+        active_state.apply_config(&config);
         DeviceInner {
             direct: HydraSdr::from_control(control),
             info: DeviceInfo {
@@ -1484,9 +1538,8 @@ mod tests {
                 min_frequency: 24_000_000,
                 max_frequency: 1_800_000_000,
                 rf_ports: Vec::new(),
-                current_config: None,
+                active_state,
             },
-            sample_format,
         }
     }
 
@@ -1529,6 +1582,7 @@ mod tests {
         let state = Arc::clone(&control.state);
         let device = fake_device(control, SampleFormat::F32Iq);
         let mut stream = F32RxStreamInner::new(device);
+        let active = stream.active_state();
 
         stream.start().expect("start owned synchronous F32 stream");
         assert!(matches!(
@@ -1539,10 +1593,23 @@ mod tests {
         stream
             .set_frequency_hz(915_000_000)
             .expect("set focused frequency while stopped");
+        assert_eq!(active.frequency_hz().unwrap(), 915_000_000);
+
+        state.fail_control_out.store(true, Ordering::SeqCst);
+        assert!(stream.set_frequency_hz(433_920_000).is_err());
+        assert_eq!(
+            active.frequency_hz().unwrap_err().kind(),
+            crate::ErrorKind::StateUnavailable
+        );
+        state.fail_control_out.store(false, Ordering::SeqCst);
+        stream
+            .set_frequency_hz(433_920_000)
+            .expect("recover focused frequency after failed update");
+        assert_eq!(active.frequency_hz().unwrap(), 433_920_000);
         stream
             .set_sample_rate_hz(2_500_000)
             .expect("set focused sample rate while stopped");
-        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 4);
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 6);
 
         stream
             .start()
@@ -1684,7 +1751,10 @@ mod tests {
                 .expect_err("F32 stream must reject raw ADC configuration");
             let device = stream.into_device();
             assert_eq!(error.kind(), crate::ErrorKind::InvalidConfig);
-            assert_eq!(device.sample_format, SampleFormat::RawAdc);
+            assert_eq!(
+                device.info.active_state.sample_format().unwrap(),
+                SampleFormat::RawAdc
+            );
             assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
         });
     }
@@ -1752,7 +1822,10 @@ mod tests {
                     .is_err_and(|error| error.kind() == crate::ErrorKind::Usb)
             );
             let device = stream.into_device();
-            assert_eq!(device.sample_format, SampleFormat::F32Iq);
+            assert_eq!(
+                device.info.active_state.sample_format().unwrap(),
+                SampleFormat::F32Iq
+            );
             assert_eq!(state.cancel_count.load(Ordering::SeqCst), 1);
         });
     }

@@ -227,26 +227,6 @@ impl Config {
         self.packing
     }
 
-    pub(crate) fn update_frequency_hz(&mut self, value: u64) {
-        self.frequency_hz = value;
-    }
-
-    pub(crate) fn update_sample_rate_hz(&mut self, value: u32) {
-        self.sample_rate_hz = value;
-    }
-
-    pub(crate) fn update_bandwidth(&mut self, value: Bandwidth) {
-        self.bandwidth = value;
-    }
-
-    pub(crate) fn update_rf_port(&mut self, value: RfPort) {
-        self.rf_port = Some(value);
-    }
-
-    pub(crate) fn update_gain(&mut self, value: GainConfig) {
-        self.gain = value;
-    }
-
     /// Validate this configuration without touching USB.
     pub fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;

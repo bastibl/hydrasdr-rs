@@ -1,5 +1,6 @@
 use hydrasdr_rs::{
-    Bandwidth, Config, DeviceInfo, Error, ErrorKind, GainConfig, GainPreset, RfPort, SampleFormat,
+    ActiveState, Bandwidth, Config, DeviceInfo, Error, ErrorKind, GainConfig, GainPreset, RfPort,
+    SampleFormat,
 };
 
 #[test]
@@ -167,12 +168,12 @@ fn public_error_and_metadata_are_ergonomic() {
         min_frequency: 24_000_000,
         max_frequency: 1_800_000_000,
         rf_ports: Vec::new(),
-        current_config: Some(Config::default()),
+        active_state: ActiveState::default(),
     };
 
     assert_eq!(info.serial, Some(0x1234));
     assert_eq!(
-        info.current_config.as_ref().map(Config::sample_format),
-        Some(SampleFormat::RawAdc)
+        info.active_state.sample_format().unwrap_err().kind(),
+        ErrorKind::StateUnavailable
     );
 }

@@ -52,6 +52,7 @@
 
 #![deny(missing_docs)]
 
+mod active_state;
 mod commands;
 mod config;
 mod constants;
@@ -66,6 +67,7 @@ mod streaming;
 mod types;
 mod usb;
 
+pub use active_state::{ActiveState, GainStage};
 pub use config::{Bandwidth, Config, ConfigBuilder, GainConfig, GainPreset, RfPort, SampleFormat};
 pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
 pub use discovery::DeviceDescriptor;

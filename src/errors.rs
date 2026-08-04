@@ -27,6 +27,13 @@ pub enum Error {
         /// Reason the stream is no longer usable.
         reason: &'static str,
     },
+    /// A write-only setting has no trustworthy current value.
+    StateUnavailable {
+        /// Setting whose current value is unavailable.
+        field: &'static str,
+        /// Why no authoritative value can be returned.
+        reason: &'static str,
+    },
     /// The USB backend returned an error outside an individual transfer.
     Usb(nusb::Error),
     /// An individual USB transfer failed.
@@ -62,6 +69,8 @@ pub enum ErrorKind {
     Usb,
     /// The stream is not running or is otherwise closed.
     StreamClosed,
+    /// A write-only setting has no trustworthy current value.
+    StateUnavailable,
     /// Any other driver or backend error.
     Other,
 }
@@ -75,6 +84,11 @@ impl Error {
     /// Build a stream lifecycle error.
     pub(crate) const fn stream_closed(reason: &'static str) -> Self {
         Self::StreamClosed { reason }
+    }
+
+    /// Build an unavailable active-state error.
+    pub(crate) const fn state_unavailable(field: &'static str, reason: &'static str) -> Self {
+        Self::StateUnavailable { field, reason }
     }
 
     /// Build a HydraSDR protocol error.
@@ -98,6 +112,7 @@ impl Error {
             Self::Busy => ErrorKind::Busy,
             Self::Unsupported => ErrorKind::Unsupported,
             Self::StreamClosed { .. } => ErrorKind::StreamClosed,
+            Self::StateUnavailable { .. } => ErrorKind::StateUnavailable,
             Self::Usb(err) => match err.kind() {
                 nusb::ErrorKind::Busy => ErrorKind::Busy,
                 nusb::ErrorKind::NotFound => ErrorKind::NotFound,
@@ -121,6 +136,9 @@ impl fmt::Display for Error {
             Self::Busy => f.write_str("HydraSDR device or USB resource is busy"),
             Self::Unsupported => f.write_str("operation is unsupported"),
             Self::StreamClosed { reason } => write!(f, "stream closed: {reason}"),
+            Self::StateUnavailable { field, reason } => {
+                write!(f, "current {field} is unavailable: {reason}")
+            }
             Self::Usb(err) => write!(f, "USB error: {err}"),
             Self::Transfer(err) => write!(f, "USB transfer error: {err}"),
             Self::Operation { operation, source } => write!(f, "{operation}: {source}"),

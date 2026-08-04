@@ -11,15 +11,14 @@ use crate::rfone::{
     RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
     RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
     RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT, RFONE_SENSITIVITY_LNA_GAINS,
-    RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_VGA_MAX_GAIN,
-    default_gain_infos, rf_port_infos,
+    RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS, RFONE_VGA_MAX_GAIN, rf_port_infos,
 };
 use crate::streaming::{
     AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, StreamingState,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::streaming::{DirectRxStream, RawRxStream, StreamingBackend, StreamingStats};
-use crate::types::{BoardId, DecimationMode, DeviceInfo, GainInfo, PartIdSerialNo, SampleType};
+use crate::types::{BoardId, DecimationMode, DeviceInfo, PartIdSerialNo, SampleType};
 use crate::usb::control::{
     ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial, decode_u32_le_words,
 };
@@ -45,7 +44,6 @@ pub(crate) struct HydraSdr<C = NusbControl> {
     sample_rates: SampleRateTable,
     bandwidths: Vec<u32>,
     features: Option<u32>,
-    gains: Vec<GainInfo>,
     decimation_mode: DecimationMode,
     packing_enabled: bool,
     streaming: StreamingState,
@@ -59,7 +57,6 @@ struct AppliedConfig {
     rates: SampleRateTable,
     decimation: u32,
     packing: bool,
-    gain_updates: Vec<GainUpdate>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +119,6 @@ impl<C> HydraSdr<C> {
             sample_rates: SampleRateTable::legacy(Vec::new()),
             bandwidths: Vec::new(),
             features: None,
-            gains: default_gain_infos(),
             decimation_mode: DecimationMode::LowBandwidth,
             packing_enabled: false,
             streaming: StreamingState::new(),
@@ -291,7 +287,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         };
         let rates = self.available_samplerates();
         let control = Arc::clone(&self.control);
-        let (gain_requests, gain_updates) = gain_config_plan(
+        let gain_requests = gain_config_plan(
             gain,
             self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0,
         );
@@ -413,7 +409,6 @@ impl<C: ControlBackend> HydraSdr<C> {
                     rates,
                     decimation,
                     packing,
-                    gain_updates,
                 })
             })
     }
@@ -430,9 +425,6 @@ impl<C: ControlBackend> HydraSdr<C> {
             .expect("validated HydraSDR decimation factor");
         self.packing_enabled = state.packing;
         self.streaming.set_packing(state.packing);
-        for (gain_type, value, max_value) in state.gain_updates {
-            self.update_gain_cache(gain_type, value, max_value);
-        }
     }
 
     /// Read supported sample rates with the C count-then-list protocol.
@@ -513,11 +505,11 @@ impl<C: ControlBackend> HydraSdr<C> {
         &mut self,
         gain: crate::GainConfig,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let (requests, updates) = gain_config_plan(
+        let requests = gain_config_plan(
             gain,
             self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0,
         );
-        self.apply_gain_plan(requests, updates)
+        self.apply_gain_plan(requests)
     }
 
     /// Select an RF input port and require the firmware success byte used by the C API.
@@ -544,27 +536,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         mode: ReceiverMode,
     ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
         self.control_out(VendorControlRequest::receiver_mode(mode))
-    }
-
-    fn update_gain_cache(&mut self, gain_type: GainType, value: u8, max_value: u8) {
-        if let Some(gain) = self
-            .gains
-            .iter_mut()
-            .find(|gain| gain.gain_type == gain_type)
-        {
-            gain.value = value;
-            gain.max_value = gain.max_value.max(max_value);
-            return;
-        }
-        self.gains.push(GainInfo {
-            gain_type,
-            min_value: 0,
-            max_value,
-            step_value: 1,
-            default_value: value,
-            value,
-            flags: 0,
-        });
     }
 
     fn set_samplerate_for_mode(
@@ -689,7 +660,6 @@ impl<C: ControlBackend> HydraSdr<C> {
     fn apply_gain_plan(
         &mut self,
         requests: Vec<VendorControlRequest>,
-        updates: Vec<(GainType, u8, u8)>,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let mut requests = requests.into_iter();
         let [step0, step1, step2, step3, step4] = [
@@ -718,13 +688,6 @@ impl<C: ControlBackend> HydraSdr<C> {
                 move |()| gain_step(control, step3)
             })
             .and_then(move |()| gain_step(control, step4))
-            .map(move |result| {
-                result?;
-                for (gain_type, value, max_value) in updates {
-                    self.update_gain_cache(gain_type, value, max_value);
-                }
-                Ok(())
-            })
     }
 
     fn control_in_exact(
@@ -1011,7 +974,7 @@ fn build_device_info(
         min_frequency: RFONE_MIN_FREQ_HZ,
         max_frequency: RFONE_MAX_FREQ_HZ,
         rf_ports: rf_port_infos(),
-        current_config: None,
+        active_state: crate::ActiveState::default(),
     }
 }
 
@@ -1047,14 +1010,9 @@ fn gain_step<C: ControlBackend>(
     }
 }
 
-type GainUpdate = (GainType, u8, u8);
-
-fn gain_config_plan(
-    gain: crate::GainConfig,
-    extended: bool,
-) -> (Vec<VendorControlRequest>, Vec<GainUpdate>) {
+fn gain_config_plan(gain: crate::GainConfig, extended: bool) -> Vec<VendorControlRequest> {
     match gain {
-        crate::GainConfig::Unchanged => (Vec::new(), Vec::new()),
+        crate::GainConfig::Unchanged => Vec::new(),
         crate::GainConfig::Preset(crate::GainPreset::Linearity(value)) => {
             if extended {
                 extended_gain_plan(GainType::Linearity, value)
@@ -1077,27 +1035,25 @@ fn gain_config_plan(
             mixer_agc,
         } if extended => {
             let mut requests = Vec::new();
-            let mut updates = Vec::new();
-            let mut push = |gain_type, value, max_value| {
+            let mut push = |gain_type, value| {
                 requests.push(VendorControlRequest::unified_gain(gain_type, value));
-                updates.push((gain_type, value, max_value));
             };
             if let Some(value) = lna {
-                push(GainType::Lna, value, RFONE_LNA_MAX_GAIN);
+                push(GainType::Lna, value);
             }
             if let Some(value) = mixer {
-                push(GainType::Mixer, value, RFONE_MIXER_MAX_GAIN);
+                push(GainType::Mixer, value);
             }
             if let Some(value) = vga {
-                push(GainType::Vga, value, RFONE_VGA_MAX_GAIN);
+                push(GainType::Vga, value);
             }
             if let Some(enabled) = lna_agc {
-                push(GainType::LnaAgc, u8::from(enabled), 1);
+                push(GainType::LnaAgc, u8::from(enabled));
             }
             if let Some(enabled) = mixer_agc {
-                push(GainType::MixerAgc, u8::from(enabled), 1);
+                push(GainType::MixerAgc, u8::from(enabled));
             }
-            (requests, updates)
+            requests
         }
         crate::GainConfig::Manual {
             lna,
@@ -1109,14 +1065,8 @@ fn gain_config_plan(
     }
 }
 
-fn extended_gain_plan(
-    gain_type: GainType,
-    value: u8,
-) -> (Vec<VendorControlRequest>, Vec<GainUpdate>) {
-    (
-        vec![VendorControlRequest::unified_gain(gain_type, value)],
-        vec![(gain_type, value, value.max(1))],
-    )
+fn extended_gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlRequest> {
+    vec![VendorControlRequest::unified_gain(gain_type, value)]
 }
 
 fn manual_gain_plan(
@@ -1125,74 +1075,42 @@ fn manual_gain_plan(
     vga: Option<u8>,
     lna_agc: Option<bool>,
     mixer_agc: Option<bool>,
-) -> (Vec<VendorControlRequest>, Vec<GainUpdate>) {
+) -> Vec<VendorControlRequest> {
     let mut requests = Vec::new();
-    let mut updates = Vec::new();
-    let mut push = |gain_type, request, value, max_value| {
+    let mut push = |request, value| {
         requests.push(VendorControlRequest::legacy_gain(request, value));
-        updates.push((gain_type, value, max_value));
     };
     if let Some(value) = lna {
-        push(
-            GainType::Lna,
-            VendorRequest::SetLnaGain,
-            value,
-            RFONE_LNA_MAX_GAIN,
-        );
+        push(VendorRequest::SetLnaGain, value);
     }
     if let Some(value) = mixer {
-        push(
-            GainType::Mixer,
-            VendorRequest::SetMixerGain,
-            value,
-            RFONE_MIXER_MAX_GAIN,
-        );
+        push(VendorRequest::SetMixerGain, value);
     }
     if let Some(value) = vga {
-        push(
-            GainType::Vga,
-            VendorRequest::SetVgaGain,
-            value,
-            RFONE_VGA_MAX_GAIN,
-        );
+        push(VendorRequest::SetVgaGain, value);
     }
     if let Some(enabled) = lna_agc {
-        push(
-            GainType::LnaAgc,
-            VendorRequest::SetLnaAgc,
-            u8::from(enabled),
-            1,
-        );
+        push(VendorRequest::SetLnaAgc, u8::from(enabled));
     }
     if let Some(enabled) = mixer_agc {
-        push(
-            GainType::MixerAgc,
-            VendorRequest::SetMixerAgc,
-            u8::from(enabled),
-            1,
-        );
+        push(VendorRequest::SetMixerAgc, u8::from(enabled));
     }
-    (requests, updates)
+    requests
 }
 
-fn gain_plan(gain_type: GainType, value: u8) -> (Vec<VendorControlRequest>, Vec<GainUpdate>) {
-    let legacy = |gain_type, request, max_value| {
-        let value = value.min(max_value);
-        (
-            vec![VendorControlRequest::legacy_gain(request, value)],
-            vec![(gain_type, value, max_value)],
-        )
+fn gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlRequest> {
+    let legacy = |request, max_value| {
+        vec![VendorControlRequest::legacy_gain(
+            request,
+            value.min(max_value),
+        )]
     };
     match gain_type {
-        GainType::Lna => legacy(GainType::Lna, VendorRequest::SetLnaGain, RFONE_LNA_MAX_GAIN),
-        GainType::Mixer => legacy(
-            GainType::Mixer,
-            VendorRequest::SetMixerGain,
-            RFONE_MIXER_MAX_GAIN,
-        ),
-        GainType::Vga => legacy(GainType::Vga, VendorRequest::SetVgaGain, RFONE_VGA_MAX_GAIN),
-        GainType::LnaAgc => legacy(GainType::LnaAgc, VendorRequest::SetLnaAgc, 1),
-        GainType::MixerAgc => legacy(GainType::MixerAgc, VendorRequest::SetMixerAgc, 1),
+        GainType::Lna => legacy(VendorRequest::SetLnaGain, RFONE_LNA_MAX_GAIN),
+        GainType::Mixer => legacy(VendorRequest::SetMixerGain, RFONE_MIXER_MAX_GAIN),
+        GainType::Vga => legacy(VendorRequest::SetVgaGain, RFONE_VGA_MAX_GAIN),
+        GainType::LnaAgc => legacy(VendorRequest::SetLnaAgc, 1),
+        GainType::MixerAgc => legacy(VendorRequest::SetMixerAgc, 1),
         GainType::Linearity | GainType::Sensitivity => {
             let index = reverse_gain_table_index(value);
             let (vga, mixer, lna) = if gain_type == GainType::Linearity {
@@ -1208,23 +1126,13 @@ fn gain_plan(gain_type: GainType, value: u8) -> (Vec<VendorControlRequest>, Vec<
                     RFONE_SENSITIVITY_LNA_GAINS[index],
                 )
             };
-            (
-                vec![
-                    VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
-                    VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
-                    VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, vga),
-                    VendorControlRequest::legacy_gain(VendorRequest::SetMixerGain, mixer),
-                    VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, lna),
-                ],
-                vec![
-                    (GainType::MixerAgc, 0, 1),
-                    (GainType::LnaAgc, 0, 1),
-                    (GainType::Vga, vga, RFONE_VGA_MAX_GAIN),
-                    (GainType::Mixer, mixer, RFONE_MIXER_MAX_GAIN),
-                    (GainType::Lna, lna, RFONE_LNA_MAX_GAIN),
-                    (gain_type, value.min(21), 21),
-                ],
-            )
+            vec![
+                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
+                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
+                VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, vga),
+                VendorControlRequest::legacy_gain(VendorRequest::SetMixerGain, mixer),
+                VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, lna),
+            ]
         }
     }
 }

@@ -50,18 +50,6 @@ pub(crate) struct PartIdSerialNo {
     pub(crate) serial_no: [u32; 4],
 }
 
-/// Internal gain descriptor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GainInfo {
-    pub(crate) gain_type: crate::commands::GainType,
-    pub(crate) min_value: u8,
-    pub(crate) max_value: u8,
-    pub(crate) step_value: u8,
-    pub(crate) default_value: u8,
-    pub(crate) value: u8,
-    pub(crate) flags: u8,
-}
-
 /// Bias tee electrical limits for an RF port.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BiasTeeInfo {
@@ -101,6 +89,6 @@ pub struct DeviceInfo {
     pub max_frequency: u64,
     /// RF ports reported for this device.
     pub rf_ports: Vec<RfPortInfo>,
-    /// Last high-level configuration applied through this crate, if any.
-    pub current_config: Option<crate::Config>,
+    /// Shared state of settings applied through this crate.
+    pub active_state: crate::ActiveState,
 }

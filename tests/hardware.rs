@@ -42,12 +42,7 @@ fn hardware_configure_frequency_sample_rate_and_gains() {
         .expect("open and configure HydraSDR RFOne");
 
     let info = dev.refresh_info().wait().expect("refresh device info");
-    assert_eq!(
-        info.current_config
-            .as_ref()
-            .map(hydrasdr_rs::Config::sample_rate_hz),
-        Some(10_000_000)
-    );
+    assert_eq!(info.active_state.sample_rate_hz().unwrap(), 10_000_000);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! RFOne constants and descriptor helpers used by the high-level driver.
 
-use crate::commands::{Capability, GainType};
-use crate::types::{BiasTeeInfo, GainInfo, RfPortInfo};
+use crate::commands::Capability;
+use crate::types::{BiasTeeInfo, RfPortInfo};
 
 /// Number of queued streaming transfers used by the C RFOne path.
 pub(crate) const RFONE_TRANSFER_COUNT: u32 = 16;
@@ -11,7 +11,6 @@ pub(crate) const RFONE_LNA_MAX_GAIN: u8 = 14;
 pub(crate) const RFONE_MIXER_MAX_GAIN: u8 = 15;
 pub(crate) const RFONE_VGA_MAX_GAIN: u8 = 15;
 pub(crate) const RFONE_GAIN_TABLE_SIZE: usize = 22;
-pub(crate) const RFONE_DEFAULT_GAIN_INDEX: u8 = 10;
 pub(crate) const RFONE_MIN_FREQ_HZ: u64 = 24_000_000;
 pub(crate) const RFONE_MAX_FREQ_HZ: u64 = 1_800_000_000;
 pub(crate) const RFONE_BIAS_TEE_VOLTAGE_V: f32 = 4.5;
@@ -47,38 +46,6 @@ pub(crate) const RFONE_HARDCODED_CAPS: u32 = Capability::Rx.bits()
     | Capability::BiasTee.bits()
     | Capability::Packing.bits()
     | Capability::RfPortSelect.bits();
-
-/// Return default gain descriptors for the RFOne direct API.
-pub(crate) fn default_gain_infos() -> Vec<GainInfo> {
-    [
-        (GainType::Lna, RFONE_LNA_MAX_GAIN, RFONE_LNA_MAX_GAIN),
-        (GainType::Mixer, RFONE_MIXER_MAX_GAIN, RFONE_MIXER_MAX_GAIN),
-        (GainType::Vga, RFONE_VGA_MAX_GAIN, RFONE_VGA_MAX_GAIN),
-        (
-            GainType::Linearity,
-            RFONE_GAIN_TABLE_SIZE as u8 - 1,
-            RFONE_DEFAULT_GAIN_INDEX,
-        ),
-        (
-            GainType::Sensitivity,
-            RFONE_GAIN_TABLE_SIZE as u8 - 1,
-            RFONE_DEFAULT_GAIN_INDEX,
-        ),
-        (GainType::LnaAgc, 1, 0),
-        (GainType::MixerAgc, 1, 0),
-    ]
-    .into_iter()
-    .map(|(gain_type, max_value, default_value)| GainInfo {
-        gain_type,
-        min_value: 0,
-        max_value,
-        step_value: 1,
-        default_value,
-        value: default_value,
-        flags: 0,
-    })
-    .collect()
-}
 
 /// Return C-parity RF port metadata for RFOne.
 pub(crate) fn rf_port_infos() -> Vec<RfPortInfo> {
