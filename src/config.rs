@@ -31,9 +31,12 @@ pub(crate) enum DeviceSelector {
 pub enum Bandwidth {
     /// Leave bandwidth selection to firmware defaults.
     Auto,
-    /// Set an explicit bandwidth in Hz before setting the sample rate.
+    /// Request an explicit analog bandwidth in Hz on devices that advertise it.
     ///
-    /// Manual bandwidths must be in the inclusive range `1_000..=65_535_999`.
+    /// The numeric value must fit the vendor request's 16-bit kHz encoding
+    /// (`1_000..=65_535_999` Hz). That is a protocol limit, not an advertised
+    /// hardware range. Current RFOne firmware does not expose manual bandwidth
+    /// control and returns [`Error::Unsupported`] when this policy is applied.
     ManualHz(u32),
 }
 
@@ -52,13 +55,16 @@ pub enum RfPort {
 /// High-level sample format names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SampleFormat {
-    /// Raw ADC USB blocks at the selected firmware/hardware sample rate.
+    /// Raw ADC USB blocks measured in real ADC samples per second.
     ///
-    /// Raw ADC sample rates must be in the inclusive range `10_000..=65_535_999` Hz.
+    /// Use [`crate::Device::sample_rates`] to query the rates advertised by an
+    /// opened device.
     RawAdc,
-    /// Converted 32-bit float IQ samples with optional host-side decimation.
+    /// Converted 32-bit float IQ samples measured in complex samples per second.
     ///
-    /// Float IQ sample rates must be in the inclusive range `10_000..=32_767_999` Hz.
+    /// The driver may select a higher firmware rate and apply host-side
+    /// decimation to produce the requested effective rate. Use
+    /// [`crate::Device::sample_rates`] to query the advertised effective rates.
     F32Iq,
 }
 
@@ -137,8 +143,9 @@ impl From<GainPreset> for GainConfig {
 /// Callers can opt out of gain writes with [`GainConfig::Unchanged`] or
 /// construct partial manual gain updates explicitly.
 ///
-/// Building a config validates ranges without opening USB hardware, so this is
-/// safe in doctests and CI:
+/// Building a config validates static RFOne and USB protocol constraints
+/// without opening hardware. It does not prove that connected firmware
+/// advertises a sample rate or optional capability such as manual bandwidth.
 ///
 /// ```
 /// use hydrasdr_rs::{Bandwidth, Config, GainPreset, SampleFormat};
@@ -208,7 +215,11 @@ impl Config {
         self.frequency_hz
     }
 
-    /// ADC/sample rate in Hz.
+    /// Requested sample rate in Hz.
+    ///
+    /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
+    /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
+    /// host-side decimation.
     pub const fn sample_rate_hz(&self) -> u32 {
         self.sample_rate_hz
     }
@@ -248,7 +259,10 @@ impl Config {
         self.packing
     }
 
-    /// Validate this configuration without touching USB.
+    /// Validate static RFOne and USB protocol constraints without touching USB.
+    ///
+    /// This does not query device-advertised sample rates or optional
+    /// capabilities; those require an opened device and firmware interaction.
     pub fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
         validate_sample_rate(self.sample_rate_hz, self.sample_format)?;
@@ -263,17 +277,17 @@ impl Config {
 /// Builder for [`Config`].
 ///
 /// ```
-/// use hydrasdr_rs::{Config, SampleFormat};
+/// use hydrasdr_rs::{Bandwidth, Config, SampleFormat};
 ///
 /// let config = Config::builder()
 ///     .frequency_hz(915_000_000)
 ///     .sample_rate_hz(2_000_000)
-///     .bandwidth_hz(1_750_000)
+///     .bandwidth(Bandwidth::Auto)
 ///     .sample_format(SampleFormat::RawAdc)
 ///     .packing(true)
 ///     .build()?;
 ///
-/// assert_eq!(config.bandwidth(), hydrasdr_rs::Bandwidth::ManualHz(1_750_000));
+/// assert_eq!(config.bandwidth(), Bandwidth::Auto);
 /// assert_eq!(config.sample_format(), SampleFormat::RawAdc);
 /// assert!(config.packing());
 /// # Ok::<(), hydrasdr_rs::Error>(())
@@ -293,11 +307,16 @@ impl ConfigBuilder {
         self
     }
 
-    /// Set the ADC/sample rate in Hz.
+    /// Set the requested sample rate in Hz.
     ///
-    /// [`SampleFormat::RawAdc`] accepts `10_000..=65_535_999` Hz.
-    /// [`SampleFormat::F32Iq`] accepts `10_000..=32_767_999` Hz because
-    /// the hardware rate is doubled before host-side IQ conversion.
+    /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
+    /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
+    /// host-side decimation. [`ConfigBuilder`] validates only that the value is
+    /// representable by the USB protocol (`10_000..=65_535_999` Hz for raw ADC
+    /// and `10_000..=32_767_999` Hz for F32 IQ). These bounds are not advertised
+    /// hardware ranges. Query [`crate::Device::sample_rates`] after opening a
+    /// device for its advertised rates; other encodable values are left for
+    /// firmware to accept or reject.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config.sample_rate_hz = value;
         self
@@ -305,8 +324,9 @@ impl ConfigBuilder {
 
     /// Set the analog bandwidth policy.
     ///
-    /// [`Bandwidth::ManualHz`] values must be in the inclusive range
-    /// `1_000..=65_535_999` Hz.
+    /// [`Bandwidth::ManualHz`] is capability-gated. Its numeric bound only
+    /// reflects the vendor request encoding; current RFOne firmware does not
+    /// advertise manual bandwidth control.
     pub fn bandwidth(mut self, value: Bandwidth) -> Self {
         self.config.bandwidth = value;
         self
@@ -315,15 +335,18 @@ impl ConfigBuilder {
     /// Set an explicit analog bandwidth in Hz.
     ///
     /// This is shorthand for [`ConfigBuilder::bandwidth`] with
-    /// [`Bandwidth::ManualHz`]. Values must be in the inclusive range
-    /// `1_000..=65_535_999` Hz.
+    /// [`Bandwidth::ManualHz`]. Values must fit the vendor request encoding
+    /// (`1_000..=65_535_999` Hz), and applying the configuration requires a
+    /// device that advertises manual bandwidth control. Current RFOne firmware
+    /// does not.
     pub fn bandwidth_hz(self, value: u32) -> Self {
         self.bandwidth(Bandwidth::ManualHz(value))
     }
 
     /// Set the high-level sample format.
     ///
-    /// The sample format determines which sample-rate range is valid.
+    /// The sample format determines how the requested rate is interpreted and
+    /// which protocol-encoding bound applies.
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config.sample_format = value;
         self

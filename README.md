@@ -14,7 +14,7 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 Implemented:
 
-- Sync and async device builders, reusable receiver `Config`, gain/sample/bandwidth selectors, and pull-style receive streams.
+- Sync and async device builders, reusable receiver `Config`, gain and sample-rate selectors, capability-gated bandwidth configuration, and pull-style receive streams.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
 - Internal USB control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
@@ -64,7 +64,11 @@ cargo check --target wasm32-unknown-unknown
 
 ## Configuration validation
 
-`Config::builder()` and `Device::builder()` validate receiver settings before they touch hardware. RFOne center frequency must be `24_000_000..=1_800_000_000` Hz. Raw ADC sample rates must be `10_000..=65_535_999` Hz, while converted `F32Iq` sample rates must be `10_000..=32_767_999` Hz because the requested hardware rate is doubled before host-side IQ conversion. Manual bandwidths must be `1_000..=65_535_999` Hz.
+`Config::builder()` and `Device::builder()` validate static RFOne and USB protocol constraints before they touch hardware. This validation is not capability discovery: use `Device::sample_rates()` to query the effective rates advertised for the active sample format. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
+
+The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
+
+Manual analog bandwidth uses the same kind of capability-gated vendor protocol. Current RFOne firmware does not advertise bandwidth control, so `Bandwidth::ManualHz`, `Device::bandwidths()`, and the focused bandwidth setters return `Error::Unsupported` when applied. The `1_000..=65_535_999` Hz validation bound is only the request encoding range for firmware that implements that capability.
 
 Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mixer `0..=15`, and VGA `0..=15`.
 

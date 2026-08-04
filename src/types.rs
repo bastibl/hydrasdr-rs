@@ -37,9 +37,11 @@ pub(crate) enum SampleType {
 /// Host-side IQ decimation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecimationMode {
-    /// Prefer lower host bandwidth by using firmware decimation by 2.
+    /// Prefer the lowest firmware rate that can produce the requested effective
+    /// IQ rate, reducing USB and host processing bandwidth.
     LowBandwidth,
-    /// Prefer higher-definition IQ conversion without firmware decimation.
+    /// Prefer the highest firmware rate that can produce the requested
+    /// effective IQ rate, then decimate on the host for greater oversampling.
     HighDefinition,
 }
 

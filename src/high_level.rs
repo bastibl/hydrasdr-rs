@@ -112,12 +112,18 @@ impl Device {
         self.inner.refresh_info()
     }
 
-    /// Query supported sample rates.
+    /// Query sample rates advertised for the active sample format.
+    ///
+    /// Converted F32 IQ results include exactly representable effective rates
+    /// produced by host-side decimation.
     pub fn sample_rates(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
         self.inner.sample_rates()
     }
 
-    /// Query supported analog bandwidths.
+    /// Query advertised analog bandwidths.
+    ///
+    /// Current RFOne firmware does not advertise manual bandwidth control and
+    /// returns [`Error::Unsupported`].
     pub fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
         self.inner.bandwidths()
     }
@@ -132,7 +138,12 @@ impl Device {
         self.inner.set_frequency_hz(frequency_hz)
     }
 
-    /// Set only the sample rate.
+    /// Set only the requested sample rate.
+    ///
+    /// The value is a real ADC rate for [`SampleFormat::RawAdc`] and an
+    /// effective complex output rate for [`SampleFormat::F32Iq`]. Values not
+    /// returned by [`Device::sample_rates`] are left for firmware to accept or
+    /// reject.
     pub fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
@@ -140,7 +151,9 @@ impl Device {
         self.inner.set_sample_rate_hz(sample_rate_hz)
     }
 
-    /// Set only the manual analog bandwidth.
+    /// Set only the manual analog bandwidth on firmware that advertises it.
+    ///
+    /// Current RFOne firmware returns [`Error::Unsupported`].
     pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> impl MaybeFuture<Output = Result<()>> {
         self.inner.set_bandwidth_hz(bandwidth_hz)
     }
@@ -498,11 +511,13 @@ impl DeviceBuilder {
         self
     }
 
-    /// Set the ADC/sample rate in Hz.
+    /// Set the requested sample rate in Hz.
     ///
-    /// [`SampleFormat::RawAdc`] accepts `10_000..=65_535_999` Hz.
-    /// [`SampleFormat::F32Iq`] accepts `10_000..=32_767_999` Hz because
-    /// the hardware rate is doubled before host-side IQ conversion.
+    /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
+    /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
+    /// host-side decimation. The builder validates only USB protocol encoding,
+    /// not firmware support. Query [`Device::sample_rates`] on an opened device
+    /// for its advertised rates.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config = self.config.sample_rate_hz(value);
         self
@@ -510,8 +525,9 @@ impl DeviceBuilder {
 
     /// Set the analog bandwidth policy.
     ///
-    /// [`crate::Bandwidth::ManualHz`] values must be in the inclusive range
-    /// `1_000..=65_535_999` Hz.
+    /// [`crate::Bandwidth::ManualHz`] is capability-gated. Its numeric bound
+    /// reflects the vendor request encoding, not an RFOne hardware range;
+    /// current RFOne firmware does not advertise manual bandwidth control.
     pub fn bandwidth(mut self, value: crate::Bandwidth) -> Self {
         self.config = self.config.bandwidth(value);
         self
@@ -520,8 +536,9 @@ impl DeviceBuilder {
     /// Set an explicit analog bandwidth in Hz.
     ///
     /// This is shorthand for [`DeviceBuilder::bandwidth`] with
-    /// [`crate::Bandwidth::ManualHz`]. Values must be in the inclusive range
-    /// `1_000..=65_535_999` Hz.
+    /// [`crate::Bandwidth::ManualHz`]. The value must fit the vendor request
+    /// encoding and applying it requires firmware that advertises manual
+    /// bandwidth control. Current RFOne firmware does not.
     pub fn bandwidth_hz(mut self, value: u32) -> Self {
         self.config = self.config.bandwidth_hz(value);
         self
@@ -529,7 +546,8 @@ impl DeviceBuilder {
 
     /// Set the high-level sample format.
     ///
-    /// The sample format determines which sample-rate range is valid.
+    /// The sample format determines how the requested rate is interpreted and
+    /// which protocol-encoding bound applies.
     pub fn sample_format(mut self, value: SampleFormat) -> Self {
         self.config = self.config.sample_format(value);
         self
@@ -955,12 +973,14 @@ impl F32RxStream {
         self.inner.set_frequency_hz(frequency_hz)
     }
 
-    /// Set only the sample rate while the receiver is stopped.
+    /// Set only the requested sample rate while the receiver is stopped.
     pub fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
         self.inner.set_sample_rate_hz(sample_rate_hz)
     }
 
     /// Set only the manual analog bandwidth while the receiver is stopped.
+    ///
+    /// Current RFOne firmware returns [`Error::Unsupported`].
     pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
         self.inner.set_bandwidth_hz(bandwidth_hz)
     }
@@ -1376,12 +1396,14 @@ impl AsyncF32RxStream {
         self.inner.set_frequency_hz(frequency_hz).await
     }
 
-    /// Set only the sample rate while the receiver is stopped.
+    /// Set only the requested sample rate while the receiver is stopped.
     pub async fn set_sample_rate_hz(&mut self, sample_rate_hz: u32) -> Result<()> {
         self.inner.set_sample_rate_hz(sample_rate_hz).await
     }
 
     /// Set only the manual analog bandwidth while the receiver is stopped.
+    ///
+    /// Current RFOne firmware returns [`Error::Unsupported`].
     pub async fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> Result<()> {
         self.inner.set_bandwidth_hz(bandwidth_hz).await
     }
