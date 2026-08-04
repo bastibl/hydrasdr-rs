@@ -393,12 +393,13 @@ impl<M: SampleMode> ConfigBuilder<M> {
     ///
     /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
     /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
-    /// host-side decimation. [`ConfigBuilder`] validates only that the value is
-    /// representable by the USB protocol (`10_000..=65_535_999` Hz for raw ADC
-    /// and `10_000..=32_767_999` Hz for F32 IQ). These bounds are not advertised
-    /// hardware ranges. Query [`crate::Device::sample_rates`] after opening a
-    /// device for its advertised rates; other encodable values are left for
-    /// firmware to accept or reject.
+    /// host-side decimation. [`ConfigBuilder`] validates only the broad USB
+    /// protocol bounds (`10_000..=65_535_999` Hz for raw ADC and
+    /// `10_000..=32_767_999` Hz for F32 IQ). These are not advertised hardware
+    /// ranges. Query [`crate::Device::sample_rates`] after opening a device for
+    /// its advertised rates. A non-advertised raw rate is accepted only when it
+    /// is a multiple of 1,000 Hz; a non-advertised F32 IQ rate must be a
+    /// multiple of 500 Hz. Firmware may still reject such fallback rates.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config.sample_rate_hz = value;
         self

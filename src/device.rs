@@ -1139,10 +1139,21 @@ fn sample_rate_param(
         ));
     }
     let rate = if sample_type == SampleType::Float32Iq {
-        hardware_rate.saturating_mul(2)
+        hardware_rate.checked_mul(2).ok_or_else(|| {
+            Error::invalid_config(
+                "sample_rate_hz",
+                "cannot be encoded exactly for the firmware",
+            )
+        })?
     } else {
         hardware_rate
     };
+    if !rate.is_multiple_of(1_000) {
+        return Err(Error::invalid_config(
+            "sample_rate_hz",
+            "cannot be encoded exactly for the firmware",
+        ));
+    }
     checked_vendor_param(rate / 1000)
 }
 
@@ -1329,6 +1340,16 @@ mod tests {
             sample_rate_hardware_config(&rates, DecimationPolicy::HighDefinition, 78_125),
             Some((5_000_000, 64))
         );
+        let selected = sample_rate_config(
+            &rates,
+            SampleType::Float32Iq,
+            DecimationPolicy::HighDefinition,
+            78_125,
+        )
+        .unwrap();
+        assert_eq!(selected.param, 1);
+        assert_eq!(selected.hardware_rate, 5_000_000);
+        assert_eq!(selected.decimation, 64);
     }
 
     #[test]
@@ -1376,6 +1397,38 @@ mod tests {
             )
             .unwrap(),
             legacy_selection(12_000, 12_000_000)
+        );
+    }
+
+    #[test]
+    fn non_table_samplerates_must_be_exactly_representable() {
+        assert!(matches!(
+            sample_rate_config(
+                &legacy_rates(),
+                SampleType::Raw,
+                DecimationPolicy::LowBandwidth,
+                12_000_001,
+            ),
+            Err(Error::InvalidConfig { .. })
+        ));
+        assert!(matches!(
+            sample_rate_config(
+                &legacy_rates(),
+                SampleType::Float32Iq,
+                DecimationPolicy::LowBandwidth,
+                10_000_001,
+            ),
+            Err(Error::InvalidConfig { .. })
+        ));
+        assert_eq!(
+            sample_rate_config(
+                &legacy_rates(),
+                SampleType::Float32Iq,
+                DecimationPolicy::LowBandwidth,
+                10_000_500,
+            )
+            .unwrap(),
+            legacy_selection(20_001, 10_000_500)
         );
     }
 

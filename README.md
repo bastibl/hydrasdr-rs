@@ -68,7 +68,7 @@ cargo check --target wasm32-unknown-unknown
 
 `Device::config()` returns the typed configuration last successfully applied through the driver. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged. The device remains the authoritative control handle while its typed stream exists.
 
-The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
+The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) are not RFOne hardware ranges. Advertised rates are selected exactly, including F32 IQ rates produced by exact host-side decimation. A non-advertised raw rate is accepted only in 1,000 Hz steps and a non-advertised F32 IQ rate only in 500 Hz steps, so the firmware request is never silently rounded. Firmware may still reject such fallback rates.
 
 Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mixer `0..=15`, and VGA `0..=15`.
 

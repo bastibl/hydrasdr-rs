@@ -254,9 +254,11 @@ impl<M: SampleMode> Device<M> {
     /// Set only the requested sample rate.
     ///
     /// The value is a real ADC rate for [`SampleFormat::RawAdc`] and an
-    /// effective complex output rate for [`SampleFormat::F32Iq`]. Values not
-    /// returned by [`Device::sample_rates`] are left for firmware to accept or
-    /// reject.
+    /// effective complex output rate for [`SampleFormat::F32Iq`]. A value
+    /// returned by [`Device::sample_rates`] is selected exactly. Other values
+    /// must be exactly encodable in the firmware's kHz request parameter: raw
+    /// rates in 1,000 Hz steps and F32 IQ rates in 500 Hz steps. Firmware may
+    /// still reject such fallback rates.
     pub fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
