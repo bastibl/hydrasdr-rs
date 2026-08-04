@@ -101,8 +101,12 @@ impl SampleFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GainPreset {
     /// Apply the RFOne linearity preset table.
+    ///
+    /// The preset index must be in the inclusive range `0..=21`.
     Linearity(u8),
     /// Apply the RFOne sensitivity preset table.
+    ///
+    /// The preset index must be in the inclusive range `0..=21`.
     Sensitivity(u8),
 }
 
