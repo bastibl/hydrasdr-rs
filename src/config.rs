@@ -5,7 +5,7 @@ use crate::rfone::{
     RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ, RFONE_MIXER_MAX_GAIN,
     RFONE_VGA_MAX_GAIN,
 };
-use crate::types::{DecimationMode, SampleType};
+use crate::types::{DecimationPolicy, SampleType};
 use core::marker::PhantomData;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
@@ -186,7 +186,7 @@ impl From<GainPreset> for GainConfig {
 pub struct Config<M: SampleMode = F32Iq> {
     frequency_hz: u64,
     sample_rate_hz: u32,
-    decimation_mode: DecimationMode,
+    decimation_policy: DecimationPolicy,
     rf_port: Option<RfPort>,
     gain: GainConfig,
     bias_tee: Option<bool>,
@@ -199,7 +199,7 @@ impl<M: SampleMode> Config<M> {
         Self {
             frequency_hz: DEFAULT_FREQUENCY_HZ,
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
-            decimation_mode: DecimationMode::LowBandwidth,
+            decimation_policy: DecimationPolicy::LowBandwidth,
             rf_port: Some(RfPort::Rx0),
             gain: GainConfig::default(),
             bias_tee: Some(false),
@@ -212,7 +212,7 @@ impl<M: SampleMode> Config<M> {
         Config {
             frequency_hz: self.frequency_hz,
             sample_rate_hz: self.sample_rate_hz,
-            decimation_mode: self.decimation_mode,
+            decimation_policy: self.decimation_policy,
             rf_port: self.rf_port,
             gain: self.gain,
             bias_tee: self.bias_tee,
@@ -290,8 +290,8 @@ impl<M: SampleMode> Config<M> {
         Ok(())
     }
 
-    pub(crate) const fn decimation_mode_internal(&self) -> DecimationMode {
-        self.decimation_mode
+    pub(crate) const fn decimation_policy_internal(&self) -> DecimationPolicy {
+        self.decimation_policy
     }
 
     pub(crate) const fn packing_internal(&self) -> bool {
@@ -341,7 +341,7 @@ impl<M: SampleMode> Config<M> {
     pub(crate) fn apply_internal(&mut self, applied: &Self) {
         self.frequency_hz = applied.frequency_hz;
         self.sample_rate_hz = applied.sample_rate_hz;
-        self.decimation_mode = applied.decimation_mode;
+        self.decimation_policy = applied.decimation_policy;
         if let Some(port) = applied.rf_port {
             self.rf_port = Some(port);
         }
@@ -362,8 +362,8 @@ impl Config<RawAdc> {
 
 impl Config<F32Iq> {
     /// Virtual IQ-rate hardware/host decimation policy.
-    pub const fn decimation_mode(&self) -> DecimationMode {
-        self.decimation_mode
+    pub const fn decimation_policy(&self) -> DecimationPolicy {
+        self.decimation_policy
     }
 }
 
@@ -468,7 +468,7 @@ impl ConfigBuilder<F32Iq> {
     /// let _ = Config::builder().packing(true);
     /// ```
     pub fn raw_adc(mut self) -> ConfigBuilder<RawAdc> {
-        self.config.decimation_mode = DecimationMode::LowBandwidth;
+        self.config.decimation_policy = DecimationPolicy::LowBandwidth;
         ConfigBuilder {
             config: self.config.into_mode(),
         }
@@ -477,13 +477,13 @@ impl ConfigBuilder<F32Iq> {
     /// Set the firmware/host decimation policy for float IQ samples.
     ///
     /// ```compile_fail
-    /// use hydrasdr_rs::{Config, DecimationMode};
+    /// use hydrasdr_rs::{Config, DecimationPolicy};
     /// let _ = Config::builder()
     ///     .raw_adc()
-    ///     .decimation_mode(DecimationMode::HighDefinition);
+    ///     .decimation_policy(DecimationPolicy::HighDefinition);
     /// ```
-    pub fn decimation_mode(mut self, value: DecimationMode) -> Self {
-        self.config.decimation_mode = value;
+    pub fn decimation_policy(mut self, value: DecimationPolicy) -> Self {
+        self.config.decimation_policy = value;
         self
     }
 }

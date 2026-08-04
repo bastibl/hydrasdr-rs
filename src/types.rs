@@ -34,9 +34,9 @@ pub(crate) enum SampleType {
     Raw = 5,
 }
 
-/// Host-side IQ decimation mode.
+/// Policy for selecting a firmware rate and host-side IQ decimation factor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DecimationMode {
+pub enum DecimationPolicy {
     /// Prefer the lowest firmware rate that can produce the requested effective
     /// IQ rate, reducing USB and host processing bandwidth.
     LowBandwidth,

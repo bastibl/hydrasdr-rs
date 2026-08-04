@@ -18,7 +18,7 @@ use crate::streaming::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::streaming::{DirectRxStream, RawRxStream, StreamingBackend, StreamingStats};
-use crate::types::{BoardId, DecimationMode, DeviceInfo, PartIdSerialNo, SampleType};
+use crate::types::{BoardId, DecimationPolicy, DeviceInfo, PartIdSerialNo, SampleType};
 use crate::usb::control::{
     ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial, decode_u32_le_words,
 };
@@ -42,14 +42,14 @@ pub(crate) struct HydraSdr<C = NusbControl> {
     sample_type: SampleType,
     sample_rates: SampleRateTable,
     features: Option<u32>,
-    decimation_mode: DecimationMode,
+    decimation_policy: DecimationPolicy,
     packing_enabled: bool,
     streaming: StreamingState,
 }
 
 struct AppliedConfig {
     sample_type: SampleType,
-    decimation_mode: DecimationMode,
+    decimation_policy: DecimationPolicy,
     rates: SampleRateTable,
     decimation: u32,
     packing: bool,
@@ -114,7 +114,7 @@ impl<C> HydraSdr<C> {
             sample_type: SampleType::Float32Iq,
             sample_rates: SampleRateTable::legacy(Vec::new()),
             features: None,
-            decimation_mode: DecimationMode::LowBandwidth,
+            decimation_policy: DecimationPolicy::LowBandwidth,
             packing_enabled: false,
             streaming: StreamingState::new(),
         }
@@ -137,7 +137,7 @@ impl<C> HydraSdr<C> {
             sample_type: self.sample_type,
             sample_rates: self.sample_rates.clone(),
             features: self.features,
-            decimation_mode: self.decimation_mode,
+            decimation_policy: self.decimation_policy,
             packing_enabled: self.packing_enabled,
             streaming: self.streaming.clone(),
         }
@@ -274,7 +274,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         let frequency = config.frequency_hz();
         let sample_rate = config.sample_rate_hz();
         let sample_type = M::FORMAT.sample_type();
-        let decimation_mode = config.decimation_mode_internal();
+        let decimation_policy = config.decimation_policy_internal();
         let port = config.rf_port();
         let gain = config.gain();
         let bias_tee = config.bias_tee();
@@ -305,7 +305,7 @@ impl<C: ControlBackend> HydraSdr<C> {
                 let control = Arc::clone(&control);
                 move |rates| {
                     let rate_config =
-                        sample_rate_config(&rates, sample_type, decimation_mode, sample_rate);
+                        sample_rate_config(&rates, sample_type, decimation_policy, sample_rate);
                     ready(rate_config).and_then(move |selected| {
                         Self::control_in_exact_with(
                             control,
@@ -381,7 +381,7 @@ impl<C: ControlBackend> HydraSdr<C> {
                 let (rates, decimation) = result?;
                 Ok(AppliedConfig {
                     sample_type,
-                    decimation_mode,
+                    decimation_policy,
                     rates,
                     decimation,
                     packing,
@@ -391,7 +391,7 @@ impl<C: ControlBackend> HydraSdr<C> {
 
     fn apply_config_state(&mut self, state: AppliedConfig) {
         self.sample_type = state.sample_type;
-        self.decimation_mode = state.decimation_mode;
+        self.decimation_policy = state.decimation_policy;
         self.sample_rates = state.rates;
         self.streaming
             .set_decimation(state.decimation as usize)
@@ -405,7 +405,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         &mut self,
         samplerate: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        self.set_samplerate_for_mode(samplerate, self.decimation_mode)
+        self.set_samplerate_for_policy(samplerate, self.decimation_policy)
     }
 
     /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
@@ -472,17 +472,17 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.control_out(VendorControlRequest::set_rf_bias(u8::from(enabled)))
     }
 
-    fn set_samplerate_for_mode(
+    fn set_samplerate_for_policy(
         &mut self,
         samplerate: u32,
-        mode: DecimationMode,
+        policy: DecimationPolicy,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         let rates = self.available_samplerates();
         let control = Arc::clone(&self.control);
         let sample_type = self.sample_type;
         rates
             .and_then(move |rates| {
-                let config = sample_rate_config(&rates, sample_type, mode, samplerate);
+                let config = sample_rate_config(&rates, sample_type, policy, samplerate);
                 ready(config).and_then(move |selected| {
                     Self::control_in_exact_with(
                         control,
@@ -498,7 +498,7 @@ impl<C: ControlBackend> HydraSdr<C> {
             .map(move |result| {
                 let decimation = result?;
                 self.streaming.set_decimation(decimation as usize)?;
-                self.decimation_mode = mode;
+                self.decimation_policy = policy;
                 Ok(())
             })
     }
@@ -1025,7 +1025,7 @@ fn gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlRequest> {
 fn sample_rate_config(
     rates: &SampleRateTable,
     sample_type: SampleType,
-    mode: DecimationMode,
+    policy: DecimationPolicy,
     samplerate: u32,
 ) -> Result<SelectedSampleRate> {
     if sample_type == SampleType::Raw {
@@ -1047,7 +1047,7 @@ fn sample_rate_config(
     }
 
     let (hardware_rate, decimation) =
-        sample_rate_hardware_config(rates, mode, samplerate).unwrap_or((samplerate, 1));
+        sample_rate_hardware_config(rates, policy, samplerate).unwrap_or((samplerate, 1));
     if let Some(rate) = rates
         .entries
         .iter()
@@ -1066,7 +1066,7 @@ fn sample_rate_config(
 
 fn sample_rate_hardware_config(
     rates: &SampleRateTable,
-    mode: DecimationMode,
+    policy: DecimationPolicy,
     samplerate: u32,
 ) -> Option<(u32, u32)> {
     let direct_rate = rates
@@ -1075,7 +1075,7 @@ fn sample_rate_hardware_config(
         .filter(|rate| rate.supported_by_converter())
         .find(|rate| rate.rate_hz == samplerate)
         .map(|rate| rate.rate_hz);
-    if mode == DecimationMode::LowBandwidth
+    if policy == DecimationPolicy::LowBandwidth
         && let Some(rate) = direct_rate
     {
         return Some((rate, 1));
@@ -1093,14 +1093,14 @@ fn sample_rate_hardware_config(
                 best = match best {
                     None => Some((hardware_rate, decimation)),
                     Some((best_hw, best_decimation))
-                        if mode == DecimationMode::HighDefinition
+                        if policy == DecimationPolicy::HighDefinition
                             && (hardware_rate > best_hw
                                 || (hardware_rate == best_hw && decimation > best_decimation)) =>
                     {
                         Some((hardware_rate, decimation))
                     }
                     Some((best_hw, best_decimation))
-                        if mode == DecimationMode::LowBandwidth
+                        if policy == DecimationPolicy::LowBandwidth
                             && (hardware_rate < best_hw
                                 || (hardware_rate == best_hw && decimation > best_decimation)) =>
                     {
@@ -1333,11 +1333,11 @@ mod tests {
         assert!(!virtual_rates.contains(&39_062));
         assert_eq!(virtual_rates.last(), Some(&78_125));
         assert_eq!(
-            sample_rate_hardware_config(&rates, DecimationMode::HighDefinition, 39_062),
+            sample_rate_hardware_config(&rates, DecimationPolicy::HighDefinition, 39_062),
             None
         );
         assert_eq!(
-            sample_rate_hardware_config(&rates, DecimationMode::HighDefinition, 78_125),
+            sample_rate_hardware_config(&rates, DecimationPolicy::HighDefinition, 78_125),
             Some((5_000_000, 64))
         );
     }
@@ -1348,7 +1348,7 @@ mod tests {
             sample_rate_config(
                 &legacy_rates(),
                 SampleType::Raw,
-                DecimationMode::LowBandwidth,
+                DecimationPolicy::LowBandwidth,
                 20_000_000,
             )
             .unwrap(),
@@ -1358,7 +1358,7 @@ mod tests {
             sample_rate_config(
                 &legacy_rates(),
                 SampleType::Raw,
-                DecimationMode::LowBandwidth,
+                DecimationPolicy::LowBandwidth,
                 10_000_000,
             )
             .unwrap(),
@@ -1368,7 +1368,7 @@ mod tests {
             sample_rate_config(
                 &legacy_rates(),
                 SampleType::Raw,
-                DecimationMode::LowBandwidth,
+                DecimationPolicy::LowBandwidth,
                 5_000_000,
             )
             .unwrap(),
@@ -1382,7 +1382,7 @@ mod tests {
             sample_rate_config(
                 &legacy_rates(),
                 SampleType::Raw,
-                DecimationMode::LowBandwidth,
+                DecimationPolicy::LowBandwidth,
                 12_000_000,
             )
             .unwrap(),
@@ -1406,7 +1406,7 @@ mod tests {
             sample_rate_config(
                 &rates,
                 SampleType::Float32Iq,
-                DecimationMode::LowBandwidth,
+                DecimationPolicy::LowBandwidth,
                 10_000_000,
             ),
             Err(Error::Unsupported)

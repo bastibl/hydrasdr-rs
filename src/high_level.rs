@@ -505,8 +505,8 @@ impl DeviceBuilder<F32Iq> {
     }
 
     /// Set the firmware/host decimation policy for float IQ samples.
-    pub fn decimation_mode(mut self, value: crate::DecimationMode) -> Self {
-        self.config = self.config.decimation_mode(value);
+    pub fn decimation_policy(mut self, value: crate::DecimationPolicy) -> Self {
+        self.config = self.config.decimation_policy(value);
         self
     }
 }
