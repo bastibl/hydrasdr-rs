@@ -25,7 +25,7 @@ fn hardware_open_and_query_device_info() {
     );
     assert!(!info.rf_ports.is_empty());
     assert_eq!(info.active_state.rf_port().unwrap(), RfPort::Rx0);
-    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(0));
+    assert_eq!(info.active_state.gain(GainStage::Lna).unwrap(), Some(10));
     assert_eq!(info.active_state.gain(GainStage::Mixer).unwrap(), Some(0));
     assert_eq!(info.active_state.gain(GainStage::Vga).unwrap(), Some(0));
     assert!(!info.active_state.agc_enabled().unwrap());

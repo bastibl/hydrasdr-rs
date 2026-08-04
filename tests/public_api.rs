@@ -8,7 +8,16 @@ fn public_default_config_initializes_all_hardware_settings() {
     let config = Config::default();
 
     assert_eq!(config.rf_port(), Some(RfPort::Rx0));
-    assert_eq!(config.gain(), GainConfig::default());
+    assert_eq!(
+        config.gain(),
+        GainConfig::Manual {
+            lna: Some(10),
+            mixer: Some(0),
+            vga: Some(0),
+            lna_agc: Some(false),
+            mixer_agc: Some(false),
+        }
+    );
     assert_eq!(config.bias_tee(), Some(false));
 }
 
