@@ -59,6 +59,8 @@ pub enum ErrorKind {
     NotFound,
     /// The logical device session has been shut down.
     DeviceClosed,
+    /// The physical device was disconnected from USB.
+    DeviceDisconnected,
     /// The device or USB resource is already in use.
     Busy,
     /// The requested operation is not supported by the backend or device.
@@ -105,11 +107,15 @@ impl Error {
             Self::Unsupported => ErrorKind::Unsupported,
             Self::StreamClosed { .. } => ErrorKind::StreamClosed,
             Self::Usb(err) => match err.kind() {
+                nusb::ErrorKind::Disconnected => ErrorKind::DeviceDisconnected,
                 nusb::ErrorKind::Busy => ErrorKind::Busy,
                 nusb::ErrorKind::NotFound => ErrorKind::NotFound,
                 nusb::ErrorKind::Unsupported => ErrorKind::Unsupported,
                 _ => ErrorKind::Usb,
             },
+            Self::Transfer(nusb::transfer::TransferError::Disconnected) => {
+                ErrorKind::DeviceDisconnected
+            }
             Self::Transfer(_) => ErrorKind::Usb,
             Self::Operation { source, .. } => source.kind(),
             Self::Protocol { .. } => ErrorKind::Other,
@@ -181,6 +187,14 @@ mod tests {
     }
 
     #[test]
+    fn transfer_disconnects_have_their_own_error_category() {
+        let err = Error::from(nusb::transfer::TransferError::Disconnected);
+
+        assert_eq!(err.kind(), ErrorKind::DeviceDisconnected);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
     fn configuration_errors_expose_the_field_and_reason() {
         let err = Error::invalid_config("frequency_hz", "must be nonzero");
 
@@ -204,6 +218,15 @@ mod tests {
             err.to_string()
                 .starts_with("applying receiver configuration: USB transfer error:")
         );
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn operation_context_preserves_disconnect_category() {
+        let err =
+            Error::from(nusb::transfer::TransferError::Disconnected).at("reading receiver samples");
+
+        assert_eq!(err.kind(), ErrorKind::DeviceDisconnected);
         assert!(err.source().is_some());
     }
 
