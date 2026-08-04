@@ -198,11 +198,10 @@ impl<M: SampleMode> Device<M> {
         &self.config
     }
 
-    /// Return the cached sample rates advertised for the active sample format.
+    /// Return the fixed sample rates supported for the active sample format.
     ///
     /// Converted F32 IQ results include exactly representable effective rates
-    /// produced by host-side decimation. The table is fetched while applying
-    /// the active configuration, so this accessor performs no USB requests.
+    /// produced by host-side decimation. This accessor performs no USB requests.
     pub fn sample_rates(&self) -> Vec<u32> {
         self.inner.sample_rates()
     }
@@ -254,11 +253,8 @@ impl<M: SampleMode> Device<M> {
     /// Set only the requested sample rate.
     ///
     /// The value is a real ADC rate for [`SampleFormat::RawAdc`] and an
-    /// effective complex output rate for [`SampleFormat::F32Iq`]. A value
-    /// returned by [`Device::sample_rates`] is selected exactly. Other values
-    /// must be exactly encodable in the firmware's kHz request parameter: raw
-    /// rates in 1,000 Hz steps and F32 IQ rates in 500 Hz steps. Firmware may
-    /// still reject such fallback rates.
+    /// effective complex output rate for [`SampleFormat::F32Iq`]. The value must
+    /// be one of the fixed rates returned by [`Device::sample_rates`].
     pub fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
@@ -552,7 +548,7 @@ impl<C: ControlBackend> Drop for DeviceInner<C> {
 /// let config = Device::builder()
 ///     .raw_adc()
 ///     .frequency_hz(433_920_000)
-///     .sample_rate_hz(2_000_000)
+///     .sample_rate_hz(5_000_000)
 ///     .gain(GainPreset::Sensitivity(8))
 ///     .config()?;
 ///
@@ -608,9 +604,8 @@ impl<M: SampleMode> DeviceBuilder<M> {
     ///
     /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
     /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
-    /// host-side decimation. The builder validates only USB protocol encoding,
-    /// not firmware support. Query [`Device::sample_rates`] on an opened device
-    /// for its advertised rates.
+    /// host-side decimation. The builder accepts exactly the fixed rates
+    /// returned by [`Device::sample_rates`] for the selected format.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config = self.config.sample_rate_hz(value);
         self
@@ -1852,10 +1847,6 @@ mod tests {
                 && request == VendorControlRequest::set_packing(0)
             {
                 Err(nusb::transfer::TransferError::Fault.into())
-            } else if request == VendorControlRequest::get_samplerates_count(false) {
-                Ok(1u32.to_le_bytes().to_vec())
-            } else if request == VendorControlRequest::get_samplerates(1, false) {
-                Ok(10_000_000u32.to_le_bytes().to_vec())
             } else {
                 Ok(vec![1])
             };

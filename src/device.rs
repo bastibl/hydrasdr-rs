@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use nusb::MaybeFuture;
 
-use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
+use crate::commands::{ReceiverMode, VendorRequest};
 use crate::config::{Config, RfPort, SampleMode};
 use crate::discovery;
 use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
 use crate::rfone::{
-    RFONE_HARDCODED_CAPS, RFONE_LINEARITY_LNA_GAINS, RFONE_LINEARITY_MIXER_GAINS,
-    RFONE_LINEARITY_VGA_GAINS, RFONE_LNA_MAX_GAIN, RFONE_MIXER_MAX_GAIN, RFONE_RX_ENDPOINT,
-    RFONE_SENSITIVITY_LNA_GAINS, RFONE_SENSITIVITY_MIXER_GAINS, RFONE_SENSITIVITY_VGA_GAINS,
-    RFONE_VGA_MAX_GAIN, rf_port_infos,
+    RFONE_F32_IQ_SAMPLE_RATES, RFONE_FIRMWARE_IQ_SAMPLE_RATES, RFONE_LINEARITY_LNA_GAINS,
+    RFONE_LINEARITY_MIXER_GAINS, RFONE_LINEARITY_VGA_GAINS, RFONE_RAW_ADC_SAMPLE_RATES,
+    RFONE_RX_ENDPOINT, RFONE_SENSITIVITY_LNA_GAINS, RFONE_SENSITIVITY_MIXER_GAINS,
+    RFONE_SENSITIVITY_VGA_GAINS, rf_port_infos,
 };
 use crate::streaming::{
     AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, StreamingState,
@@ -20,16 +20,12 @@ use crate::streaming::{
 use crate::streaming::{DirectRxStream, RawRxStream, StreamingBackend, StreamingStats};
 use crate::types::{BoardId, DecimationPolicy, DeviceInfo, PartIdSerialNo, SampleType};
 use crate::usb::control::{
-    ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial, decode_u32_le_words,
+    ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
 };
 
 const EXPECTED_FW_PREFIX: &str = "HydraSDR RF";
 const VERSION_STRING_SIZE: usize = 255;
-const MIN_SAMPLERATE_BY_VALUE: u32 = 10_000;
 const MAX_FREQ_HZ: u64 = 10_000_000_000;
-const LEGACY_ADC_BITS: u8 = 12;
-const DATA_FORMAT_RAW_ADC: u8 = 0;
-const DECIMATION_FACTORS_ASC: [u32; 7] = [1, 2, 4, 8, 16, 32, 64];
 const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 
 /// Direct HydraSDR device handle.
@@ -40,8 +36,6 @@ const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
 pub(crate) struct HydraSdr<C = NusbControl> {
     control: Arc<C>,
     sample_type: SampleType,
-    sample_rates: SampleRateTable,
-    features: Option<u32>,
     decimation_policy: DecimationPolicy,
     packing_enabled: bool,
     streaming: StreamingState,
@@ -50,60 +44,14 @@ pub(crate) struct HydraSdr<C = NusbControl> {
 struct AppliedConfig {
     sample_type: SampleType,
     decimation_policy: DecimationPolicy,
-    rates: SampleRateTable,
     decimation: u32,
     packing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SampleRateInfo {
-    rate_hz: u32,
-    adc_bits: u8,
-    data_format: u8,
-    firmware_index: usize,
-}
-
-impl SampleRateInfo {
-    fn legacy(rate_hz: u32, firmware_index: usize) -> Self {
-        Self {
-            rate_hz,
-            adc_bits: LEGACY_ADC_BITS,
-            data_format: DATA_FORMAT_RAW_ADC,
-            firmware_index,
-        }
-    }
-
-    fn supported_by_converter(self) -> bool {
-        self.adc_bits == LEGACY_ADC_BITS && self.data_format == DATA_FORMAT_RAW_ADC
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SampleRateTable {
-    entries: Vec<SampleRateInfo>,
-    extended: bool,
-}
-
-impl SampleRateTable {
-    fn legacy(rates: Vec<u32>) -> Self {
-        Self {
-            entries: rates
-                .into_iter()
-                .enumerate()
-                .map(|(index, rate_hz)| SampleRateInfo::legacy(rate_hz, index))
-                .collect(),
-            extended: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SelectedSampleRate {
     param: u16,
-    hardware_rate: u32,
     decimation: u32,
-    response_len: usize,
-    expected_encoding: Option<(u8, u8)>,
 }
 
 impl<C> HydraSdr<C> {
@@ -112,8 +60,6 @@ impl<C> HydraSdr<C> {
         Self {
             control: Arc::new(control),
             sample_type: SampleType::Float32Iq,
-            sample_rates: SampleRateTable::legacy(Vec::new()),
-            features: None,
             decimation_policy: DecimationPolicy::LowBandwidth,
             packing_enabled: false,
             streaming: StreamingState::new(),
@@ -135,8 +81,6 @@ impl<C> HydraSdr<C> {
         Self {
             control: Arc::clone(&self.control),
             sample_type: self.sample_type,
-            sample_rates: self.sample_rates.clone(),
-            features: self.features,
             decimation_policy: self.decimation_policy,
             packing_enabled: self.packing_enabled,
             streaming: self.streaming.clone(),
@@ -173,50 +117,17 @@ impl<C: ControlBackend> HydraSdr<C> {
             .map(|result| result.and_then(|data| decode_part_id_serial(&data)))
     }
 
-    /// Read the primary firmware capability word.
-    ///
-    /// If firmware does not support the request, the RFOne hard-coded C capability mask is used.
-    pub(crate) fn get_capabilities(&self) -> impl MaybeFuture<Output = Result<u32>> + use<C> {
-        self.control_in_exact(VendorControlRequest::get_capabilities(0), 4)
-            .map(|result| match result {
-                Ok(data) => Ok(u32::from_le_bytes(
-                    data[0..4].try_into().expect("four bytes"),
-                )),
-                Err(error) if is_unsupported_request(&error) => Ok(RFONE_HARDCODED_CAPS),
-                Err(error) => Err(error),
-            })
-    }
-
-    /// Read reserved capability words when firmware provides them.
-    pub(crate) fn get_capabilities_reserved(
-        &self,
-    ) -> impl MaybeFuture<Output = Result<[u32; 3]>> + use<C> {
-        let first = self.control_in_exact(VendorControlRequest::get_capabilities(1), 4);
-        let second = self.control_in_exact(VendorControlRequest::get_capabilities(2), 4);
-        let third = self.control_in_exact(VendorControlRequest::get_capabilities(3), 4);
-        ready(Ok([0; 3]))
-            .and_then(move |reserved| capability_word(first, reserved, 0))
-            .and_then(move |reserved| capability_word(second, reserved, 1))
-            .and_then(move |reserved| capability_word(third, reserved, 2))
-    }
-
     pub(crate) fn into_device_info(
-        mut self,
+        self,
     ) -> impl MaybeFuture<Output = Result<(Self, DeviceInfo)>> + use<C> {
         let fetch = self.fetch_device_info();
-        fetch.map(move |result| {
-            let (info, features) = result?;
-            self.features = Some(features);
-            Ok((self, info))
-        })
+        fetch.map(move |result| Ok((self, result?)))
     }
 
-    fn fetch_device_info(&self) -> impl MaybeFuture<Output = Result<(DeviceInfo, u32)>> + use<C> {
+    fn fetch_device_info(&self) -> impl MaybeFuture<Output = Result<DeviceInfo>> + use<C> {
         let board_id = self.board_id_read();
         let firmware = self.version_string_read();
         let part_serial = self.board_partid_serialno_read();
-        let features = self.get_capabilities();
-        let reserved = self.get_capabilities_reserved();
         board_id
             .map_err(|error| error.at("reading HydraSDR board ID"))
             .and_then(move |board_id| {
@@ -229,19 +140,9 @@ impl<C: ControlBackend> HydraSdr<C> {
                     .map_err(|error| error.at("reading HydraSDR part ID and serial number"))
                     .map_ok(move |part_serial| (board_id, firmware, part_serial))
             })
-            .and_then(move |(board_id, firmware, part_serial)| {
-                features.map_ok(move |features| (board_id, firmware, part_serial, features))
-            })
-            .and_then(move |(board_id, firmware, part_serial, features)| {
-                reserved
-                    .map_ok(move |reserved| (board_id, firmware, part_serial, features, reserved))
-            })
             .map(move |result| {
-                let (board_id, firmware, part_serial, features, reserved) = result?;
-                Ok((
-                    build_device_info(board_id, firmware, part_serial, features, reserved),
-                    features,
-                ))
+                let (board_id, firmware, part_serial) = result?;
+                Ok(build_device_info(board_id, firmware, part_serial))
             })
     }
 
@@ -280,12 +181,9 @@ impl<C: ControlBackend> HydraSdr<C> {
         let bias_tee = config.bias_tee();
         let packing = config.packing_internal();
 
-        let rates = self.available_samplerates();
         let control = Arc::clone(&self.control);
-        let gain_requests = gain_config_plan(
-            gain,
-            self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0,
-        );
+        let rate_config = sample_rate_config(sample_type, decimation_policy, sample_rate);
+        let gain_requests = gain_config_plan(gain);
         let mut gain_requests = gain_requests.into_iter();
         let [gain0, gain1, gain2, gain3, gain4] = [
             gain_requests.next(),
@@ -300,25 +198,18 @@ impl<C: ControlBackend> HydraSdr<C> {
         );
 
         set_frequency
-            .and_then(move |()| rates)
+            .and_then(move |()| ready(rate_config))
             .and_then({
                 let control = Arc::clone(&control);
-                move |rates| {
-                    let rate_config =
-                        sample_rate_config(&rates, sample_type, decimation_policy, sample_rate);
-                    ready(rate_config).and_then(move |selected| {
-                        Self::control_in_exact_with(
-                            control,
-                            VendorControlRequest::set_samplerate(
-                                selected.param,
-                                selected.response_len,
-                            ),
-                            selected.response_len,
-                        )
-                        .map(move |result| {
-                            validate_samplerate_response(&selected, &result?)?;
-                            Ok((rates, selected.decimation))
-                        })
+                move |selected| {
+                    Self::control_in_exact_with(
+                        control,
+                        VendorControlRequest::set_samplerate(selected.param),
+                        1,
+                    )
+                    .map(move |result| {
+                        validate_samplerate_response(&result?)?;
+                        Ok(selected.decimation)
                     })
                 }
             })
@@ -377,11 +268,10 @@ impl<C: ControlBackend> HydraSdr<C> {
                 .map_ok(move |_| state)
             })
             .map(move |result| {
-                let (rates, decimation) = result?;
+                let decimation = result?;
                 Ok(AppliedConfig {
                     sample_type,
                     decimation_policy,
-                    rates,
                     decimation,
                     packing,
                 })
@@ -391,7 +281,6 @@ impl<C: ControlBackend> HydraSdr<C> {
     fn apply_config_state(&mut self, state: AppliedConfig) {
         self.sample_type = state.sample_type;
         self.decimation_policy = state.decimation_policy;
-        self.sample_rates = state.rates;
         self.streaming
             .set_decimation(state.decimation as usize)
             .expect("validated HydraSDR decimation factor");
@@ -399,7 +288,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.streaming.set_packing(state.packing);
     }
 
-    /// Set sample rate by C-compatible index or kHz fallback calculation.
+    /// Set a supported sample rate by its fixed firmware-table index.
     pub(crate) fn set_samplerate(
         &mut self,
         samplerate: u32,
@@ -430,10 +319,7 @@ impl<C: ControlBackend> HydraSdr<C> {
         &mut self,
         gain: crate::GainConfig,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let requests = gain_config_plan(
-            gain,
-            self.features.unwrap_or(0) & Capability::ExtendedGain.bits() != 0,
-        );
+        let requests = gain_config_plan(gain);
         self.apply_gain_plan(requests)
     }
 
@@ -497,22 +383,19 @@ impl<C: ControlBackend> HydraSdr<C> {
         samplerate: u32,
         policy: DecimationPolicy,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let rates = self.available_samplerates();
         let control = Arc::clone(&self.control);
         let sample_type = self.sample_type;
-        rates
-            .and_then(move |rates| {
-                let config = sample_rate_config(&rates, sample_type, policy, samplerate);
-                ready(config).and_then(move |selected| {
-                    Self::control_in_exact_with(
-                        control,
-                        VendorControlRequest::set_samplerate(selected.param, selected.response_len),
-                        selected.response_len,
-                    )
-                    .map(move |result| {
-                        validate_samplerate_response(&selected, &result?)?;
-                        Ok(selected.decimation)
-                    })
+        let config = sample_rate_config(sample_type, policy, samplerate);
+        ready(config)
+            .and_then(move |selected| {
+                Self::control_in_exact_with(
+                    control,
+                    VendorControlRequest::set_samplerate(selected.param),
+                    1,
+                )
+                .map(move |result| {
+                    validate_samplerate_response(&result?)?;
+                    Ok(selected.decimation)
                 })
             })
             .map(move |result| {
@@ -521,59 +404,6 @@ impl<C: ControlBackend> HydraSdr<C> {
                 self.decimation_policy = policy;
                 Ok(())
             })
-    }
-
-    fn fetch_samplerates(&self) -> impl MaybeFuture<Output = Result<SampleRateTable>> + use<C> {
-        let control = Arc::clone(&self.control);
-        let extended = self
-            .features
-            .is_some_and(|features| features & Capability::ExtendedSamplerates.bits() != 0);
-        Self::control_in_exact_with(
-            Arc::clone(&control),
-            VendorControlRequest::get_samplerates_count(false),
-            4,
-        )
-        .map(|result| {
-            result.map(|data| u32::from_le_bytes(data[0..4].try_into().expect("four bytes")))
-        })
-        .and_then(move |count| {
-            let extended_control = Arc::clone(&control);
-            Self::control_in_exact_with(
-                control,
-                VendorControlRequest::get_samplerates(count, false),
-                count as usize * 4,
-            )
-            .map(|result| result.and_then(|data| decode_u32_le_words(&data)))
-            .and_then(move |rates| {
-                if !extended {
-                    return Either::left(ready(Ok(SampleRateTable::legacy(rates))));
-                }
-
-                let expected_len = count as usize * 8;
-                Either::right(
-                    Self::control_in_exact_with(
-                        extended_control,
-                        VendorControlRequest::get_samplerates(count, true),
-                        expected_len,
-                    )
-                    .map(move |result| match result {
-                        Ok(data) => decode_extended_samplerates(&data, &rates),
-                        Err(error) if is_unsupported_request(&error) => {
-                            Ok(SampleRateTable::legacy(rates))
-                        }
-                        Err(error) => Err(error),
-                    }),
-                )
-            })
-        })
-    }
-
-    fn available_samplerates(&self) -> impl MaybeFuture<Output = Result<SampleRateTable>> + use<C> {
-        if self.sample_rates.entries.is_empty() {
-            Either::left(self.fetch_samplerates())
-        } else {
-            Either::right(ready(Ok(self.sample_rates.clone())))
-        }
     }
 
     fn apply_gain_plan(
@@ -652,9 +482,9 @@ impl<C: ControlBackend> HydraSdr<C> {
 impl<C> HydraSdr<C> {
     pub(crate) fn visible_sample_rates(&self) -> Vec<u32> {
         if !self.sample_type_is_iq() {
-            return build_raw_samplerates(&self.sample_rates.entries);
+            return RFONE_RAW_ADC_SAMPLE_RATES.to_vec();
         }
-        build_virtual_samplerates(&self.sample_rates.entries)
+        RFONE_F32_IQ_SAMPLE_RATES.to_vec()
     }
 
     fn sample_type_is_iq(&self) -> bool {
@@ -851,30 +681,10 @@ impl HydraSdr<NusbControl> {
     }
 }
 
-fn capability_word<F>(
-    operation: F,
-    mut reserved: [u32; 3],
-    index: usize,
-) -> impl MaybeFuture<Output = Result<[u32; 3]>>
-where
-    F: MaybeFuture<Output = Result<Vec<u8>>>,
-{
-    operation.map(move |result| match result {
-        Ok(data) => {
-            reserved[index] = u32::from_le_bytes(data[0..4].try_into().expect("four bytes"));
-            Ok(reserved)
-        }
-        Err(error) if is_unsupported_request(&error) => Ok(reserved),
-        Err(error) => Err(error),
-    })
-}
-
 fn build_device_info(
     _board_id: BoardId,
     firmware_version: String,
     part_serial: PartIdSerialNo,
-    _features: u32,
-    _features_reserved: [u32; 3],
 ) -> DeviceInfo {
     DeviceInfo {
         serial: serial_from_part_id(&part_serial),
@@ -896,53 +706,22 @@ fn gain_step<C: ControlBackend>(
     }
 }
 
-fn gain_config_plan(gain: crate::GainConfig, extended: bool) -> Vec<VendorControlRequest> {
+fn gain_config_plan(gain: crate::GainConfig) -> Vec<VendorControlRequest> {
     match gain {
-        crate::GainConfig::Preset(crate::GainPreset::Linearity(value)) => {
-            if extended {
-                extended_gain_plan(GainType::Linearity, value)
-            } else {
-                gain_plan(GainType::Linearity, value)
-            }
-        }
-        crate::GainConfig::Preset(crate::GainPreset::Sensitivity(value)) => {
-            if extended {
-                extended_gain_plan(GainType::Sensitivity, value)
-            } else {
-                gain_plan(GainType::Sensitivity, value)
-            }
-        }
-        crate::GainConfig::Stages { lna, mixer, vga } if extended => {
-            let mut requests = Vec::new();
-            let mut push = |gain_type, value| {
-                requests.push(VendorControlRequest::unified_gain(gain_type, value));
-            };
-            push_stage_gain(&mut push, GainType::Lna, GainType::LnaAgc, lna);
-            push_stage_gain(&mut push, GainType::Mixer, GainType::MixerAgc, mixer);
-            push(GainType::Vga, vga);
-            requests
-        }
+        crate::GainConfig::Preset(crate::GainPreset::Linearity(value)) => preset_gain_plan(
+            value,
+            &RFONE_LINEARITY_VGA_GAINS,
+            &RFONE_LINEARITY_MIXER_GAINS,
+            &RFONE_LINEARITY_LNA_GAINS,
+        ),
+        crate::GainConfig::Preset(crate::GainPreset::Sensitivity(value)) => preset_gain_plan(
+            value,
+            &RFONE_SENSITIVITY_VGA_GAINS,
+            &RFONE_SENSITIVITY_MIXER_GAINS,
+            &RFONE_SENSITIVITY_LNA_GAINS,
+        ),
         crate::GainConfig::Stages { lna, mixer, vga } => legacy_stage_gain_plan(lna, mixer, vga),
     }
-}
-
-fn push_stage_gain(
-    push: &mut impl FnMut(GainType, u8),
-    gain_type: GainType,
-    agc_type: GainType,
-    gain: crate::StageGain,
-) {
-    match gain {
-        crate::StageGain::Manual(value) => {
-            push(agc_type, 0);
-            push(gain_type, value);
-        }
-        crate::StageGain::Agc => push(agc_type, 1),
-    }
-}
-
-fn extended_gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlRequest> {
-    vec![VendorControlRequest::unified_gain(gain_type, value)]
 }
 
 fn legacy_stage_gain_plan(
@@ -972,98 +751,55 @@ fn legacy_stage_gain_plan(
     requests
 }
 
-fn gain_plan(gain_type: GainType, value: u8) -> Vec<VendorControlRequest> {
-    let legacy = |request, max_value| {
-        vec![VendorControlRequest::legacy_gain(
-            request,
-            value.min(max_value),
-        )]
-    };
-    match gain_type {
-        GainType::Lna => legacy(VendorRequest::SetLnaGain, RFONE_LNA_MAX_GAIN),
-        GainType::Mixer => legacy(VendorRequest::SetMixerGain, RFONE_MIXER_MAX_GAIN),
-        GainType::Vga => legacy(VendorRequest::SetVgaGain, RFONE_VGA_MAX_GAIN),
-        GainType::LnaAgc => legacy(VendorRequest::SetLnaAgc, 1),
-        GainType::MixerAgc => legacy(VendorRequest::SetMixerAgc, 1),
-        GainType::Linearity | GainType::Sensitivity => {
-            let index = reverse_gain_table_index(value);
-            let (vga, mixer, lna) = if gain_type == GainType::Linearity {
-                (
-                    RFONE_LINEARITY_VGA_GAINS[index],
-                    RFONE_LINEARITY_MIXER_GAINS[index],
-                    RFONE_LINEARITY_LNA_GAINS[index],
-                )
-            } else {
-                (
-                    RFONE_SENSITIVITY_VGA_GAINS[index],
-                    RFONE_SENSITIVITY_MIXER_GAINS[index],
-                    RFONE_SENSITIVITY_LNA_GAINS[index],
-                )
-            };
-            vec![
-                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
-                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
-                VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, vga),
-                VendorControlRequest::legacy_gain(VendorRequest::SetMixerGain, mixer),
-                VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, lna),
-            ]
-        }
-    }
+fn preset_gain_plan(
+    value: u8,
+    vga_gains: &[u8],
+    mixer_gains: &[u8],
+    lna_gains: &[u8],
+) -> Vec<VendorControlRequest> {
+    let index = reverse_gain_table_index(value);
+    vec![
+        VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
+        VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
+        VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, vga_gains[index]),
+        VendorControlRequest::legacy_gain(VendorRequest::SetMixerGain, mixer_gains[index]),
+        VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, lna_gains[index]),
+    ]
 }
 
 fn sample_rate_config(
-    rates: &SampleRateTable,
     sample_type: SampleType,
     policy: DecimationPolicy,
     samplerate: u32,
 ) -> Result<SelectedSampleRate> {
     if sample_type == SampleType::Raw {
-        if let Some(rate) = rates
-            .entries
+        let index = RFONE_RAW_ADC_SAMPLE_RATES
             .iter()
-            .find(|rate| rate.rate_hz.checked_mul(2) == Some(samplerate))
-        {
-            return selected_table_rate(rates.extended, *rate, samplerate, 1);
-        }
-
+            .position(|rate| *rate == samplerate)
+            .ok_or_else(unsupported_sample_rate)?;
         return Ok(SelectedSampleRate {
-            param: sample_rate_param(&[], sample_type, samplerate)?,
-            hardware_rate: samplerate,
+            param: checked_vendor_param(index)?,
             decimation: 1,
-            response_len: if rates.extended { 4 } else { 1 },
-            expected_encoding: None,
         });
     }
 
     let (hardware_rate, decimation) =
-        sample_rate_hardware_config(rates, policy, samplerate).unwrap_or((samplerate, 1));
-    if let Some(rate) = rates
-        .entries
+        sample_rate_hardware_config(policy, samplerate).ok_or_else(unsupported_sample_rate)?;
+    let index = RFONE_FIRMWARE_IQ_SAMPLE_RATES
         .iter()
-        .find(|rate| rate.rate_hz == hardware_rate)
-    {
-        return selected_table_rate(rates.extended, *rate, hardware_rate, decimation);
-    }
+        .position(|rate| *rate == hardware_rate)
+        .expect("selected rate comes from the fixed firmware table");
     Ok(SelectedSampleRate {
-        param: sample_rate_param(&[], sample_type, hardware_rate)?,
-        hardware_rate,
+        param: checked_vendor_param(index)?,
         decimation,
-        response_len: if rates.extended { 4 } else { 1 },
-        expected_encoding: None,
     })
 }
 
-fn sample_rate_hardware_config(
-    rates: &SampleRateTable,
-    policy: DecimationPolicy,
-    samplerate: u32,
-) -> Option<(u32, u32)> {
-    let direct_rate = rates
-        .entries
+fn sample_rate_hardware_config(policy: DecimationPolicy, samplerate: u32) -> Option<(u32, u32)> {
+    let direct_rate = RFONE_FIRMWARE_IQ_SAMPLE_RATES
         .iter()
-        .filter(|rate| rate.supported_by_converter())
-        .find(|rate| rate.rate_hz == samplerate)
-        .map(|rate| rate.rate_hz);
+        .find(|rate| **rate == samplerate)
+        .copied();
     if policy == DecimationPolicy::LowBandwidth
         && let Some(rate) = direct_rate
     {
@@ -1071,12 +807,7 @@ fn sample_rate_hardware_config(
     }
 
     let mut best = None;
-    for hardware_rate in rates
-        .entries
-        .iter()
-        .filter(|rate| rate.supported_by_converter())
-        .map(|rate| rate.rate_hz)
-    {
+    for hardware_rate in RFONE_FIRMWARE_IQ_SAMPLE_RATES {
         for decimation in DECIMATION_FACTORS_DESC {
             if hardware_rate % decimation == 0 && hardware_rate / decimation == samplerate {
                 best = match best {
@@ -1103,126 +834,21 @@ fn sample_rate_hardware_config(
     best
 }
 
-fn selected_table_rate(
-    extended: bool,
-    rate: SampleRateInfo,
-    hardware_rate: u32,
-    decimation: u32,
-) -> Result<SelectedSampleRate> {
-    if !rate.supported_by_converter() {
-        return Err(Error::Unsupported);
-    }
-    Ok(SelectedSampleRate {
-        param: checked_vendor_param(rate.firmware_index)?,
-        hardware_rate,
-        decimation,
-        response_len: if extended { 4 } else { 1 },
-        expected_encoding: extended.then_some((rate.adc_bits, rate.data_format)),
-    })
+fn unsupported_sample_rate() -> Error {
+    Error::invalid_config(
+        "sample_rate_hz",
+        "is not supported by RFOne and the host decimator",
+    )
 }
 
-fn sample_rate_param(
-    rates: &[SampleRateInfo],
-    sample_type: SampleType,
-    hardware_rate: u32,
-) -> Result<u16> {
-    if let Some(rate) = rates.iter().find(|rate| rate.rate_hz == hardware_rate) {
-        if !rate.supported_by_converter() {
-            return Err(Error::Unsupported);
-        }
-        return checked_vendor_param(rate.firmware_index);
-    }
-    if hardware_rate < MIN_SAMPLERATE_BY_VALUE {
-        return Err(Error::invalid_config(
-            "sample_rate_hz",
-            "cannot be encoded for the firmware",
-        ));
-    }
-    let rate = if sample_type == SampleType::Float32Iq {
-        hardware_rate.checked_mul(2).ok_or_else(|| {
-            Error::invalid_config(
-                "sample_rate_hz",
-                "cannot be encoded exactly for the firmware",
-            )
-        })?
-    } else {
-        hardware_rate
-    };
-    if !rate.is_multiple_of(1_000) {
-        return Err(Error::invalid_config(
-            "sample_rate_hz",
-            "cannot be encoded exactly for the firmware",
-        ));
-    }
-    checked_vendor_param(rate / 1000)
-}
-
-fn validate_samplerate_response(selected: &SelectedSampleRate, response: &[u8]) -> Result<()> {
+fn validate_samplerate_response(response: &[u8]) -> Result<()> {
     if response.first().copied() != Some(1) {
         return Err(Error::protocol(
             "set sample rate",
             "firmware rejected the selected sample rate",
         ));
     }
-    if selected.response_len == 1 {
-        return Ok(());
-    }
-
-    let encoding = (response[1], response[2]);
-    if selected
-        .expected_encoding
-        .is_some_and(|expected| expected != encoding)
-    {
-        return Err(Error::protocol(
-            "set sample rate",
-            "firmware response does not match extended sample-rate metadata",
-        ));
-    }
-    if encoding != (LEGACY_ADC_BITS, DATA_FORMAT_RAW_ADC) {
-        return Err(Error::Unsupported);
-    }
     Ok(())
-}
-
-fn decode_extended_samplerates(data: &[u8], basic_rates: &[u32]) -> Result<SampleRateTable> {
-    let (entries, remainder) = data.as_chunks::<8>();
-    if !remainder.is_empty() || entries.len() != basic_rates.len() {
-        return Err(Error::protocol(
-            "decode extended sample rates",
-            "response length does not match the basic sample-rate table",
-        ));
-    }
-
-    let mut decoded = Vec::with_capacity(entries.len());
-    for (firmware_index, (entry, basic_rate)) in entries.iter().zip(basic_rates.iter()).enumerate()
-    {
-        let rate_hz = u32::from_le_bytes(entry[0..4].try_into().expect("four bytes"));
-        if rate_hz != *basic_rate {
-            return Err(Error::protocol(
-                "decode extended sample rates",
-                "extended and basic sample-rate tables disagree",
-            ));
-        }
-        decoded.push(SampleRateInfo {
-            rate_hz,
-            adc_bits: entry[4],
-            data_format: entry[5],
-            firmware_index,
-        });
-    }
-
-    Ok(SampleRateTable {
-        entries: decoded,
-        extended: true,
-    })
-}
-
-fn is_unsupported_request(error: &Error) -> bool {
-    match error {
-        Error::Transfer(nusb::transfer::TransferError::Stall) => true,
-        Error::Operation { source, .. } => is_unsupported_request(source),
-        _ => false,
-    }
 }
 
 fn decode_c_string(bytes: &[u8]) -> String {
@@ -1248,41 +874,9 @@ fn checked_vendor_param(value: impl TryInto<u16>) -> Result<u16> {
         .map_err(|_| Error::protocol("encode vendor request", "parameter exceeds 16 bits"))
 }
 
-fn build_virtual_samplerates(hardware_rates: &[SampleRateInfo]) -> Vec<u32> {
-    let mut rates = Vec::with_capacity(hardware_rates.len() * DECIMATION_FACTORS_ASC.len());
-    for hardware_rate in hardware_rates
-        .iter()
-        .filter(|rate| rate.supported_by_converter())
-        .map(|rate| rate.rate_hz)
-    {
-        for decimation in DECIMATION_FACTORS_ASC {
-            if hardware_rate % decimation != 0 {
-                continue;
-            }
-            let effective = hardware_rate / decimation;
-            if effective >= MIN_SAMPLERATE_BY_VALUE {
-                rates.push(effective);
-            }
-        }
-    }
-    rates.sort_unstable_by(|a, b| b.cmp(a));
-    rates.dedup();
-    rates
-}
-
-fn build_raw_samplerates(firmware_iq_rates: &[SampleRateInfo]) -> Vec<u32> {
-    firmware_iq_rates
-        .iter()
-        .filter(|rate| rate.supported_by_converter())
-        .filter_map(|rate| rate.rate_hz.checked_mul(2))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const FIRMWARE_IQ_RATES: [u32; 3] = [10_000_000, 5_000_000, 2_500_000];
 
     #[derive(Clone, Copy, Debug)]
     struct FailingControl(nusb::transfer::TransferError);
@@ -1303,171 +897,112 @@ mod tests {
         }
     }
 
-    fn legacy_rates() -> SampleRateTable {
-        SampleRateTable::legacy(FIRMWARE_IQ_RATES.to_vec())
+    fn selection(param: u16, decimation: u32) -> SelectedSampleRate {
+        SelectedSampleRate { param, decimation }
     }
 
-    fn legacy_selection(param: u16, hardware_rate: u32) -> SelectedSampleRate {
-        SelectedSampleRate {
-            param,
-            hardware_rate,
-            decimation: 1,
-            response_len: 1,
-            expected_encoding: None,
+    #[test]
+    fn visible_samplerates_come_from_the_fixed_tables() {
+        let mut device =
+            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Fault));
+        assert_eq!(device.visible_sample_rates(), RFONE_F32_IQ_SAMPLE_RATES);
+
+        device.sample_type = SampleType::Raw;
+        assert_eq!(device.visible_sample_rates(), RFONE_RAW_ADC_SAMPLE_RATES);
+    }
+
+    #[test]
+    fn fixed_iq_table_contains_exact_decimator_outputs() {
+        let mut derived = Vec::new();
+        for hardware_rate in RFONE_FIRMWARE_IQ_SAMPLE_RATES {
+            for decimation in DECIMATION_FACTORS_DESC {
+                if hardware_rate % decimation == 0 {
+                    derived.push(hardware_rate / decimation);
+                }
+            }
         }
-    }
+        derived.sort_unstable_by(|a, b| b.cmp(a));
+        derived.dedup();
 
-    #[test]
-    fn raw_samplerates_are_reported_in_adc_samples_per_second() {
+        assert_eq!(derived, RFONE_F32_IQ_SAMPLE_RATES);
         assert_eq!(
-            build_raw_samplerates(&legacy_rates().entries),
-            [20_000_000, 10_000_000, 5_000_000]
-        );
-    }
-
-    #[test]
-    fn virtual_samplerates_require_exact_integer_decimation() {
-        let rates = legacy_rates();
-        let virtual_rates = build_virtual_samplerates(&rates.entries);
-
-        assert!(!virtual_rates.contains(&39_062));
-        assert_eq!(virtual_rates.last(), Some(&78_125));
-        assert_eq!(
-            sample_rate_hardware_config(&rates, DecimationPolicy::HighDefinition, 39_062),
+            sample_rate_hardware_config(DecimationPolicy::HighDefinition, 39_062),
             None
         );
         assert_eq!(
-            sample_rate_hardware_config(&rates, DecimationPolicy::HighDefinition, 78_125),
+            sample_rate_hardware_config(DecimationPolicy::HighDefinition, 78_125),
             Some((5_000_000, 64))
         );
         let selected = sample_rate_config(
-            &rates,
             SampleType::Float32Iq,
             DecimationPolicy::HighDefinition,
             78_125,
         )
         .unwrap();
-        assert_eq!(selected.param, 1);
-        assert_eq!(selected.hardware_rate, 5_000_000);
-        assert_eq!(selected.decimation, 64);
+        assert_eq!(selected, selection(1, 64));
     }
 
     #[test]
     fn raw_samplerates_map_back_to_firmware_iq_rate_indices() {
         assert_eq!(
-            sample_rate_config(
-                &legacy_rates(),
-                SampleType::Raw,
-                DecimationPolicy::LowBandwidth,
-                20_000_000,
-            )
-            .unwrap(),
-            legacy_selection(0, 20_000_000)
+            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 20_000_000,)
+                .unwrap(),
+            selection(0, 1)
         );
         assert_eq!(
-            sample_rate_config(
-                &legacy_rates(),
-                SampleType::Raw,
-                DecimationPolicy::LowBandwidth,
-                10_000_000,
-            )
-            .unwrap(),
-            legacy_selection(1, 10_000_000)
+            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 10_000_000,)
+                .unwrap(),
+            selection(1, 1)
         );
         assert_eq!(
-            sample_rate_config(
-                &legacy_rates(),
-                SampleType::Raw,
-                DecimationPolicy::LowBandwidth,
-                5_000_000,
-            )
-            .unwrap(),
-            legacy_selection(2, 5_000_000)
+            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 5_000_000,)
+                .unwrap(),
+            selection(2, 1)
         );
     }
 
     #[test]
-    fn non_table_raw_samplerates_use_adc_rate_value_encoding() {
+    fn decimation_policy_selects_among_fixed_firmware_rates() {
         assert_eq!(
             sample_rate_config(
-                &legacy_rates(),
-                SampleType::Raw,
-                DecimationPolicy::LowBandwidth,
-                12_000_000,
-            )
-            .unwrap(),
-            legacy_selection(12_000, 12_000_000)
-        );
-    }
-
-    #[test]
-    fn non_table_samplerates_must_be_exactly_representable() {
-        assert!(matches!(
-            sample_rate_config(
-                &legacy_rates(),
-                SampleType::Raw,
-                DecimationPolicy::LowBandwidth,
-                12_000_001,
-            ),
-            Err(Error::InvalidConfig { .. })
-        ));
-        assert!(matches!(
-            sample_rate_config(
-                &legacy_rates(),
                 SampleType::Float32Iq,
                 DecimationPolicy::LowBandwidth,
-                10_000_001,
-            ),
-            Err(Error::InvalidConfig { .. })
-        ));
+                2_500_000,
+            )
+            .unwrap(),
+            selection(2, 1)
+        );
         assert_eq!(
             sample_rate_config(
-                &legacy_rates(),
+                SampleType::Float32Iq,
+                DecimationPolicy::HighDefinition,
+                2_500_000,
+            )
+            .unwrap(),
+            selection(0, 4)
+        );
+    }
+
+    #[test]
+    fn non_table_samplerates_are_rejected() {
+        assert!(matches!(
+            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 12_000_000,),
+            Err(Error::InvalidConfig { .. })
+        ));
+        assert!(matches!(
+            sample_rate_config(
                 SampleType::Float32Iq,
                 DecimationPolicy::LowBandwidth,
                 10_000_500,
-            )
-            .unwrap(),
-            legacy_selection(20_001, 10_000_500)
-        );
-    }
-
-    #[test]
-    fn extended_samplerates_reject_unsupported_adc_encodings() {
-        let rates = SampleRateTable {
-            entries: vec![SampleRateInfo {
-                rate_hz: 10_000_000,
-                adc_bits: 8,
-                data_format: DATA_FORMAT_RAW_ADC,
-                firmware_index: 0,
-            }],
-            extended: true,
-        };
-
-        assert!(matches!(
-            sample_rate_config(
-                &rates,
-                SampleType::Float32Iq,
-                DecimationPolicy::LowBandwidth,
-                10_000_000,
             ),
-            Err(Error::Unsupported)
+            Err(Error::InvalidConfig { .. })
         ));
-        assert!(build_virtual_samplerates(&rates.entries).is_empty());
     }
 
     #[test]
-    fn extended_samplerate_response_must_match_queried_metadata() {
-        let selected = SelectedSampleRate {
-            param: 0,
-            hardware_rate: 10_000_000,
-            decimation: 1,
-            response_len: 4,
-            expected_encoding: Some((12, DATA_FORMAT_RAW_ADC)),
-        };
-
-        assert!(validate_samplerate_response(&selected, &[1, 12, 0, 0]).is_ok());
-        assert!(validate_samplerate_response(&selected, &[1, 8, 0, 0]).is_err());
+    fn samplerate_response_must_accept_the_fixed_index() {
+        assert!(validate_samplerate_response(&[1]).is_ok());
+        assert!(validate_samplerate_response(&[0]).is_err());
     }
 
     #[test]
@@ -1479,7 +1014,7 @@ mod tests {
         };
 
         assert_eq!(
-            gain_config_plan(gain, false),
+            gain_config_plan(gain),
             [
                 VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
                 VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, 3),
@@ -1490,38 +1025,30 @@ mod tests {
     }
 
     #[test]
-    fn stage_gain_config_produces_a_complete_extended_plan() {
-        let gain = crate::GainConfig::Stages {
-            lna: crate::StageGain::Manual(3),
-            mixer: crate::StageGain::Agc,
-            vga: 4,
-        };
+    fn preset_gain_config_uses_the_fixed_rfone_table() {
+        let value = 12;
+        let index = reverse_gain_table_index(value);
 
         assert_eq!(
-            gain_config_plan(gain, true),
+            gain_config_plan(crate::GainConfig::Preset(crate::GainPreset::Linearity(
+                value,
+            ))),
             [
-                VendorControlRequest::unified_gain(GainType::LnaAgc, 0),
-                VendorControlRequest::unified_gain(GainType::Lna, 3),
-                VendorControlRequest::unified_gain(GainType::MixerAgc, 1),
-                VendorControlRequest::unified_gain(GainType::Vga, 4),
+                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
+                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
+                VendorControlRequest::legacy_gain(
+                    VendorRequest::SetVgaGain,
+                    RFONE_LINEARITY_VGA_GAINS[index],
+                ),
+                VendorControlRequest::legacy_gain(
+                    VendorRequest::SetMixerGain,
+                    RFONE_LINEARITY_MIXER_GAINS[index],
+                ),
+                VendorControlRequest::legacy_gain(
+                    VendorRequest::SetLnaGain,
+                    RFONE_LINEARITY_LNA_GAINS[index],
+                ),
             ]
-        );
-    }
-
-    #[test]
-    fn capabilities_only_fall_back_for_an_unsupported_request() {
-        assert_eq!(
-            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Stall))
-                .get_capabilities()
-                .wait()
-                .unwrap(),
-            RFONE_HARDCODED_CAPS
-        );
-        assert!(
-            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Fault))
-                .get_capabilities()
-                .wait()
-                .is_err()
         );
     }
 }

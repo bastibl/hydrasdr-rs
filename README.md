@@ -18,7 +18,7 @@ Implemented:
 - USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
 - Internal USB control implementation for board/version/serial queries, sample-rate configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
-- Complex float 32-bit sample conversion with device-reported rates and host-side decimation factors from 1x through 64x.
+- Complex float 32-bit sample conversion with the fixed RFOne rates and host-side decimation factors from 1x through 64x.
 - Low-level raw ADC block streaming for applications that need raw USB blocks.
 
 TODO:
@@ -64,11 +64,11 @@ cargo check --target wasm32-unknown-unknown
 
 ## Configuration validation
 
-`Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before returning a `Config` or touching hardware. Every `Config` obtainable through the public API is therefore valid; applying one does not repeat its static validation. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
+`Config::builder()` and `Device::builder()` default to converted `F32Iq` samples and validate static RFOne and USB protocol constraints before returning a `Config` or touching hardware. Every `Config` obtainable through the public API is therefore valid; applying one does not repeat its static validation. Call `.raw_adc()` to select `RawAdc`; format-specific options then become available at compile time. `Device::sample_rates()` returns the fixed supported table for the active sample format without querying the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
 `Device::config()` returns the typed configuration last successfully applied through the driver. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged. The device remains the authoritative control handle while its typed stream exists.
 
-The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) are not RFOne hardware ranges. Advertised rates are selected exactly, including F32 IQ rates produced by exact host-side decimation. A non-advertised raw rate is accepted only in 1,000 Hz steps and a non-advertised F32 IQ rate only in 500 Hz steps, so the firmware request is never silently rounded. Firmware may still reject such fallback rates.
+The supported raw ADC rates are 20 MHz, 10 MHz, and 5 MHz. The supported F32 IQ rates are 10 MHz, 5 MHz, 2.5 MHz, 1.25 MHz, 625 kHz, 312.5 kHz, 156.25 kHz, and 78.125 kHz. Other rates are rejected during static configuration validation.
 
 Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mixer `0..=15`, and VGA `0..=15`.
 
@@ -145,7 +145,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. Explicit shutdown returns `Busy` until the stream is stopped; a stopped stream may remain claimed, but cannot be restarted after shutdown. Native device drops run the same hardware shutdown sequence best-effort. WebUSB cannot issue asynchronous control transfers from `Drop`, so browser applications must await explicit device shutdown. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
+The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. Explicit shutdown returns `Busy` until the stream is stopped; a stopped stream may remain claimed, but cannot be restarted after shutdown. Native device drops run the same hardware shutdown sequence best-effort. WebUSB drops schedule asynchronous cleanup in the background, but browser applications must await explicit shutdown when they need to observe completion or an error. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
 
@@ -156,7 +156,7 @@ Opening a real HydraSDR RFOne requires permission to access the USB device. On L
 - legacy: `1d50:60a1`
 - official: `38af:0001`
 
-The default configuration disables RF input bias power. If an application enables it, explicitly await or wait for `shutdown()` before releasing the device. Native drops attempt receiver-off and bias-off cleanup as a safety net, but cannot report failures; WebUSB drops cannot issue asynchronous cleanup commands at all.
+The default configuration disables RF input bias power. If an application enables it, explicitly await or wait for `shutdown()` before releasing the device. Native drops attempt receiver-off and bias-off cleanup as a safety net; WebUSB drops schedule the same best-effort cleanup. Neither drop path can report failures.
 
 Example udev rule skeleton:
 

@@ -1,12 +1,19 @@
 //! RFOne constants and descriptor helpers used by the high-level driver.
 
-use crate::commands::Capability;
 use crate::types::RfPortInfo;
 
 /// Number of queued streaming transfers used by the C RFOne path.
 pub(crate) const RFONE_TRANSFER_COUNT: u32 = 16;
 /// Bulk-IN endpoint used for RX samples.
 pub(crate) const RFONE_RX_ENDPOINT: u8 = 0x81;
+/// Complex firmware sample rates, in firmware table/index order.
+pub(crate) const RFONE_FIRMWARE_IQ_SAMPLE_RATES: [u32; 3] = [10_000_000, 5_000_000, 2_500_000];
+/// Raw real-ADC rates corresponding to the firmware sample-rate table.
+pub(crate) const RFONE_RAW_ADC_SAMPLE_RATES: [u32; 3] = [20_000_000, 10_000_000, 5_000_000];
+/// Effective complex rates supported by the firmware table and host decimator.
+pub(crate) const RFONE_F32_IQ_SAMPLE_RATES: [u32; 8] = [
+    10_000_000, 5_000_000, 2_500_000, 1_250_000, 625_000, 312_500, 156_250, 78_125,
+];
 pub(crate) const RFONE_LNA_MAX_GAIN: u8 = 14;
 pub(crate) const RFONE_MIXER_MAX_GAIN: u8 = 15;
 pub(crate) const RFONE_VGA_MAX_GAIN: u8 = 15;
@@ -32,18 +39,6 @@ pub(crate) const RFONE_SENSITIVITY_MIXER_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
 pub(crate) const RFONE_SENSITIVITY_LNA_GAINS: [u8; RFONE_GAIN_TABLE_SIZE] = [
     14, 14, 14, 14, 14, 14, 14, 14, 14, 13, 12, 12, 9, 9, 8, 7, 6, 5, 3, 2, 1, 0,
 ];
-
-pub(crate) const RFONE_HARDCODED_CAPS: u32 = Capability::Rx.bits()
-    | Capability::LnaGain.bits()
-    | Capability::MixerGain.bits()
-    | Capability::VgaGain.bits()
-    | Capability::LnaAgc.bits()
-    | Capability::MixerAgc.bits()
-    | Capability::LinearityGain.bits()
-    | Capability::SensitivityGain.bits()
-    | Capability::BiasTee.bits()
-    | Capability::Packing.bits()
-    | Capability::RfPortSelect.bits();
 
 /// Return user-facing RF port metadata for RFOne.
 pub(crate) fn rf_port_infos() -> Vec<RfPortInfo> {

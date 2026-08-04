@@ -89,36 +89,30 @@ fn public_config_builder_validates_rfone_frequency_range() {
 }
 
 #[test]
-fn public_config_builder_validates_vendor_parameter_ranges() {
-    assert!(
-        Config::builder()
-            .raw_adc()
-            .sample_rate_hz(65_535_999)
-            .build()
-            .is_ok()
-    );
-    assert!(Config::builder().sample_rate_hz(32_767_999).build().is_ok());
+fn public_config_builder_validates_fixed_sample_rate_tables() {
+    for rate in [20_000_000, 10_000_000, 5_000_000] {
+        assert!(
+            Config::builder()
+                .raw_adc()
+                .sample_rate_hz(rate)
+                .build()
+                .is_ok()
+        );
+    }
+    for rate in [
+        10_000_000, 5_000_000, 2_500_000, 1_250_000, 625_000, 312_500, 156_250, 78_125,
+    ] {
+        assert!(Config::builder().sample_rate_hz(rate).build().is_ok());
+    }
 
-    assert!(
-        Config::builder()
-            .raw_adc()
-            .sample_rate_hz(65_536_000)
-            .build()
-            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
-    );
-    assert!(
-        Config::builder()
-            .sample_rate_hz(32_768_000)
-            .build()
-            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
-    );
-    assert!(
-        Config::builder()
-            .raw_adc()
-            .sample_rate_hz(u32::MAX)
-            .build()
-            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
-    );
+    for rate in [12_000_000, 2_000_000, 39_062, u32::MAX] {
+        assert!(
+            Config::builder()
+                .sample_rate_hz(rate)
+                .build()
+                .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
+        );
+    }
 }
 
 #[test]

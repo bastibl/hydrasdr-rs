@@ -2,19 +2,15 @@
 
 use crate::errors::{Error, Result};
 use crate::rfone::{
-    RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ, RFONE_MIXER_MAX_GAIN,
-    RFONE_VGA_MAX_GAIN,
+    RFONE_F32_IQ_SAMPLE_RATES, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
+    RFONE_MIXER_MAX_GAIN, RFONE_RAW_ADC_SAMPLE_RATES, RFONE_VGA_MAX_GAIN,
 };
 use crate::types::{DecimationPolicy, SampleType};
 use core::marker::PhantomData;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
-const MIN_SAMPLE_RATE_HZ: u32 = 10_000;
 const MAX_PRESET_GAIN: u8 = 21;
-const MAX_VENDOR_INDEX_OR_KHZ: u32 = u16::MAX as u32;
-const MAX_RAW_SAMPLE_RATE_HZ: u32 = MAX_VENDOR_INDEX_OR_KHZ * 1_000 + 999;
-const MAX_F32_IQ_SAMPLE_RATE_HZ: u32 = (((MAX_VENDOR_INDEX_OR_KHZ + 1) * 1_000) - 1) / 2;
 
 /// Device selection used by [`crate::DeviceBuilder`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,14 +41,13 @@ pub enum RfPort {
 pub enum SampleFormat {
     /// Raw ADC USB blocks measured in real ADC samples per second.
     ///
-    /// Use [`crate::Device::sample_rates`] to query the rates advertised by an
-    /// opened device.
+    /// Use [`crate::Device::sample_rates`] to inspect the fixed RFOne rates.
     RawAdc,
     /// Converted 32-bit float IQ samples measured in complex samples per second.
     ///
     /// The driver may select a higher firmware rate and apply host-side
     /// decimation to produce the requested effective rate. Use
-    /// [`crate::Device::sample_rates`] to query the advertised effective rates.
+    /// [`crate::Device::sample_rates`] to inspect the supported effective rates.
     F32Iq,
 }
 
@@ -165,8 +160,7 @@ impl From<GainPreset> for GainConfig {
 /// AGCs, and sets 35 dB total gain as LNA 14 dB, mixer 15 dB, and VGA 6 dB.
 ///
 /// Building a config validates static RFOne and USB protocol constraints
-/// without opening hardware. It does not prove that connected firmware
-/// advertises a sample rate.
+/// without opening hardware, including the fixed sample-rate table.
 /// Every `Config` obtainable through the public API has passed this validation.
 ///
 /// ```
@@ -359,7 +353,7 @@ impl Config<F32Iq> {
 /// let config = Config::builder()
 ///     .raw_adc()
 ///     .frequency_hz(915_000_000)
-///     .sample_rate_hz(2_000_000)
+///     .sample_rate_hz(5_000_000)
 ///     .packing(true)
 ///     .build()?;
 ///
@@ -393,13 +387,8 @@ impl<M: SampleMode> ConfigBuilder<M> {
     ///
     /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
     /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
-    /// host-side decimation. [`ConfigBuilder`] validates only the broad USB
-    /// protocol bounds (`10_000..=65_535_999` Hz for raw ADC and
-    /// `10_000..=32_767_999` Hz for F32 IQ). These are not advertised hardware
-    /// ranges. Query [`crate::Device::sample_rates`] after opening a device for
-    /// its advertised rates. A non-advertised raw rate is accepted only when it
-    /// is a multiple of 1,000 Hz; a non-advertised F32 IQ rate must be a
-    /// multiple of 500 Hz. Firmware may still reject such fallback rates.
+    /// host-side decimation. [`ConfigBuilder`] accepts exactly the fixed rates
+    /// returned by [`crate::Device::sample_rates`] for the selected format.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config.sample_rate_hz = value;
         self
@@ -484,20 +473,14 @@ pub(crate) fn validate_frequency(value: u64) -> Result<()> {
 }
 
 pub(crate) fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> Result<()> {
-    if value < MIN_SAMPLE_RATE_HZ {
-        return Err(Error::invalid_config(
-            "sample_rate_hz",
-            "must be at least 10_000 Hz",
-        ));
-    }
-    let max_hz = match sample_format {
-        SampleFormat::RawAdc => MAX_RAW_SAMPLE_RATE_HZ,
-        SampleFormat::F32Iq => MAX_F32_IQ_SAMPLE_RATE_HZ,
+    let supported = match sample_format {
+        SampleFormat::RawAdc => RFONE_RAW_ADC_SAMPLE_RATES.as_slice(),
+        SampleFormat::F32Iq => RFONE_F32_IQ_SAMPLE_RATES.as_slice(),
     };
-    if value > max_hz {
+    if !supported.contains(&value) {
         return Err(Error::invalid_config(
             "sample_rate_hz",
-            "must fit the HydraSDR vendor request parameter",
+            "is not supported by RFOne and the host decimator",
         ));
     }
     Ok(())

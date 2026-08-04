@@ -25,48 +25,6 @@ pub(crate) enum VendorRequest {
     SetLnaAgc = 17,
     SetMixerAgc = 18,
     SetRfBiasCmd = 20,
-    GetSamplerates = 25,
     SetPacking = 26,
     SetRfPort = 28,
-    GetCapabilities = 29,
-    SetGain = 33,
-}
-
-/// Capability bit positions reported by the firmware.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum Capability {
-    LnaGain = 0,
-    MixerGain = 2,
-    VgaGain = 4,
-    LnaAgc = 5,
-    MixerAgc = 7,
-    LinearityGain = 9,
-    SensitivityGain = 10,
-    BiasTee = 11,
-    Packing = 12,
-    RfPortSelect = 13,
-    Rx = 20,
-    ExtendedSamplerates = 21,
-    ExtendedGain = 22,
-}
-
-impl Capability {
-    /// Return the single-bit capability mask for this capability.
-    pub(crate) const fn bits(self) -> u32 {
-        1u32 << (self as u8)
-    }
-}
-
-/// Gain selector values used by the legacy and extended gain APIs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum GainType {
-    Lna = 0,
-    Mixer = 2,
-    Vga = 4,
-    Linearity = 5,
-    Sensitivity = 6,
-    LnaAgc = 7,
-    MixerAgc = 9,
 }

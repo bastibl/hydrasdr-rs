@@ -7,7 +7,7 @@ use nusb::transfer::{
 };
 use nusb::{Endpoint, MaybeFuture};
 
-use crate::commands::{GainType, ReceiverMode, VendorRequest};
+use crate::commands::{ReceiverMode, VendorRequest};
 use crate::config::RfPort;
 use crate::constants::CTRL_TIMEOUT_MS;
 use crate::errors::{Error, Result};
@@ -137,35 +137,14 @@ impl VendorControlRequest {
         Self::out_request(VendorRequest::SetFreq, 0, 0, freq_hz.to_le_bytes().to_vec())
     }
 
-    /// Encode the C samplerate count query.
-    pub(crate) fn get_samplerates_count(extended: bool) -> Self {
-        Self::in_request(VendorRequest::GetSamplerates, u16::from(extended), 0, 4)
-    }
-
-    /// Encode the C samplerate list query.
-    pub(crate) fn get_samplerates(count: u32, extended: bool) -> Self {
-        let entry_size = if extended { 8 } else { 4 };
-        Self::in_request(
-            VendorRequest::GetSamplerates,
-            u16::from(extended),
-            count as u16,
-            count as usize * entry_size,
-        )
-    }
-
-    /// Encode samplerate selection by index or kHz-derived value.
-    pub(crate) fn set_samplerate(index_or_khz: u16, response_len: usize) -> Self {
-        Self::in_request(VendorRequest::SetSamplerate, 0, index_or_khz, response_len)
+    /// Select one entry from the fixed RFOne sample-rate table.
+    pub(crate) fn set_samplerate(table_index: u16) -> Self {
+        Self::in_request(VendorRequest::SetSamplerate, 0, table_index, 1)
     }
 
     /// Encode one of the legacy gain requests.
     pub(crate) fn legacy_gain(request: VendorRequest, value: u8) -> Self {
         Self::in_request(request, 0, value as u16, 1)
-    }
-
-    /// Encode the extended gain request.
-    pub(crate) fn unified_gain(gain_type: GainType, value: u8) -> Self {
-        Self::in_request(VendorRequest::SetGain, gain_type as u16, value as u16, 1)
     }
 
     /// Encode RF bias tee control.
@@ -196,11 +175,6 @@ impl VendorControlRequest {
     /// Encode board part/serial read.
     pub(crate) fn board_partid_serialno_read() -> Self {
         Self::in_request(VendorRequest::BoardPartIdSerialNoRead, 0, 0, 24)
-    }
-
-    /// Encode capability-word read.
-    pub(crate) fn get_capabilities(word: u16) -> Self {
-        Self::in_request(VendorRequest::GetCapabilities, 0, word, 4)
     }
 }
 
