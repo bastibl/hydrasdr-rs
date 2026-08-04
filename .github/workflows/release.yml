@@ -26,6 +26,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
       - name: Validate tag matches crate version
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
