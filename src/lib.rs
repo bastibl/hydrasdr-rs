@@ -1,4 +1,4 @@
-//! HydraSDR RFOne API on top of `nusb`.
+//! Rust-native HydraSDR RFOne driver built on `nusb`.
 //!
 //! One-shot USB operations implement [`MaybeFuture`]: await them in async code,
 //! or call [`MaybeFuture::wait`] on native targets. Receive streams own their
