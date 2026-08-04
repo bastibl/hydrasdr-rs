@@ -14,9 +14,10 @@ Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`C
 
 Implemented:
 
-- Sync and async device builders, reusable receiver `Config`, gain and sample-rate selectors, capability-gated bandwidth configuration, and pull-style receive streams.
+- Sync and async device builders, reusable receiver `Config`, gain and sample-rate selectors, and pull-style receive streams.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
-- Internal USB control implementation for board/version/serial queries, samplerate and bandwidth configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
+- Internal USB control implementation for board/version/serial queries, sample-rate configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
+- Capability-gated protocol support for manual analog bandwidth on future devices or firmware; current RFOne firmware does not advertise this capability.
 - Executor-agnostic async API counterparts.
 - Complex float 32-bit sample conversion with device-reported rates and host-side decimation factors from 1x through 64x.
 - Low-level raw ADC block streaming for applications that need raw USB blocks.
@@ -64,7 +65,7 @@ cargo check --target wasm32-unknown-unknown
 
 ## Configuration validation
 
-`Config::builder()` and `Device::builder()` validate static RFOne and USB protocol constraints before they touch hardware. This validation is not capability discovery: use `Device::sample_rates()` to query the effective rates advertised for the active sample format. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
+`Config::builder()` and `Device::builder()` validate static RFOne and USB protocol constraints before they touch hardware. This validation is not capability discovery: use `Device::sample_rates()` to inspect the effective rates fetched and cached for the active sample format while opening or configuring the device. A raw rate counts real ADC samples per second; an `F32Iq` rate counts complex output samples per second after any host-side decimation.
 
 The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
 
