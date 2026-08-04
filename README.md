@@ -17,7 +17,6 @@ Implemented:
 - Sync and async device builders, reusable receiver `Config`, gain and sample-rate selectors, and pull-style receive streams.
 - USB discovery/open for HydraSDR RFOne VID/PID pairs, including WebUSB.
 - Internal USB control implementation for board/version/serial queries, sample-rate configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
-- Capability-gated protocol support for manual analog bandwidth on future devices or firmware; current RFOne firmware does not advertise this capability.
 - Executor-agnostic async API counterparts.
 - Complex float 32-bit sample conversion with device-reported rates and host-side decimation factors from 1x through 64x.
 - Low-level raw ADC block streaming for applications that need raw USB blocks.
@@ -70,8 +69,6 @@ cargo check --target wasm32-unknown-unknown
 `Device::config()` returns the typed configuration last successfully applied through the driver; `RxStream::config()` carries the same snapshot while the stream owns the device. RFOne controls are write-only, so this is not hardware readback. Failed or cancelled operations leave the snapshot unchanged.
 
 The broad static bounds (`10_000..=65_535_999` Hz for raw ADC and `10_000..=32_767_999` Hz for F32 IQ) only describe values representable by the firmware's 16-bit kHz request encoding. They are not RFOne hardware ranges. Values outside the advertised table are left for firmware to accept or reject.
-
-Manual analog bandwidth uses the same kind of capability-gated vendor protocol. Current RFOne firmware does not advertise bandwidth control, so `Bandwidth::ManualHz`, `Device::bandwidths()`, and the focused bandwidth setters return `Error::Unsupported` when applied. The `1_000..=65_535_999` Hz validation bound is only the request encoding range for firmware that implements that capability.
 
 Preset gains accept indexes `0..=21`. Manual RFOne gains accept LNA `0..=14`, mixer `0..=15`, and VGA `0..=15`.
 

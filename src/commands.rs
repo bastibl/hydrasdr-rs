@@ -29,8 +29,6 @@ pub(crate) enum VendorRequest {
     SetPacking = 26,
     SetRfPort = 28,
     GetCapabilities = 29,
-    SetBandwidth = 30,
-    GetBandwidths = 31,
     SetGain = 33,
 }
 
@@ -48,7 +46,6 @@ pub(crate) enum Capability {
     BiasTee = 11,
     Packing = 12,
     RfPortSelect = 13,
-    Bandwidth = 18,
     Rx = 20,
     ExtendedSamplerates = 21,
     ExtendedGain = 22,

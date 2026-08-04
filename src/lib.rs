@@ -68,8 +68,7 @@ mod types;
 mod usb;
 
 pub use config::{
-    Bandwidth, Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat,
-    SampleMode,
+    Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat, SampleMode,
 };
 pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
 pub use discovery::DeviceDescriptor;

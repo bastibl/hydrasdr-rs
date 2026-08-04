@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nusb::MaybeFuture;
 
 use crate::commands::{Capability, GainType, ReceiverMode, VendorRequest};
-use crate::config::{Bandwidth, Config, RfPort, SampleMode};
+use crate::config::{Config, RfPort, SampleMode};
 use crate::discovery;
 use crate::errors::{Error, Result};
 use crate::maybe_future::{Either, MaybeFutureExt, ready};
@@ -26,7 +26,6 @@ use crate::usb::control::{
 const EXPECTED_FW_PREFIX: &str = "HydraSDR RF";
 const VERSION_STRING_SIZE: usize = 255;
 const MIN_SAMPLERATE_BY_VALUE: u32 = 10_000;
-const MIN_BANDWIDTH_BY_VALUE: u32 = 1_000;
 const MAX_FREQ_HZ: u64 = 10_000_000_000;
 const LEGACY_ADC_BITS: u8 = 12;
 const DATA_FORMAT_RAW_ADC: u8 = 0;
@@ -42,7 +41,6 @@ pub(crate) struct HydraSdr<C = NusbControl> {
     control: Arc<C>,
     sample_type: SampleType,
     sample_rates: SampleRateTable,
-    bandwidths: Vec<u32>,
     features: Option<u32>,
     decimation_mode: DecimationMode,
     packing_enabled: bool,
@@ -52,8 +50,6 @@ pub(crate) struct HydraSdr<C = NusbControl> {
 struct AppliedConfig {
     sample_type: SampleType,
     decimation_mode: DecimationMode,
-    bandwidth: Bandwidth,
-    bandwidths: Vec<u32>,
     rates: SampleRateTable,
     decimation: u32,
     packing: bool,
@@ -117,7 +113,6 @@ impl<C> HydraSdr<C> {
             control: Arc::new(control),
             sample_type: SampleType::Float32Iq,
             sample_rates: SampleRateTable::legacy(Vec::new()),
-            bandwidths: Vec::new(),
             features: None,
             decimation_mode: DecimationMode::LowBandwidth,
             packing_enabled: false,
@@ -262,16 +257,11 @@ impl<C: ControlBackend> HydraSdr<C> {
         let sample_rate = config.sample_rate_hz();
         let sample_type = M::FORMAT.sample_type();
         let decimation_mode = config.decimation_mode_internal();
-        let bandwidth = config.bandwidth();
         let port = config.rf_port();
         let gain = config.gain();
         let bias_tee = config.bias_tee();
         let packing = config.packing_internal();
 
-        let bandwidths = match bandwidth {
-            Bandwidth::Auto => Either::left(ready(Ok(Vec::new()))),
-            Bandwidth::ManualHz(_) => Either::right(self.available_bandwidths()),
-        };
         let rates = self.available_samplerates();
         let control = Arc::clone(&self.control);
         let gain_requests = gain_config_plan(
@@ -292,24 +282,10 @@ impl<C: ControlBackend> HydraSdr<C> {
         );
 
         set_frequency
-            .and_then(move |()| bandwidths)
+            .and_then(move |()| rates)
             .and_then({
                 let control = Arc::clone(&control);
-                move |bandwidths| {
-                    let request = match bandwidth {
-                        Bandwidth::Auto => Ok(None),
-                        Bandwidth::ManualHz(hz) => bandwidth_param(&bandwidths, hz)
-                            .map(|param| Some(VendorControlRequest::set_bandwidth(param))),
-                    };
-                    ready(request).and_then(move |request| {
-                        optional_control_in(control, request).map_ok(move |_| bandwidths)
-                    })
-                }
-            })
-            .and_then(move |bandwidths| rates.map_ok(move |rates| (bandwidths, rates)))
-            .and_then({
-                let control = Arc::clone(&control);
-                move |(bandwidths, rates)| {
+                move |rates| {
                     let rate_config =
                         sample_rate_config(&rates, sample_type, decimation_mode, sample_rate);
                     ready(rate_config).and_then(move |selected| {
@@ -323,7 +299,7 @@ impl<C: ControlBackend> HydraSdr<C> {
                         )
                         .map(move |result| {
                             validate_samplerate_response(&selected, &result?)?;
-                            Ok((bandwidths, rates, selected.decimation))
+                            Ok((rates, selected.decimation))
                         })
                     })
                 }
@@ -384,12 +360,10 @@ impl<C: ControlBackend> HydraSdr<C> {
                 .map_ok(move |_| state)
             })
             .map(move |result| {
-                let (bandwidths, rates, decimation) = result?;
+                let (rates, decimation) = result?;
                 Ok(AppliedConfig {
                     sample_type,
                     decimation_mode,
-                    bandwidth,
-                    bandwidths,
                     rates,
                     decimation,
                     packing,
@@ -401,9 +375,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         self.sample_type = state.sample_type;
         self.decimation_mode = state.decimation_mode;
         self.sample_rates = state.rates;
-        if matches!(state.bandwidth, Bandwidth::ManualHz(_)) {
-            self.bandwidths = state.bandwidths;
-        }
         self.streaming
             .set_decimation(state.decimation as usize)
             .expect("validated HydraSDR decimation factor");
@@ -417,38 +388,6 @@ impl<C: ControlBackend> HydraSdr<C> {
         samplerate: u32,
     ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
         self.set_samplerate_for_mode(samplerate, self.decimation_mode)
-    }
-
-    /// Read supported bandwidths with the C count-then-list protocol.
-    pub(crate) fn get_bandwidths(
-        &mut self,
-    ) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
-        let fetch = self.available_bandwidths();
-        fetch.map(move |result| {
-            self.bandwidths = result?;
-            Ok(self.bandwidths.clone())
-        })
-    }
-
-    /// Set analog bandwidth by C-compatible index or kHz fallback calculation.
-    pub(crate) fn set_bandwidth(
-        &mut self,
-        bandwidth: u32,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let bandwidths = self.available_bandwidths();
-        let control = Arc::clone(&self.control);
-        bandwidths
-            .and_then(move |bandwidths| {
-                let param = bandwidth_param(&bandwidths, bandwidth);
-                ready(param).and_then(move |param| {
-                    Self::control_in_exact_with(
-                        control,
-                        VendorControlRequest::set_bandwidth(param),
-                        1,
-                    )
-                })
-            })
-            .map(|result| result.map(|_| ()))
     }
 
     /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
@@ -596,41 +535,6 @@ impl<C: ControlBackend> HydraSdr<C> {
             Either::left(self.fetch_samplerates())
         } else {
             Either::right(ready(Ok(self.sample_rates.clone())))
-        }
-    }
-
-    fn fetch_bandwidths(&self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<C> {
-        let control = Arc::clone(&self.control);
-        Self::control_in_exact_with(
-            Arc::clone(&control),
-            VendorControlRequest::get_bandwidths_count(),
-            4,
-        )
-        .map(|result| {
-            result.map(|data| u32::from_le_bytes(data[0..4].try_into().expect("four bytes")))
-        })
-        .and_then(move |count| {
-            Self::control_in_exact_with(
-                control,
-                VendorControlRequest::get_bandwidths(count),
-                count as usize * 4,
-            )
-            .map(|result| result.and_then(|data| decode_u32_le_words(&data)))
-        })
-    }
-
-    fn available_bandwidths(&self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<C> {
-        if self
-            .features
-            .is_some_and(|features| features & Capability::Bandwidth.bits() == 0)
-        {
-            Either::left(ready(Err(Error::Unsupported)))
-        } else {
-            Either::right(if self.bandwidths.is_empty() {
-                Either::left(self.fetch_bandwidths())
-            } else {
-                Either::right(ready(Ok(self.bandwidths.clone())))
-            })
         }
     }
 
@@ -1263,22 +1167,6 @@ fn validate_samplerate_response(selected: &SelectedSampleRate, response: &[u8]) 
         return Err(Error::Unsupported);
     }
     Ok(())
-}
-
-fn bandwidth_param(bandwidths: &[u32], bandwidth: u32) -> Result<u16> {
-    if let Some(index) = bandwidths.iter().position(|value| *value == bandwidth) {
-        return checked_vendor_param(index);
-    }
-    if bandwidth >= MIN_BANDWIDTH_BY_VALUE {
-        return checked_vendor_param(bandwidth / MIN_BANDWIDTH_BY_VALUE);
-    }
-    if bandwidth < bandwidths.len() as u32 {
-        return checked_vendor_param(bandwidth);
-    }
-    Err(Error::invalid_config(
-        "bandwidth_hz",
-        "cannot be encoded as a firmware bandwidth index or kHz value",
-    ))
 }
 
 fn decode_extended_samplerates(data: &[u8], basic_rates: &[u32]) -> Result<SampleRateTable> {

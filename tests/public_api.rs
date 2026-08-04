@@ -1,6 +1,6 @@
 use hydrasdr_rs::{
-    Bandwidth, Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq, GainConfig,
-    GainPreset, RawAdc, RfPort, SampleFormat,
+    Config, Device, DeviceBuilder, DeviceInfo, Error, ErrorKind, F32Iq, GainConfig, GainPreset,
+    RawAdc, RfPort, SampleFormat,
 };
 
 fn assert_f32_builder(_: DeviceBuilder<F32Iq>) {}
@@ -40,7 +40,6 @@ fn public_config_builder_uses_ergonomic_types() {
     let config = Config::builder()
         .frequency_hz(144_500_000)
         .sample_rate_hz(10_000_000)
-        .bandwidth(Bandwidth::Auto)
         .raw_adc()
         .rf_port(RfPort::Rx0)
         .gain(GainPreset::Linearity(12))
@@ -90,7 +89,6 @@ fn public_config_builder_validates_vendor_parameter_ranges() {
             .is_ok()
     );
     assert!(Config::builder().sample_rate_hz(32_767_999).build().is_ok());
-    assert!(Config::builder().bandwidth_hz(65_535_999).build().is_ok());
 
     assert!(
         Config::builder()
@@ -109,18 +107,6 @@ fn public_config_builder_validates_vendor_parameter_ranges() {
         Config::builder()
             .raw_adc()
             .sample_rate_hz(u32::MAX)
-            .build()
-            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
-    );
-    assert!(
-        Config::builder()
-            .bandwidth_hz(65_536_000)
-            .build()
-            .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
-    );
-    assert!(
-        Config::builder()
-            .bandwidth_hz(u32::MAX)
             .build()
             .is_err_and(|err| err.kind() == ErrorKind::InvalidConfig)
     );

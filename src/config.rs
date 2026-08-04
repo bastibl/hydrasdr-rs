@@ -11,12 +11,10 @@ use core::marker::PhantomData;
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
 const MIN_SAMPLE_RATE_HZ: u32 = 10_000;
-const MIN_BANDWIDTH_HZ: u32 = 1_000;
 const MAX_PRESET_GAIN: u8 = 21;
 const MAX_VENDOR_INDEX_OR_KHZ: u32 = u16::MAX as u32;
 const MAX_RAW_SAMPLE_RATE_HZ: u32 = MAX_VENDOR_INDEX_OR_KHZ * 1_000 + 999;
 const MAX_F32_IQ_SAMPLE_RATE_HZ: u32 = (((MAX_VENDOR_INDEX_OR_KHZ + 1) * 1_000) - 1) / 2;
-const MAX_MANUAL_BANDWIDTH_HZ: u32 = MAX_VENDOR_INDEX_OR_KHZ * 1_000 + 999;
 
 /// Device selection used by [`crate::DeviceBuilder`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,20 +23,6 @@ pub(crate) enum DeviceSelector {
     First,
     /// Open the HydraSDR RFOne with a parsed 64-bit serial number.
     Serial(u64),
-}
-
-/// Analog bandwidth policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Bandwidth {
-    /// Leave bandwidth selection to firmware defaults.
-    Auto,
-    /// Request an explicit analog bandwidth in Hz on devices that advertise it.
-    ///
-    /// The numeric value must fit the vendor request's 16-bit kHz encoding
-    /// (`1_000..=65_535_999` Hz). That is a protocol limit, not an advertised
-    /// hardware range. Current RFOne firmware does not expose manual bandwidth
-    /// control and returns [`Error::Unsupported`] when this policy is applied.
-    ManualHz(u32),
 }
 
 /// RF input port selector.
@@ -184,17 +168,16 @@ impl From<GainPreset> for GainConfig {
 ///
 /// Building a config validates static RFOne and USB protocol constraints
 /// without opening hardware. It does not prove that connected firmware
-/// advertises a sample rate or optional capability such as manual bandwidth.
+/// advertises a sample rate.
 /// Every `Config` obtainable through the public API has passed this validation.
 ///
 /// ```
-/// use hydrasdr_rs::{Bandwidth, Config, GainPreset};
+/// use hydrasdr_rs::{Config, GainPreset};
 ///
 /// let config = Config::builder()
 ///     .raw_adc()
 ///     .frequency_hz(144_500_000)
 ///     .sample_rate_hz(10_000_000)
-///     .bandwidth(Bandwidth::Auto)
 ///     .gain(GainPreset::Linearity(10))
 ///     .build()?;
 ///
@@ -205,7 +188,6 @@ impl From<GainPreset> for GainConfig {
 pub struct Config<M: SampleMode = F32Iq> {
     frequency_hz: u64,
     sample_rate_hz: u32,
-    bandwidth: Bandwidth,
     decimation_mode: DecimationMode,
     rf_port: Option<RfPort>,
     gain: GainConfig,
@@ -219,7 +201,6 @@ impl<M: SampleMode> Config<M> {
         Self {
             frequency_hz: DEFAULT_FREQUENCY_HZ,
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
-            bandwidth: Bandwidth::Auto,
             decimation_mode: DecimationMode::LowBandwidth,
             rf_port: Some(RfPort::Rx0),
             gain: GainConfig::default(),
@@ -233,7 +214,6 @@ impl<M: SampleMode> Config<M> {
         Config {
             frequency_hz: self.frequency_hz,
             sample_rate_hz: self.sample_rate_hz,
-            bandwidth: self.bandwidth,
             decimation_mode: self.decimation_mode,
             rf_port: self.rf_port,
             gain: self.gain,
@@ -285,11 +265,6 @@ impl<M: SampleMode> Config<M> {
         self.sample_rate_hz
     }
 
-    /// Configured bandwidth policy.
-    pub const fn bandwidth(&self) -> Bandwidth {
-        self.bandwidth
-    }
-
     /// Runtime view of the compile-time sample mode `M`.
     pub const fn sample_format(&self) -> SampleFormat {
         M::FORMAT
@@ -313,7 +288,6 @@ impl<M: SampleMode> Config<M> {
     fn validate(&self) -> Result<()> {
         validate_frequency(self.frequency_hz)?;
         validate_sample_rate(self.sample_rate_hz, M::FORMAT)?;
-        validate_bandwidth(self.bandwidth)?;
         validate_gain(self.gain)?;
         Ok(())
     }
@@ -332,10 +306,6 @@ impl<M: SampleMode> Config<M> {
 
     pub(crate) fn set_sample_rate_hz_internal(&mut self, value: u32) {
         self.sample_rate_hz = value;
-    }
-
-    pub(crate) fn set_bandwidth_internal(&mut self, value: Bandwidth) {
-        self.bandwidth = value;
     }
 
     pub(crate) fn set_rf_port_internal(&mut self, value: RfPort) {
@@ -374,7 +344,6 @@ impl<M: SampleMode> Config<M> {
     pub(crate) fn apply_internal(&mut self, applied: &Self) {
         self.frequency_hz = applied.frequency_hz;
         self.sample_rate_hz = applied.sample_rate_hz;
-        self.bandwidth = applied.bandwidth;
         self.decimation_mode = applied.decimation_mode;
         if let Some(port) = applied.rf_port {
             self.rf_port = Some(port);
@@ -404,17 +373,15 @@ impl Config<F32Iq> {
 /// Builder for [`Config`], defaulting to the [`F32Iq`] sample mode.
 ///
 /// ```
-/// use hydrasdr_rs::{Bandwidth, Config};
+/// use hydrasdr_rs::Config;
 ///
 /// let config = Config::builder()
 ///     .raw_adc()
 ///     .frequency_hz(915_000_000)
 ///     .sample_rate_hz(2_000_000)
-///     .bandwidth(Bandwidth::Auto)
 ///     .packing(true)
 ///     .build()?;
 ///
-/// assert_eq!(config.bandwidth(), Bandwidth::Auto);
 /// assert!(config.packing());
 /// # Ok::<(), hydrasdr_rs::Error>(())
 /// ```
@@ -454,27 +421,6 @@ impl<M: SampleMode> ConfigBuilder<M> {
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config.sample_rate_hz = value;
         self
-    }
-
-    /// Set the analog bandwidth policy.
-    ///
-    /// [`Bandwidth::ManualHz`] is capability-gated. Its numeric bound only
-    /// reflects the vendor request encoding; current RFOne firmware does not
-    /// advertise manual bandwidth control.
-    pub fn bandwidth(mut self, value: Bandwidth) -> Self {
-        self.config.bandwidth = value;
-        self
-    }
-
-    /// Set an explicit analog bandwidth in Hz.
-    ///
-    /// This is shorthand for [`ConfigBuilder::bandwidth`] with
-    /// [`Bandwidth::ManualHz`]. Values must fit the vendor request encoding
-    /// (`1_000..=65_535_999` Hz), and applying the configuration requires a
-    /// device that advertises manual bandwidth control. Current RFOne firmware
-    /// does not.
-    pub fn bandwidth_hz(self, value: u32) -> Self {
-        self.bandwidth(Bandwidth::ManualHz(value))
     }
 
     /// Select the RF input port.
@@ -570,26 +516,6 @@ pub(crate) fn validate_sample_rate(value: u32, sample_format: SampleFormat) -> R
         return Err(Error::invalid_config(
             "sample_rate_hz",
             "must fit the HydraSDR vendor request parameter",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_bandwidth(value: Bandwidth) -> Result<()> {
-    if let Bandwidth::ManualHz(hz) = value
-        && hz < MIN_BANDWIDTH_HZ
-    {
-        return Err(Error::invalid_config(
-            "bandwidth_hz",
-            "manual bandwidth must be at least 1_000 Hz",
-        ));
-    }
-    if let Bandwidth::ManualHz(hz) = value
-        && hz > MAX_MANUAL_BANDWIDTH_HZ
-    {
-        return Err(Error::invalid_config(
-            "bandwidth_hz",
-            "manual bandwidth must fit the HydraSDR vendor request parameter",
         ));
     }
     Ok(())

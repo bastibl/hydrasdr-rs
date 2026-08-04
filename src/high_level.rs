@@ -7,9 +7,8 @@ use std::pin::Pin;
 use crate::Complex32;
 use crate::commands::ReceiverMode;
 use crate::config::{
-    Bandwidth, Config, ConfigBuilder, DeviceSelector, F32Iq, GainConfig, RawAdc, RfPort,
-    SampleFormat, SampleMode, validate_bandwidth, validate_frequency, validate_gain,
-    validate_sample_rate,
+    Config, ConfigBuilder, DeviceSelector, F32Iq, GainConfig, RawAdc, RfPort, SampleFormat,
+    SampleMode, validate_frequency, validate_gain, validate_sample_rate,
 };
 use crate::device::HydraSdr;
 use crate::errors::{Error, Result};
@@ -128,14 +127,6 @@ impl<M: SampleMode> Device<M> {
         self.inner.sample_rates()
     }
 
-    /// Query advertised analog bandwidths.
-    ///
-    /// Current RFOne firmware does not advertise manual bandwidth control and
-    /// returns [`Error::Unsupported`].
-    pub fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> {
-        self.inner.bandwidths()
-    }
-
     /// Apply a high-level receiver configuration of the device's sample mode.
     ///
     /// A configuration for another mode is rejected at compile time:
@@ -190,21 +181,6 @@ impl<M: SampleMode> Device<M> {
             .map(move |result| {
                 if result.is_ok() {
                     config.set_sample_rate_hz_internal(sample_rate_hz);
-                }
-                result
-            })
-    }
-
-    /// Set only the manual analog bandwidth on firmware that advertises it.
-    ///
-    /// Current RFOne firmware returns [`Error::Unsupported`].
-    pub fn set_bandwidth_hz(&mut self, bandwidth_hz: u32) -> impl MaybeFuture<Output = Result<()>> {
-        let config = &mut self.config;
-        self.inner
-            .set_bandwidth_hz(bandwidth_hz)
-            .map(move |result| {
-                if result.is_ok() {
-                    config.set_bandwidth_internal(Bandwidth::ManualHz(bandwidth_hz));
                 }
                 result
             })
@@ -314,10 +290,6 @@ where
         self.direct.visible_sample_rates()
     }
 
-    fn bandwidths(&mut self) -> impl MaybeFuture<Output = Result<Vec<u32>>> + use<'_, C> {
-        self.direct.get_bandwidths()
-    }
-
     fn set_frequency_hz(
         &mut self,
         frequency_hz: u64,
@@ -334,15 +306,6 @@ where
         let validation = validate_sample_rate(sample_rate_hz, sample_format);
         let operation = self.direct.set_samplerate(sample_rate_hz);
         ready(validation).and_then(move |()| operation)
-    }
-
-    fn set_bandwidth_hz(
-        &mut self,
-        bandwidth_hz: u32,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let bandwidth = Bandwidth::ManualHz(bandwidth_hz);
-        let operation = self.direct.set_bandwidth(bandwidth_hz);
-        ready(validate_bandwidth(bandwidth)).and_then(move |()| operation)
     }
 
     fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
@@ -439,27 +402,6 @@ impl<M: SampleMode> DeviceBuilder<M> {
     /// for its advertised rates.
     pub fn sample_rate_hz(mut self, value: u32) -> Self {
         self.config = self.config.sample_rate_hz(value);
-        self
-    }
-
-    /// Set the analog bandwidth policy.
-    ///
-    /// [`crate::Bandwidth::ManualHz`] is capability-gated. Its numeric bound
-    /// reflects the vendor request encoding, not an RFOne hardware range;
-    /// current RFOne firmware does not advertise manual bandwidth control.
-    pub fn bandwidth(mut self, value: crate::Bandwidth) -> Self {
-        self.config = self.config.bandwidth(value);
-        self
-    }
-
-    /// Set an explicit analog bandwidth in Hz.
-    ///
-    /// This is shorthand for [`DeviceBuilder::bandwidth`] with
-    /// [`crate::Bandwidth::ManualHz`]. The value must fit the vendor request
-    /// encoding and applying it requires firmware that advertises manual
-    /// bandwidth control. Current RFOne firmware does not.
-    pub fn bandwidth_hz(mut self, value: u32) -> Self {
-        self.config = self.config.bandwidth_hz(value);
         self
     }
 
