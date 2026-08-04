@@ -76,6 +76,9 @@ pub(crate) struct DeviceInner<C: ControlBackend = NusbControl> {
 enum DeviceLifecycle {
     Open,
     Closing,
+    /// The device handle was dropped while a receiver lease was held.
+    /// That lease now owns the final receiver-off and bias-off cleanup.
+    DropCleanupPending,
     Closed,
 }
 
@@ -124,7 +127,7 @@ fn ensure_device_open(state: &SharedState) -> Result<()> {
 fn begin_shutdown(state: &SharedState) -> Result<bool> {
     let mut shared = lock_shared(state);
     match shared.device {
-        DeviceLifecycle::Closed => Ok(false),
+        DeviceLifecycle::DropCleanupPending | DeviceLifecycle::Closed => Ok(false),
         DeviceLifecycle::Closing => Ok(true),
         DeviceLifecycle::Open => {
             if shared.receiver == ReceiverSlot::Held {
@@ -140,6 +143,39 @@ fn finish_shutdown(state: &SharedState) {
     let mut shared = lock_shared(state);
     shared.device = DeviceLifecycle::Closed;
     shared.receiver = ReceiverSlot::Idle;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeviceDropAction {
+    None,
+    Immediate,
+    DeferredToReceiver,
+}
+
+fn begin_device_drop(state: &SharedState) -> DeviceDropAction {
+    let mut shared = lock_shared(state);
+    match shared.device {
+        DeviceLifecycle::Closed => DeviceDropAction::None,
+        DeviceLifecycle::DropCleanupPending => DeviceDropAction::DeferredToReceiver,
+        DeviceLifecycle::Open | DeviceLifecycle::Closing => {
+            if shared.receiver == ReceiverSlot::Held {
+                shared.device = DeviceLifecycle::DropCleanupPending;
+                DeviceDropAction::DeferredToReceiver
+            } else {
+                shared.device = DeviceLifecycle::Closed;
+                shared.receiver = ReceiverSlot::Idle;
+                DeviceDropAction::Immediate
+            }
+        }
+    }
+}
+
+fn finish_deferred_shutdown(state: &SharedState) {
+    let mut shared = lock_shared(state);
+    if shared.device == DeviceLifecycle::DropCleanupPending {
+        shared.device = DeviceLifecycle::Closed;
+        shared.receiver = ReceiverSlot::Idle;
+    }
 }
 
 fn complete_shutdown(state: &SharedState, result: Result<()>) -> Result<()> {
@@ -331,11 +367,13 @@ impl<M: SampleMode> Device<M> {
     /// Both shutdown commands are attempted even if turning off the receiver
     /// fails. Await this operation in async code, or call [`MaybeFuture::wait`]
     /// on native targets. Native drops perform the same sequence best-effort;
-    /// WebUSB drops schedule it as a background operation. Explicit shutdown is
-    /// still required when the caller must observe completion or an error. On
-    /// native targets, dropping or canceling the returned operation keeps the
-    /// blocking fallback armed. WebUSB cancellation schedules another cleanup
-    /// attempt.
+    /// WebUSB drops schedule it as a background operation. If a stream is
+    /// starting or active, dropping the device transfers final cleanup to that
+    /// stream so receiver-off cannot race a pending receiver-on command. Explicit
+    /// shutdown is still required when the caller must observe completion or an
+    /// error. On native targets, dropping or canceling the returned operation
+    /// keeps the blocking fallback armed. A canceled WebUSB shutdown may be
+    /// retried; dropping the device schedules a background cleanup attempt.
     #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
     pub fn shutdown(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         let decision = begin_shutdown(&self.shared);
@@ -411,11 +449,13 @@ impl Device<F32Iq> {
 
 impl<M: SampleMode> Drop for Device<M> {
     fn drop(&mut self) {
+        let action = begin_device_drop(&self.shared);
+        #[cfg(not(target_arch = "wasm32"))]
+        if action != DeviceDropAction::Immediate {
+            self.inner.shutdown_on_drop = false;
+        }
         #[cfg(target_arch = "wasm32")]
-        let cleanup = lock_shared(&self.shared).device != DeviceLifecycle::Closed;
-        finish_shutdown(&self.shared);
-        #[cfg(target_arch = "wasm32")]
-        if cleanup {
+        if action == DeviceDropAction::Immediate {
             let direct = self.inner.direct.stream_handle();
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = shutdown_hardware(&direct).await;
@@ -483,6 +523,61 @@ impl<C: ControlBackend + 'static> Drop for OpenCleanupGuard<C> {
             let direct = self.direct.stream_handle();
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = shutdown_hardware(&direct).await;
+            });
+        }
+    }
+}
+
+struct DeferredShutdownGuard<C: ControlBackend + 'static> {
+    direct: HydraSdr<C>,
+    shared: SharedState,
+    armed: bool,
+}
+
+impl<C: ControlBackend + 'static> DeferredShutdownGuard<C> {
+    fn new(direct: HydraSdr<C>, shared: &SharedState) -> Self {
+        Self {
+            direct,
+            shared: Arc::clone(shared),
+            armed: true,
+        }
+    }
+
+    fn complete(mut self) {
+        finish_deferred_shutdown(&self.shared);
+        self.armed = false;
+    }
+
+    fn cleanup(self) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+        let operation = shutdown_hardware(&self.direct);
+        operation.map(move |result| match result {
+            Ok(()) => {
+                self.complete();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        })
+    }
+}
+
+impl<C: ControlBackend + 'static> Drop for DeferredShutdownGuard<C> {
+    fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.armed {
+            self.armed = false;
+            if shutdown_hardware(&self.direct).wait().is_ok() {
+                finish_deferred_shutdown(&self.shared);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.armed {
+            self.armed = false;
+            let direct = self.direct.stream_handle();
+            let shared = Arc::clone(&self.shared);
+            wasm_bindgen_futures::spawn_local(async move {
+                if shutdown_hardware(&direct).await.is_ok() {
+                    finish_deferred_shutdown(&shared);
+                }
             });
         }
     }
@@ -1358,13 +1453,14 @@ impl Drop for RxStreamClaim {
 }
 
 #[derive(Debug)]
-struct ReceiverLease {
+struct ReceiverLease<C: ControlBackend + 'static = NusbControl> {
     shared: SharedState,
+    cleanup: Option<HydraSdr<C>>,
     armed: bool,
 }
 
-impl ReceiverLease {
-    fn acquire(shared: &SharedState) -> Result<Self> {
+impl<C: ControlBackend + 'static> ReceiverLease<C> {
+    fn acquire(shared: &SharedState, cleanup: HydraSdr<C>) -> Result<Self> {
         let mut state = lock_shared(shared);
         if state.device != DeviceLifecycle::Open {
             return Err(Error::DeviceClosed);
@@ -1375,26 +1471,51 @@ impl ReceiverLease {
         state.receiver = ReceiverSlot::Held;
         Ok(Self {
             shared: Arc::clone(shared),
+            cleanup: Some(cleanup),
             armed: true,
         })
     }
 
-    fn release(mut self) {
-        let mut state = lock_shared(&self.shared);
-        if state.receiver == ReceiverSlot::Held {
-            state.receiver = ReceiverSlot::Idle;
-        }
+    fn release(mut self) -> Option<DeferredShutdownGuard<C>> {
+        let deferred = {
+            let mut state = lock_shared(&self.shared);
+            if state.receiver == ReceiverSlot::Held {
+                state.receiver = ReceiverSlot::Idle;
+            }
+            state.device == DeviceLifecycle::DropCleanupPending
+        };
         self.armed = false;
+        deferred.then(|| {
+            DeferredShutdownGuard::new(
+                self.cleanup
+                    .take()
+                    .expect("armed receiver lease owns cleanup"),
+                &self.shared,
+            )
+        })
     }
 }
 
-impl Drop for ReceiverLease {
+impl<C: ControlBackend + 'static> Drop for ReceiverLease<C> {
     fn drop(&mut self) {
         // Never infer that hardware is off merely because its owner disappeared.
         if self.armed {
-            let mut state = lock_shared(&self.shared);
-            if state.receiver == ReceiverSlot::Held {
-                state.receiver = ReceiverSlot::Orphaned;
+            let deferred = {
+                let mut state = lock_shared(&self.shared);
+                if state.receiver == ReceiverSlot::Held {
+                    state.receiver = ReceiverSlot::Orphaned;
+                }
+                state.device == DeviceLifecycle::DropCleanupPending
+            };
+            self.armed = false;
+            if deferred {
+                let cleanup = DeferredShutdownGuard::new(
+                    self.cleanup
+                        .take()
+                        .expect("armed receiver lease owns cleanup"),
+                    &self.shared,
+                );
+                drop(cleanup);
             }
         }
     }
@@ -1410,7 +1531,7 @@ impl Drop for ReceiverLease {
 pub struct RxStream<M: SampleMode = F32Iq> {
     state: RxStreamState,
     shared: SharedState,
-    receiver: Option<ReceiverLease>,
+    receiver: Option<ReceiverLease<NusbControl>>,
     _claim: RxStreamClaim,
     mode: PhantomData<fn() -> M>,
 }
@@ -1491,7 +1612,11 @@ impl<M: SampleMode> RxStream<M> {
             RxStreamState::BlockingRaw(_) | RxStreamState::BlockingF32(_) => Err(Error::Busy),
             RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
         };
-        self.finish_stop(result)
+        let (stats, cleanup) = self.finish_stop(result)?;
+        if let Some(cleanup) = cleanup {
+            cleanup.cleanup().await?;
+        }
+        Ok(stats)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1544,7 +1669,11 @@ impl<M: SampleMode> RxStream<M> {
             RxStreamState::AsyncRaw(_) | RxStreamState::AsyncF32(_) => Err(Error::Busy),
             RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
         };
-        self.finish_stop(result)
+        let (stats, cleanup) = self.finish_stop(result)?;
+        if let Some(cleanup) = cleanup {
+            cleanup.cleanup().wait()?;
+        }
+        Ok(stats)
     }
 
     fn receiver_state(&self) -> ReceiverState {
@@ -1567,19 +1696,22 @@ impl<M: SampleMode> RxStream<M> {
             (true, ReceiverState::Stopped | ReceiverState::CleanupRequired)
             | (false, ReceiverState::Running | ReceiverState::CleanupRequired) => Err(Error::Busy),
             (false, ReceiverState::Stopped) => {
-                self.receiver = Some(ReceiverLease::acquire(&self.shared)?);
+                let cleanup = self
+                    .control_handle()
+                    .ok_or(Error::stream_closed("RX stream has no device"))?;
+                self.receiver = Some(ReceiverLease::acquire(&self.shared, cleanup)?);
                 Ok(true)
             }
         }
     }
 
-    fn finish_stop<T>(&mut self, result: Result<T>) -> Result<T> {
-        if result.is_ok()
-            && let Some(receiver) = self.receiver.take()
-        {
-            receiver.release();
-        }
-        result
+    fn finish_stop<T>(
+        &mut self,
+        result: Result<T>,
+    ) -> Result<(T, Option<DeferredShutdownGuard<NusbControl>>)> {
+        let value = result?;
+        let cleanup = self.receiver.take().and_then(ReceiverLease::release);
+        Ok((value, cleanup))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1594,10 +1726,13 @@ impl<M: SampleMode> RxStream<M> {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn receiver_control(&self) -> Option<HydraSdr<NusbControl>> {
+    fn control_handle(&self) -> Option<HydraSdr<NusbControl>> {
         let device = match &self.state {
             RxStreamState::Dormant(device) => device,
+            #[cfg(not(target_arch = "wasm32"))]
+            RxStreamState::BlockingRaw(stream) => stream.device.as_ref()?,
+            #[cfg(not(target_arch = "wasm32"))]
+            RxStreamState::BlockingF32(stream) => stream.device.as_ref()?,
             RxStreamState::AsyncRaw(stream) => stream.device.as_ref()?,
             RxStreamState::AsyncF32(stream) => stream.device.as_ref()?,
             RxStreamState::Poisoned => return None,
@@ -1610,18 +1745,24 @@ impl<M: SampleMode> Drop for RxStream<M> {
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.receiver.is_some() && self.cleanup_on_drop().is_ok() {
-            self.receiver
+            let cleanup = self
+                .receiver
                 .take()
                 .expect("receiver lease checked above")
                 .release();
+            if let Some(cleanup) = cleanup {
+                let _ = cleanup.cleanup().wait();
+            }
         }
         #[cfg(target_arch = "wasm32")]
-        if let Some(direct) = self.receiver_control()
+        if let Some(direct) = self.control_handle()
             && let Some(receiver) = self.receiver.take()
         {
             wasm_bindgen_futures::spawn_local(async move {
                 if direct.receiver_mode(ReceiverMode::Off).await.is_ok() {
-                    receiver.release();
+                    if let Some(cleanup) = receiver.release() {
+                        let _ = cleanup.cleanup().await;
+                    }
                 }
             });
         }
@@ -1827,7 +1968,9 @@ mod tests {
     #[test]
     fn shutdown_rejects_a_held_receiver_lease() {
         let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
-        let _receiver = ReceiverLease::acquire(&shared).expect("acquire receiver lease");
+        let _receiver =
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default()))
+                .expect("acquire receiver lease");
 
         assert!(begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy));
         assert_eq!(lock_shared(&shared).device, DeviceLifecycle::Open);
@@ -1840,12 +1983,12 @@ mod tests {
 
         assert!(begin_shutdown(&shared).expect("begin shutdown"));
         assert!(matches!(
-            ReceiverLease::acquire(&shared),
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default())),
             Err(Error::DeviceClosed)
         ));
         finish_shutdown(&shared);
         assert!(matches!(
-            ReceiverLease::acquire(&shared),
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default())),
             Err(Error::DeviceClosed)
         ));
     }
@@ -1873,7 +2016,7 @@ mod tests {
         }));
 
         assert!(matches!(
-            ReceiverLease::acquire(&shared),
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default())),
             Err(Error::DeviceClosed)
         ));
     }
@@ -1882,21 +2025,25 @@ mod tests {
     fn cancelled_start_requires_cleanup_before_shutdown() {
         let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
         let _claim = RxStreamClaim::acquire(&shared).expect("claim stream");
-        let receiver = ReceiverLease::acquire(&shared).expect("reserve receiver for start");
+        let receiver =
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default()))
+                .expect("reserve receiver for start");
 
         assert_eq!(lock_shared(&shared).receiver, ReceiverSlot::Held);
         assert!(begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy));
         assert_eq!(lock_shared(&shared).receiver, ReceiverSlot::Held);
         assert!(begin_shutdown(&shared).is_err_and(|error| error.kind() == crate::ErrorKind::Busy));
 
-        receiver.release();
+        assert!(receiver.release().is_none());
         assert!(begin_shutdown(&shared).expect("begin shutdown after cleanup"));
     }
 
     #[test]
     fn dropped_receiver_lease_requires_device_cleanup() {
         let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
-        let receiver = ReceiverLease::acquire(&shared).expect("reserve receiver");
+        let receiver =
+            ReceiverLease::acquire(&shared, HydraSdr::from_control(FakeControl::default()))
+                .expect("reserve receiver");
 
         drop(receiver);
 
@@ -2144,6 +2291,126 @@ mod tests {
             #[cfg(not(target_arch = "wasm32"))]
             shutdown_on_drop: true,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn device_drop_defers_cleanup_until_the_receiver_lease_is_released() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let direct = HydraSdr::from_control(control);
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let receiver = ReceiverLease::acquire(&shared, direct.stream_handle())
+            .expect("reserve receiver for pending start");
+
+        assert_eq!(
+            begin_device_drop(&shared),
+            DeviceDropAction::DeferredToReceiver
+        );
+        assert_eq!(state.control_out_count.load(Ordering::SeqCst), 0);
+
+        direct
+            .receiver_mode(ReceiverMode::Rx)
+            .wait()
+            .expect("complete pending receiver start");
+        let cleanup = receiver
+            .release()
+            .expect("receiver lease owns deferred device cleanup");
+        cleanup.cleanup().wait().expect("deferred device cleanup");
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Rx),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+        let shared = lock_shared(&shared);
+        assert_eq!(shared.device, DeviceLifecycle::Closed);
+        assert_eq!(shared.receiver, ReceiverSlot::Idle);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_receiver_lease_performs_deferred_device_cleanup() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let direct = HydraSdr::from_control(control);
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let receiver = ReceiverLease::acquire(&shared, direct.stream_handle())
+            .expect("reserve receiver for pending start");
+
+        assert_eq!(
+            begin_device_drop(&shared),
+            DeviceDropAction::DeferredToReceiver
+        );
+        direct
+            .receiver_mode(ReceiverMode::Rx)
+            .wait()
+            .expect("complete pending receiver start");
+        drop(receiver);
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Rx),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+        let shared = lock_shared(&shared);
+        assert_eq!(shared.device, DeviceLifecycle::Closed);
+        assert_eq!(shared.receiver, ReceiverSlot::Idle);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_deferred_cleanup_is_retried_by_the_guard() {
+        let control = FakeControl::default();
+        let state = Arc::clone(&control.state);
+        let direct = HydraSdr::from_control(control);
+        let shared = Arc::new(Mutex::new(SharedDeviceState::default()));
+        let receiver = ReceiverLease::acquire(&shared, direct.stream_handle())
+            .expect("reserve receiver for pending start");
+
+        assert_eq!(
+            begin_device_drop(&shared),
+            DeviceDropAction::DeferredToReceiver
+        );
+        direct
+            .receiver_mode(ReceiverMode::Rx)
+            .wait()
+            .expect("complete pending receiver start");
+        state.fail_control_out_at.store(2, Ordering::SeqCst);
+        let cleanup = receiver
+            .release()
+            .expect("receiver lease owns deferred device cleanup");
+
+        assert!(cleanup.cleanup().wait().is_err());
+
+        assert_eq!(
+            *state
+                .control_out_requests
+                .lock()
+                .expect("control request lock"),
+            [
+                VendorControlRequest::receiver_mode(ReceiverMode::Rx),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+                VendorControlRequest::receiver_mode(ReceiverMode::Off),
+                VendorControlRequest::set_rf_bias(0),
+            ]
+        );
+        let shared = lock_shared(&shared);
+        assert_eq!(shared.device, DeviceLifecycle::Closed);
+        assert_eq!(shared.receiver, ReceiverSlot::Idle);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
