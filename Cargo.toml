@@ -24,3 +24,7 @@ wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 futures-lite = "2"
+
+[[example]]
+name = "rx_async"
+required-features = ["smol"]

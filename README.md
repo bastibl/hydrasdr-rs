@@ -147,7 +147,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
 The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. Explicit shutdown returns `Busy` until the stream is stopped; a stopped stream may remain claimed, but cannot be restarted after shutdown. Native device drops run the same hardware shutdown sequence best-effort. WebUSB drops schedule asynchronous cleanup in the background. If a stream owns receiver cleanup when its device is dropped, it completes that cleanup after stopping so receiver-off cannot race a pending receiver-on command. Browser applications must await explicit shutdown when they need to observe completion or an error. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
 
-See `examples/rx_sync.rs` and `examples/rx_async.rs` for hardware-gated examples that are safe to compile without a connected RFOne and require `--run` before they touch USB.
+See `examples/rx_sync.rs` and `examples/rx_async.rs` for examples that open an RFOne and receive one buffer immediately.
 
 ## Linux permissions and hardware safety
 
@@ -167,16 +167,14 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="38af", ATTR{idProduct}=="0001", MODE="0660", 
 
 Reload udev rules, replug the device, and start a new login session after adding your user to `plugdev`. Exact group names vary by distribution; if your system uses a different group, update the rule and group membership consistently.
 
-Some API calls can change receiver state or RF bias. The examples and hardware tests are gated so normal `cargo test`/`cargo run --example ...` invocations do not accidentally touch hardware.
+Some API calls can change receiver state or RF bias. Hardware tests are gated, but running an example immediately opens and configures the connected device.
 
 ## Checks and tests
 
-Hardware-gated commands, run only with an RFOne connected and USB permissions in place:
+Hardware commands, run only with an RFOne connected and USB permissions in place:
 
 ```sh
 cargo test --test hardware -- --ignored --nocapture
-cargo run --example rx_sync -- --run
-cargo run --example rx_sync -- --run --rx
-cargo run --features smol --example rx_async -- --run
-cargo run --features smol --example rx_async -- --run --rx
+cargo run --example rx_sync
+cargo run --features smol --example rx_async
 ```
