@@ -46,10 +46,9 @@
 //!     let count = rx
 //!         .read(&mut samples, Some(Duration::from_secs(1)))
 //!         .wait()?;
-//!     let stats = rx.stop().wait()?;
+//!     let stats = rx.close().wait()?;
 //!     println!("{count} samples");
 //!     println!("{stats:?}");
-//!     drop(rx);
 //!     dev.shutdown().wait()?;
 //!
 //!     Ok(())

@@ -498,7 +498,7 @@ where
     C: ControlBackend + StreamingBackend,
 {
     /// Start a persistent synchronous pull RX stream for raw USB blocks.
-    pub(crate) fn start_raw_rx_stream(&mut self) -> Result<RawRxStream<C::BulkIn>> {
+    pub(crate) fn start_raw_rx_stream(&self) -> Result<RawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off).wait()?;
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
@@ -523,7 +523,7 @@ where
     }
 
     pub(crate) fn close_raw_rx_stream(
-        &mut self,
+        &self,
         mut stream: RawRxStream<C::BulkIn>,
     ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
@@ -531,7 +531,7 @@ where
     }
 
     /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
-    pub(crate) fn start_rx_stream(&mut self) -> Result<DirectRxStream<C::BulkIn>> {
+    pub(crate) fn start_rx_stream(&self) -> Result<DirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
             return Err(Error::Unsupported);
         }
@@ -560,7 +560,7 @@ where
     }
 
     pub(crate) fn close_rx_stream(
-        &mut self,
+        &self,
         mut stream: DirectRxStream<C::BulkIn>,
     ) -> (StreamingStats, Result<()>) {
         let stats = stream.close();
@@ -573,9 +573,7 @@ where
     C: ControlBackend + AsyncStreamingBackend,
 {
     /// Start a persistent async pull RX stream for raw USB blocks.
-    pub(crate) async fn start_raw_rx_stream_async(
-        &mut self,
-    ) -> Result<AsyncRawRxStream<C::BulkIn>> {
+    pub(crate) async fn start_raw_rx_stream_async(&self) -> Result<AsyncRawRxStream<C::BulkIn>> {
         self.receiver_mode(ReceiverMode::Off).await?;
         let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
             Ok(bulk_in) => bulk_in,
@@ -600,7 +598,7 @@ where
     }
 
     /// Start a persistent async pull RX stream for unpacked float32 IQ samples.
-    pub(crate) async fn start_rx_stream_async(&mut self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
+    pub(crate) async fn start_rx_stream_async(&self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
         if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
             return Err(Error::Unsupported);
         }

@@ -102,8 +102,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         )
         .wait()?;
     println!("read {count} IQ samples");
-    let stats = rx.stop().wait()?;
-    drop(rx);
+    let stats = rx.close().wait()?;
     dev.shutdown().wait()?;
     println!("{stats:?}");
 
@@ -135,8 +134,7 @@ fn main() -> hydrasdr_rs::Result<()> {
         let mut samples = [Complex32::default(); 32];
         let count = rx.read(&mut samples, None).await?;
         println!("async samples: {count}");
-        let stats = rx.stop().await?;
-        drop(rx);
+        let stats = rx.close().await?;
         dev.shutdown().await?;
         println!("{stats:?}");
 
@@ -145,7 +143,13 @@ fn main() -> hydrasdr_rs::Result<()> {
 }
 ```
 
-The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. Explicit shutdown returns `Busy` until the stream is stopped; a stopped stream may remain claimed, but cannot be restarted after shutdown. Native device drops run the same hardware shutdown sequence best-effort. WebUSB drops schedule asynchronous cleanup in the background. If a stream owns receiver cleanup when its device is dropped, it completes that cleanup after stopping so receiver-off cannot race a pending receiver-on command. Browser applications must await explicit shutdown when they need to observe completion or an error. Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
+The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. If start or stop fails or is canceled after beginning, stop the stream successfully before reading or restarting.
+
+Call `close()` to stop reception permanently, release its queue and exclusive claim, and retain final statistics. Native close supports both `.wait()` and `.await()` regardless of read mode. Shutdown returns `Busy` while any stream claim is held, including dormant, stopped, closing, or background-cleanup streams. After close succeeds, shutdown can run while the closed stream value remains in scope. Once close is first polled or waited, start, stop, and reads return `StreamClosed`; a failed or canceled close retains its claim and can be retried. Repeated successful close returns final statistics without USB commands. Unpolled close and shutdown operations have no lifecycle effects. Once shutdown begins without a held claim, it is terminal and retryable.
+
+The device and its stream share ownership of the hardware. Dropping the device handle leaves the stream usable, including starting and restarting it. A stopped stream also keeps the device and configured RF bias power alive. Dropping the final device or stream owner runs hardware shutdown best-effort on native targets; WebUSB schedules it in the background. Dropping a stream releases its exclusive claim after best-effort receiver cleanup, so a WebUSB application may briefly receive `Busy` when claiming a replacement stream. Browser applications must await explicit shutdown when they need to observe completion or an error.
+
+Native backends cancel retained transfers at stop so they can be recycled quickly on restart. WebUSB has no cancellation primitive, so a restarted stream conservatively consumes and discards every submission that was pending at stop before it exposes new data; `StreamingStats::buffers_discarded_on_restart` reports that warm-up.
 
 See `examples/rx_sync.rs` and `examples/rx_async.rs` for examples that open an RFOne and receive one buffer immediately.
 
@@ -156,7 +160,7 @@ Opening a real HydraSDR RFOne requires permission to access the USB device. On L
 - legacy: `1d50:60a1`
 - official: `38af:0001`
 
-The default configuration disables RF input bias power. If an application enables it, explicitly await or wait for `shutdown()` before releasing the device. Native drops attempt receiver-off and bias-off cleanup as a safety net; WebUSB drops schedule the same best-effort cleanup. Neither drop path can report failures.
+The default configuration disables RF input bias power. If an application enables it, explicitly await or wait for `shutdown()` before releasing the device. Dropping the final device or stream owner attempts receiver-off and bias-off cleanup as a safety net on native targets; WebUSB schedules the same best-effort cleanup. Neither drop path can report failures.
 
 Example udev rule skeleton:
 
