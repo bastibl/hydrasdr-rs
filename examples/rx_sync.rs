@@ -35,6 +35,7 @@ fn main() -> hydrasdr_rs::Result<()> {
     let count = rx
         .read(&mut samples, Some(std::time::Duration::from_secs(1)))
         .wait()?;
+    // Close consumes rx and releases its stream claim.
     let stats = rx.close().wait()?;
     dev.shutdown().wait()?;
     println!("rx samples: {count}, first={:?}", samples.first());

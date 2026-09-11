@@ -355,7 +355,8 @@ impl<M: SampleMode> Device<M> {
     /// Turn off reception and RF input bias power.
     ///
     /// Returns [`Error::Busy`] without sending shutdown commands while the
-    /// stream claim is held, including by dormant, stopped, or closing streams.
+    /// stream claim is held, including by dormant or stopped streams, close
+    /// operations, and background cleanup.
     /// Call [`RxStream::close`] to release it. A Busy rejection leaves the device
     /// usable. An unpolled operation has no lifecycle effects; once execution
     /// begins without a claim, shutdown is terminal and retryable.
@@ -1185,11 +1186,6 @@ impl<C: ControlBackend + AsyncStreamingBackend + 'static> RxBackend for C {}
 enum RxStreamState<C: RxBackend = NusbControl> {
     Dormant(RxStreamClaim<C>),
     Poisoned,
-    Closing {
-        claim: RxStreamClaim<C>,
-        stats: StreamingStats,
-    },
-    Closed(StreamingStats),
     #[cfg(not(target_arch = "wasm32"))]
     BlockingRaw(OwnedRawRxStreamInner<C>),
     #[cfg(not(target_arch = "wasm32"))]
@@ -1199,9 +1195,8 @@ enum RxStreamState<C: RxBackend = NusbControl> {
 }
 
 impl<C: RxBackend> RxStreamState<C> {
-    fn begin_close(&mut self) {
-        let state = core::mem::replace(self, RxStreamState::Poisoned);
-        let (claim, stats) = match state {
+    fn into_close_parts(self) -> Result<(RxStreamClaim<C>, StreamingStats)> {
+        let parts = match self {
             RxStreamState::Dormant(claim) => (claim, StreamingStats::default()),
             RxStreamState::AsyncRaw(mut inner) => {
                 inner.retire_stream();
@@ -1225,21 +1220,9 @@ impl<C: RxBackend> RxStreamState<C> {
                 }
                 (inner.claim, inner.stats)
             }
-            state => {
-                *self = state;
-                return;
-            }
+            RxStreamState::Poisoned => return Err(Error::stream_closed("RX stream has no device")),
         };
-        *self = RxStreamState::Closing { claim, stats };
-    }
-
-    fn finish_close(&mut self) -> Result<StreamingStats> {
-        let stats = match &*self {
-            RxStreamState::Closing { stats, .. } | RxStreamState::Closed(stats) => *stats,
-            _ => return Err(Error::stream_closed("RX stream has no device")),
-        };
-        *self = RxStreamState::Closed(stats);
-        Ok(stats)
+        Ok(parts)
     }
 }
 
@@ -1248,7 +1231,7 @@ impl<C: RxBackend> RxStreamState<C> {
 struct RxStreamClaim<C: ControlBackend + 'static> {
     shared: Arc<DeviceShared<C>>,
     receiver: ReceiverState,
-    released: bool,
+    cleanup_armed: bool,
 }
 
 impl<C: ControlBackend + 'static> RxStreamClaim<C> {
@@ -1292,13 +1275,13 @@ impl<C: ControlBackend + 'static> RxStreamClaim<C> {
         Ok(Self {
             shared: Arc::clone(shared),
             receiver: ReceiverState::Stopped,
-            released: false,
+            cleanup_armed: true,
         })
     }
 
     fn release(&mut self) {
         self.shared.lock().claim = ClaimAvailability::Available;
-        self.released = true;
+        self.cleanup_armed = false;
     }
 
     fn close(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
@@ -1321,7 +1304,7 @@ impl<C: ControlBackend + 'static> RxStreamClaim<C> {
     // The owned operation keeps the claim reserved even before a WebUSB
     // background task is polled. Drop runs it to completion best-effort.
     fn cleanup(&mut self) -> impl MaybeFuture<Output = ()> + use<C> {
-        self.released = true;
+        self.cleanup_armed = false;
         let shared = Arc::clone(&self.shared);
         let operation = if self.begin_stop() {
             Either::left(shared.direct.receiver_mode(ReceiverMode::Off))
@@ -1341,7 +1324,7 @@ impl<C: ControlBackend + 'static> RxStreamClaim<C> {
 
 impl<C: ControlBackend + 'static> Drop for RxStreamClaim<C> {
     fn drop(&mut self) {
-        if self.released {
+        if !self.cleanup_armed {
             return;
         }
         let cleanup = self.cleanup();
@@ -1380,8 +1363,7 @@ impl<M: SampleMode> RxStream<M> {
 
     /// Start reception and the persistent USB transfer queue.
     ///
-    /// Returns [`Error::StreamClosed`] once close begins. A stream requiring
-    /// cleanup must be stopped before restarting.
+    /// A stream requiring cleanup must be stopped before restarting.
     ///
     /// Call [`MaybeFuture::wait`] for blocking operation on native targets, or
     /// await the returned operation for asynchronous operation.
@@ -1392,23 +1374,48 @@ impl<M: SampleMode> RxStream<M> {
     /// Stop reception and return accumulated streaming counters.
     ///
     /// This preserves the stream for restart, retains its exclusive claim, and
-    /// leaves RF bias power unchanged. Returns [`Error::StreamClosed`] once close begins.
+    /// leaves RF bias power unchanged.
     /// If this operation fails or is canceled after it starts, retry `stop`
     /// before reading or restarting.
     pub fn stop(&mut self) -> impl MaybeFuture<Output = Result<StreamingStats>> + '_ {
         StopOperation { stream: self }
     }
 
-    /// Permanently close reception and release the exclusive stream claim.
+    /// Consume the stream, stop reception, and return accumulated statistics.
     ///
-    /// Stops automatically and returns final statistics. Once first polled or
-    /// waited, only `close` may be retried, including after failure or cancellation.
-    /// Repeated successful closes return the same statistics without USB commands.
+    /// The returned operation owns the stream immediately, but retires its USB
+    /// queue and attempts receiver-off only when polled or waited. Success
+    /// releases the exclusive claim and the stream's device reference.
+    ///
+    /// Failure returns the original error; the stream cannot be retried. Failure
+    /// or cancellation invokes best-effort drop cleanup, as does dropping an
+    /// unpolled operation. WebUSB runs that fallback in the background and keeps
+    /// the claim reserved until its attempt finishes.
+    ///
     /// Native callers may wait or await regardless of the selected read mode.
-    pub fn close(&mut self) -> impl MaybeFuture<Output = Result<StreamingStats>> + '_ {
-        CloseOperation {
-            state: &mut self.state,
-        }
+    /// WebUSB supports awaiting only.
+    ///
+    /// Close moves the stream even before the operation is polled:
+    ///
+    /// ```compile_fail,E0382
+    /// # use hydrasdr_rs::RxStream;
+    /// fn example(mut rx: RxStream) {
+    ///     let close = rx.close();
+    ///     let _ = rx.start(); // rx was moved into close
+    /// }
+    /// ```
+    ///
+    /// A completed close cannot be called again:
+    ///
+    /// ```compile_fail,E0382
+    /// # use hydrasdr_rs::{RawAdc, RxStream};
+    /// async fn example(rx: RxStream<RawAdc>) {
+    ///     let _ = rx.close().await;
+    ///     let _ = rx.close().await; // rx was consumed
+    /// }
+    /// ```
+    pub fn close(self) -> impl MaybeFuture<Output = Result<StreamingStats>> + 'static {
+        CloseOperation { state: self.state }
     }
 
     fn initialize_async(&mut self) -> Result<()> {
@@ -1455,9 +1462,7 @@ impl<M: SampleMode> RxStream<M> {
             RxStreamState::AsyncF32(stream) => stream.stop().await,
             #[cfg(not(target_arch = "wasm32"))]
             RxStreamState::BlockingRaw(_) | RxStreamState::BlockingF32(_) => Err(Error::Busy),
-            RxStreamState::Poisoned | RxStreamState::Closing { .. } | RxStreamState::Closed(_) => {
-                Err(Error::stream_closed("RX stream has no device"))
-            }
+            RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
         }
     }
 
@@ -1506,9 +1511,7 @@ impl<M: SampleMode> RxStream<M> {
             RxStreamState::BlockingRaw(stream) => stream.stop(),
             RxStreamState::BlockingF32(stream) => stream.stop(),
             RxStreamState::AsyncRaw(_) | RxStreamState::AsyncF32(_) => Err(Error::Busy),
-            RxStreamState::Poisoned | RxStreamState::Closing { .. } | RxStreamState::Closed(_) => {
-                Err(Error::stream_closed("RX stream has no device"))
-            }
+            RxStreamState::Poisoned => Err(Error::stream_closed("RX stream has no device")),
         }
     }
 }
@@ -1659,39 +1662,35 @@ impl<M: SampleMode> MaybeFuture for StartOperation<'_, M> {
     }
 }
 
-struct CloseOperation<'a, C: RxBackend> {
-    state: &'a mut RxStreamState<C>,
+struct CloseOperation<C: RxBackend> {
+    state: RxStreamState<C>,
 }
 
-impl<'a, C: RxBackend> IntoFuture for CloseOperation<'a, C>
+impl<C: RxBackend> IntoFuture for CloseOperation<C>
 where
     RxStreamState<C>: crate::maybe_future::NonWasmSend,
 {
     type Output = Result<StreamingStats>;
-    type IntoFuture = BoxedOperationFuture<'a, Self::Output>;
+    type IntoFuture = BoxedOperationFuture<'static, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.state.begin_close();
-            if let RxStreamState::Closing { claim, .. } = &mut *self.state {
-                claim.close().await?;
-            }
-            self.state.finish_close()
+            let (mut claim, stats) = self.state.into_close_parts()?;
+            claim.close().await?;
+            Ok(stats)
         })
     }
 }
 
-impl<C: RxBackend> MaybeFuture for CloseOperation<'_, C>
+impl<C: RxBackend> MaybeFuture for CloseOperation<C>
 where
     RxStreamState<C>: crate::maybe_future::NonWasmSend,
 {
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(self) -> Self::Output {
-        self.state.begin_close();
-        if let RxStreamState::Closing { claim, .. } = &mut *self.state {
-            claim.close().wait()?;
-        }
-        self.state.finish_close()
+        let (mut claim, stats) = self.state.into_close_parts()?;
+        claim.close().wait()?;
+        Ok(stats)
     }
 }
 
@@ -1856,7 +1855,7 @@ mod tests {
         events: Mutex<Vec<FakeEvent>>,
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     enum FakeEvent {
         Control(VendorControlRequest),
         QueueDropped,
@@ -2347,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn close_all_modes_releases_queue_claim_and_owner_and_retains_statistics() {
+    fn close_all_modes_releases_queue_claim_and_owner_and_returns_statistics() {
         block_on(async {
             for mode in 0..4 {
                 for phase in 0..3 {
@@ -2355,28 +2354,28 @@ mod tests {
                         let control = FakeControl::default();
                         let state = Arc::clone(&control.state);
                         let mut device = fake_device(control);
-                        let mut rx = close_test_stream(&device, mode, phase).await;
+                        let rx = close_test_stream(&device, mode, phase).await;
                         assert!(matches!(device.shutdown().await, Err(Error::Busy)));
                         let before = requests(&state);
-                        drop(CloseOperation { state: &mut rx }.into_future());
-                        assert!(!matches!(
-                            rx,
-                            RxStreamState::Closing { .. } | RxStreamState::Closed(_)
-                        ));
+                        let operation = CloseOperation { state: rx };
                         assert_eq!(requests(&state), before);
-                        let operation = CloseOperation { state: &mut rx };
+                        let mut completed = None;
                         let stats = if wait {
                             operation.wait().unwrap()
                         } else {
-                            operation.await.unwrap()
+                            let mut future = operation.into_future();
+                            let stats = future.as_mut().await.unwrap();
+                            completed = Some(future);
+                            stats
                         };
-                        assert!(matches!(rx, RxStreamState::Closed(_)));
                         assert_eq!(Arc::strong_count(&device.shared), 1);
                         assert_eq!(
                             requests(&state).len(),
                             before.len() + usize::from(phase == 1)
                         );
-                        if phase != 0 {
+                        if phase == 0 {
+                            assert_eq!(stats, StreamingStats::default());
+                        } else {
                             assert!(stats.buffers_received > 0);
                             assert_eq!(
                                 state
@@ -2390,11 +2389,9 @@ mod tests {
                             );
                         }
                         let after = requests(&state);
-                        assert_eq!(CloseOperation { state: &mut rx }.wait().unwrap(), stats);
-                        assert_eq!(CloseOperation { state: &mut rx }.await.unwrap(), stats);
-                        assert_eq!(requests(&state), after);
                         let replacement = RxStreamClaim::acquire(&device.shared).unwrap();
-                        drop(rx);
+                        // Even a retained completed future has released its ownership.
+                        drop(completed);
                         assert!(matches!(
                             RxStreamClaim::acquire(&device.shared),
                             Err(Error::Busy)
@@ -2409,21 +2406,59 @@ mod tests {
     }
 
     #[test]
-    fn canceled_and_failed_close_keep_cleanup_owned_until_retry_or_drop() {
+    fn dropping_unpolled_close_operation_or_future_cleans_up_its_owned_stream() {
         block_on(async {
             for mode in 0..4 {
-                for retry in [false, true] {
+                for phase in 0..3 {
+                    for into_future in [false, true] {
+                        let control = FakeControl::default();
+                        let state = Arc::clone(&control.state);
+                        let mut device = fake_device(control);
+                        let rx = close_test_stream(&device, mode, phase).await;
+                        let before = state.events.lock().unwrap().clone();
+                        let operation = CloseOperation { state: rx };
+                        assert_eq!(*state.events.lock().unwrap(), before);
+                        assert!(matches!(device.shutdown().await, Err(Error::Busy)));
+                        if into_future {
+                            let future = operation.into_future();
+                            assert_eq!(*state.events.lock().unwrap(), before);
+                            assert!(matches!(device.shutdown().await, Err(Error::Busy)));
+                            drop(future);
+                        } else {
+                            drop(operation);
+                        }
+                        assert_eq!(Arc::strong_count(&device.shared), 1);
+                        if phase == 1 {
+                            assert!(state.events.lock().unwrap().ends_with(&[
+                                FakeEvent::QueueDropped,
+                                FakeEvent::Control(VendorControlRequest::receiver_mode(
+                                    ReceiverMode::Off
+                                )),
+                            ]));
+                        }
+                        let replacement = RxStreamClaim::acquire(&device.shared).unwrap();
+                        drop(replacement);
+                        device.shutdown().await.unwrap();
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn canceled_close_retains_claim_until_drop_fallback_finishes() {
+        block_on(async {
+            for mode in 0..4 {
+                for fail_fallback in [false, true] {
                     let control = FakeControl::default();
                     let state = Arc::clone(&control.state);
                     let mut device = fake_device(control);
-                    let mut rx = close_test_stream(&device, mode, 1).await;
+                    let rx = close_test_stream(&device, mode, 1).await;
                     state
                         .pause_control_out_at
                         .store(requests(&state).len() + 1, Ordering::SeqCst);
-                    let mut close = Box::pin(CloseOperation { state: &mut rx }.into_future());
+                    let mut close = CloseOperation { state: rx }.into_future();
                     assert!(futures_lite::future::poll_once(&mut close).await.is_none());
-                    drop(close);
-                    assert!(matches!(rx, RxStreamState::Closing { .. }));
                     assert!(matches!(device.shutdown().await, Err(Error::Busy)));
                     assert!(matches!(
                         RxStreamClaim::acquire(&device.shared),
@@ -2433,22 +2468,74 @@ mod tests {
                         FakeEvent::QueueDropped,
                         FakeEvent::Control(VendorControlRequest::receiver_mode(ReceiverMode::Off)),
                     ]));
-                    state.pause_control_out_at.store(0, Ordering::SeqCst);
-                    state.fail_control_out.store(true, Ordering::SeqCst);
-                    assert!(CloseOperation { state: &mut rx }.await.is_err());
-                    assert!(matches!(rx, RxStreamState::Closing { .. }));
-                    assert!(matches!(device.shutdown().await, Err(Error::Busy)));
-                    state.fail_control_out.store(false, Ordering::SeqCst);
-                    if retry {
-                        let stats = CloseOperation { state: &mut rx }.wait().unwrap();
-                        assert!(stats.buffers_received > 0);
-                        device.shutdown().await.unwrap();
+                    state
+                        .fail_control_out
+                        .store(fail_fallback, Ordering::SeqCst);
+                    drop(close);
+                    assert_eq!(Arc::strong_count(&device.shared), 1);
+                    assert_eq!(
+                        device.shared.lock().claim,
+                        if fail_fallback {
+                            ClaimAvailability::CleanupRequired
+                        } else {
+                            ClaimAvailability::Available
+                        }
+                    );
+                    if fail_fallback {
+                        assert!(matches!(
+                            RxStreamClaim::acquire(&device.shared),
+                            Err(Error::Busy)
+                        ));
                     } else {
-                        let owner = Arc::downgrade(&device.shared);
-                        drop(device);
-                        assert!(owner.upgrade().is_some());
-                        drop(rx);
-                        assert!(owner.upgrade().is_none());
+                        drop(RxStreamClaim::acquire(&device.shared).unwrap());
+                    }
+                    state.fail_control_out.store(false, Ordering::SeqCst);
+                    state.pause_control_out_at.store(0, Ordering::SeqCst);
+                    device.shutdown().await.unwrap();
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn failed_close_returns_original_error_and_runs_drop_fallback() {
+        block_on(async {
+            for mode in 0..4 {
+                for wait in [false, true] {
+                    for fail_fallback in [false, true] {
+                        let control = FakeControl::default();
+                        let state = Arc::clone(&control.state);
+                        let mut device = fake_device(control);
+                        let rx = close_test_stream(&device, mode, 1).await;
+                        let before = requests(&state).len();
+                        state
+                            .fail_control_out_at
+                            .store(before + 1, Ordering::SeqCst);
+                        state
+                            .fail_control_out
+                            .store(fail_fallback, Ordering::SeqCst);
+                        let operation = CloseOperation { state: rx };
+                        let error = if wait {
+                            operation.wait().unwrap_err()
+                        } else {
+                            operation.await.unwrap_err()
+                        };
+                        assert!(matches!(
+                            error,
+                            Error::Transfer(nusb::transfer::TransferError::Fault)
+                        ));
+                        assert_eq!(requests(&state).len(), before + 2);
+                        assert_eq!(Arc::strong_count(&device.shared), 1);
+                        assert_eq!(
+                            device.shared.lock().claim,
+                            if fail_fallback {
+                                ClaimAvailability::CleanupRequired
+                            } else {
+                                ClaimAvailability::Available
+                            }
+                        );
+                        state.fail_control_out.store(false, Ordering::SeqCst);
+                        device.shutdown().await.unwrap();
                     }
                 }
             }
@@ -2476,7 +2563,7 @@ mod tests {
                 state.fail_control_out.store(false, Ordering::SeqCst);
                 drop(device);
                 assert!(owner.upgrade().is_some());
-                let stats = CloseOperation { state: &mut rx }.await.unwrap();
+                let stats = CloseOperation { state: rx }.await.unwrap();
                 assert!(stats.buffers_received > 0);
                 assert!(owner.upgrade().is_none());
                 assert!(requests(&state).ends_with(&[
@@ -2484,55 +2571,27 @@ mod tests {
                     VendorControlRequest::receiver_mode(ReceiverMode::Off),
                     VendorControlRequest::set_rf_bias(0),
                 ]));
-                let after = requests(&state);
-                assert_eq!(CloseOperation { state: &mut rx }.wait().unwrap(), stats);
-                drop(rx);
-                assert_eq!(requests(&state), after);
+                assert_eq!(Arc::strong_count(&state), 1);
             }
         });
     }
 
     #[test]
-    fn closed_public_stream_rejects_start_stop_and_reads_in_both_modes() {
-        block_on(async {
-            let mut raw = RxStream::<RawAdc> {
-                state: RxStreamState::Closed(StreamingStats::default()),
+    fn public_close_operation_and_future_are_send_and_static() {
+        fn assert_owned<T: Send + 'static>(_: &T) {}
+        fn check<M: SampleMode>() {
+            // No device is needed to check the public operation's ownership bounds.
+            let rx = RxStream::<M> {
+                state: RxStreamState::Poisoned,
                 mode: PhantomData,
             };
-            let mut iq = RxStream::<F32Iq> {
-                state: RxStreamState::Closed(StreamingStats::default()),
-                mode: PhantomData,
-            };
-            assert!(matches!(
-                raw.start().wait(),
-                Err(Error::StreamClosed { .. })
-            ));
-            assert!(matches!(raw.start().await, Err(Error::StreamClosed { .. })));
-            assert!(matches!(raw.stop().wait(), Err(Error::StreamClosed { .. })));
-            assert!(matches!(raw.stop().await, Err(Error::StreamClosed { .. })));
-            assert!(matches!(
-                raw.next_block(None).wait(),
-                Err(Error::StreamClosed { .. })
-            ));
-            assert!(matches!(
-                raw.next_block(None).await,
-                Err(Error::StreamClosed { .. })
-            ));
-            assert!(matches!(iq.start().wait(), Err(Error::StreamClosed { .. })));
-            assert!(matches!(iq.start().await, Err(Error::StreamClosed { .. })));
-            assert!(matches!(iq.stop().wait(), Err(Error::StreamClosed { .. })));
-            assert!(matches!(iq.stop().await, Err(Error::StreamClosed { .. })));
-            assert!(matches!(
-                iq.read(&mut [], None).wait(),
-                Err(Error::StreamClosed { .. })
-            ));
-            assert!(matches!(
-                iq.read(&mut [], None).await,
-                Err(Error::StreamClosed { .. })
-            ));
-            assert_eq!(raw.close().await.unwrap(), raw.close().wait().unwrap());
-            assert_eq!(iq.close().await.unwrap(), iq.close().wait().unwrap());
-        });
+            let operation = rx.close();
+            assert_owned(&operation);
+            let future = operation.into_future();
+            assert_owned(&future);
+        }
+        check::<RawAdc>();
+        check::<F32Iq>();
     }
 
     #[test]
