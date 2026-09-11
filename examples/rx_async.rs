@@ -37,11 +37,12 @@ async fn run() -> hydrasdr_rs::Result<()> {
     let mut rx = dev.rx_stream()?;
     rx.start().await?;
     let mut samples = [Complex32::default(); 32];
+    // Reads may be partial; only samples[..count] contains received data.
     let count = rx.read(&mut samples, None).await?;
     // Close consumes rx and releases its stream claim.
     let stats = rx.close().await?;
     dev.shutdown().await?;
-    println!("rx samples: {count}, first={:?}", samples.first());
+    println!("rx samples: {count}, first={:?}", samples[..count].first());
     println!("short async RX complete: {stats:?}");
 
     Ok(())

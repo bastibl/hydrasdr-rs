@@ -1,1052 +1,693 @@
+//! Typed receiver configuration and device discovery/opening.
+
+use crate::{
+    config::{
+        Config, ConfigBuilder, DeviceSelector, F32Iq, GainConfig, RawAdc, RfPort, SampleFormat,
+        SampleMode, validate_frequency, validate_gain,
+    },
+    errors::Result,
+    maybe_future::{MaybeFutureExt, ready},
+    protocol::{self, Command, InRequest, OutRequest, ReceiveSettings},
+    rfone::{RFONE_F32_IQ_SAMPLE_RATES, RFONE_RAW_ADC_SAMPLE_RATES},
+    rx::RxStream,
+    session::{RxStreamClaim, Session},
+    usb::{ControlBackend, NusbTransport},
+};
+use nusb::MaybeFuture;
 use std::sync::Arc;
 
-use nusb::MaybeFuture;
-
-use crate::commands::{ReceiverMode, VendorRequest};
-use crate::config::{Config, RfPort, SampleMode};
-use crate::discovery;
-use crate::errors::{Error, Result};
-use crate::maybe_future::{Either, MaybeFutureExt, ready};
-use crate::rfone::{
-    RFONE_F32_IQ_SAMPLE_RATES, RFONE_FIRMWARE_IQ_SAMPLE_RATES, RFONE_LINEARITY_LNA_GAINS,
-    RFONE_LINEARITY_MIXER_GAINS, RFONE_LINEARITY_VGA_GAINS, RFONE_RAW_ADC_SAMPLE_RATES,
-    RFONE_RX_ENDPOINT, RFONE_SENSITIVITY_LNA_GAINS, RFONE_SENSITIVITY_MIXER_GAINS,
-    RFONE_SENSITIVITY_VGA_GAINS, rf_port_infos,
-};
-use crate::streaming::{
-    AsyncDirectRxStream, AsyncRawRxStream, AsyncStreamingBackend, StreamingState,
-};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::streaming::{DirectRxStream, RawRxStream, StreamingBackend, StreamingStats};
-use crate::types::{BoardId, DecimationPolicy, DeviceInfo, PartIdSerialNo, SampleType};
-use crate::usb::control::{
-    ControlBackend, NusbControl, VendorControlRequest, decode_part_id_serial,
-};
-
-const EXPECTED_FW_PREFIX: &str = "HydraSDR RF";
-const VERSION_STRING_SIZE: usize = 255;
-const MAX_FREQ_HZ: u64 = 10_000_000_000;
-const DECIMATION_FACTORS_DESC: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
-
-/// Direct HydraSDR device handle.
+/// Owned HydraSDR RFOne device handle.
 ///
-/// The default backend is `nusb`; tests can inject fake control/streaming backends with
-/// [`HydraSdr::from_control`] to verify C-parity request packing without hardware.
+/// The generic mode defaults to [`F32Iq`]. Use [`DeviceBuilder::raw_adc`] to
+/// construct a [`Device<RawAdc>`].
+///
+/// Hardware-opening examples are marked `no_run`; compile-only configuration
+/// examples live on [`crate::Config`] and [`crate::ConfigBuilder`].
+///
+/// ```no_run
+/// use hydrasdr_rs::{Device, GainPreset, MaybeFuture, RfPort};
+/// use std::time::Duration;
+///
+/// fn main() -> hydrasdr_rs::Result<()> {
+///     let mut dev = Device::builder()
+///         .frequency_hz(100_000_000)
+///         .sample_rate_hz(10_000_000)
+///         .raw_adc()
+///         .rf_port(RfPort::Rx0)
+///         .gain(GainPreset::Linearity(12))
+///         .open()
+///         .wait()?;
+///
+///     let mut rx = dev.rx_stream()?;
+///     rx.start().wait()?;
+///     if let Some(block) = rx
+///         .next_block(Some(Duration::from_secs(1)))
+///         .wait()?
+///     {
+///         println!("{} raw bytes", block.raw_bytes().len());
+///     }
+///     let stats = rx.close().wait()?;
+///     println!("{stats:?}");
+///     dev.shutdown().wait()?;
+///
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug)]
-pub(crate) struct HydraSdr<C = NusbControl> {
-    control: Arc<C>,
-    sample_type: SampleType,
-    decimation_policy: DecimationPolicy,
-    packing_enabled: bool,
-    streaming: StreamingState,
+pub struct Device<M: SampleMode = F32Iq> {
+    session: Arc<Session>,
+    config: Config<M>,
 }
 
-struct AppliedConfig {
-    sample_type: SampleType,
-    decimation_policy: DecimationPolicy,
-    decimation: u32,
-    packing: bool,
+impl Device<F32Iq> {
+    /// List visible HydraSDR RFOne USB devices without opening them.
+    pub fn list() -> impl MaybeFuture<Output = Result<Vec<crate::DeviceDescriptor>>> {
+        crate::discovery::list_devices()
+    }
+
+    /// Start building and opening a USB device.
+    pub fn builder() -> DeviceBuilder<F32Iq> {
+        DeviceBuilder::default()
+    }
+
+    /// Open the first visible HydraSDR RFOne with default configuration.
+    pub fn open() -> impl MaybeFuture<Output = Result<Self>> {
+        Self::builder().open()
+    }
+
+    /// Open one visible HydraSDR RFOne by serial with default configuration.
+    ///
+    /// Zero opens any device whose USB serial is absent, invalid, or zero.
+    pub fn open_serial(serial: u64) -> impl MaybeFuture<Output = Result<Self>> {
+        Self::builder().serial(serial).open()
+    }
+
+    /// Ask the browser to grant WebUSB access to a HydraSDR without opening it.
+    ///
+    /// Call this from a browser-window user gesture. After permission is granted,
+    /// [`Device::open`] may discover and open the device from a Web Worker.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_permission() -> Result<()> {
+        Self::builder().request_permission().await
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SelectedSampleRate {
-    param: u16,
-    decimation: u32,
-}
+impl<M: SampleMode> Device<M> {
+    /// Return immutable metadata read while opening the device.
+    pub fn info(&self) -> &DeviceInfo {
+        self.session.info.get().expect("opened device has metadata")
+    }
 
-impl<C> HydraSdr<C> {
-    /// Build a direct device handle from a control backend.
-    pub(crate) fn from_control(control: C) -> Self {
-        Self {
-            control: Arc::new(control),
-            sample_type: SampleType::Float32Iq,
-            decimation_policy: DecimationPolicy::LowBandwidth,
-            packing_enabled: false,
-            streaming: StreamingState::new(),
+    /// Return the configuration last successfully applied through this driver.
+    ///
+    /// RFOne's write-only controls do not provide hardware readback. A failed or
+    /// cancelled configuration operation leaves this snapshot unchanged.
+    pub fn config(&self) -> &Config<M> {
+        &self.config
+    }
+
+    /// Return the fixed sample rates supported for the active sample format.
+    ///
+    /// Converted F32 IQ results include exactly representable effective rates
+    /// produced by host-side decimation. This accessor performs no USB requests.
+    pub fn sample_rates(&self) -> Vec<u32> {
+        match M::FORMAT {
+            SampleFormat::RawAdc => RFONE_RAW_ADC_SAMPLE_RATES.to_vec(),
+            SampleFormat::F32Iq => RFONE_F32_IQ_SAMPLE_RATES.to_vec(),
         }
     }
 
-    /// Return the host-side decimation used by converted receive streams.
-    pub(crate) fn streaming_decimation_factor(&self) -> usize {
-        self.streaming.decimation_factor()
+    /// Apply a receiver configuration of the device's sample mode.
+    ///
+    /// A configuration for another mode is rejected at compile time:
+    ///
+    /// ```compile_fail
+    /// use hydrasdr_rs::{Config, Device, MaybeFuture, RawAdc};
+    /// fn configure_f32_as_raw(device: &mut Device<RawAdc>) {
+    ///     let f32_config = Config::builder().build().unwrap();
+    ///     device.configure(&f32_config).wait().unwrap();
+    /// }
+    /// ```
+    pub fn configure<'a>(
+        &'a mut self,
+        config: &'a Config<M>,
+    ) -> impl MaybeFuture<Output = Result<()>> + 'a {
+        let (commands, receive) = protocol::configuration(config);
+        self.update(config.clone(), commands, Some(receive), Ok(()))
     }
 
-    /// Return whether packed raw transfers are currently configured.
-    pub(crate) fn streaming_packing_enabled(&self) -> bool {
-        self.streaming.packing_enabled()
-    }
-
-    /// Create an independently owned streaming handle over the same USB interface.
-    pub(crate) fn stream_handle(&self) -> Self {
-        Self {
-            control: Arc::clone(&self.control),
-            sample_type: self.sample_type,
-            decimation_policy: self.decimation_policy,
-            packing_enabled: self.packing_enabled,
-            streaming: self.streaming.clone(),
-        }
-    }
-}
-
-impl<C: ControlBackend> HydraSdr<C> {
-    /// Read the board ID, matching `hydrasdr_board_id_read`.
-    pub(crate) fn board_id_read(&self) -> impl MaybeFuture<Output = Result<BoardId>> + use<C> {
-        self.control_in_exact(VendorControlRequest::board_id_read(), 1)
-            .map(|result| {
-                let data = result?;
-                BoardId::try_from(data[0]).map_err(|_| {
-                    Error::protocol("read board ID", "firmware returned an unknown board ID")
-                })
-            })
-    }
-
-    /// Read the firmware version C string, matching `hydrasdr_version_string_read`.
-    pub(crate) fn version_string_read(&self) -> impl MaybeFuture<Output = Result<String>> + use<C> {
-        self.control_in_exact(
-            VendorControlRequest::version_string_read(VERSION_STRING_SIZE),
-            0,
+    /// Set only the tuned center frequency.
+    pub fn set_frequency_hz(&mut self, frequency_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_frequency_hz_internal(frequency_hz);
+        self.update(
+            config,
+            vec![OutRequest::set_frequency(frequency_hz).into()],
+            None,
+            validate_frequency(frequency_hz),
         )
-        .map(|result| result.map(|data| decode_c_string(&data)))
     }
 
-    /// Read part ID and serial-number words, matching `hydrasdr_board_partid_serialno_read`.
-    pub(crate) fn board_partid_serialno_read(
-        &self,
-    ) -> impl MaybeFuture<Output = Result<PartIdSerialNo>> + use<C> {
-        self.control_in_exact(VendorControlRequest::board_partid_serialno_read(), 24)
-            .map(|result| result.and_then(|data| decode_part_id_serial(&data)))
-    }
-
-    pub(crate) fn into_device_info(
-        self,
-    ) -> impl MaybeFuture<Output = Result<(Self, DeviceInfo)>> + use<C> {
-        let fetch = self.fetch_device_info();
-        fetch.map(move |result| Ok((self, result?)))
-    }
-
-    fn fetch_device_info(&self) -> impl MaybeFuture<Output = Result<DeviceInfo>> + use<C> {
-        let board_id = self.board_id_read();
-        let firmware = self.version_string_read();
-        let part_serial = self.board_partid_serialno_read();
-        board_id
-            .map_err(|error| error.at("reading HydraSDR board ID"))
-            .and_then(move |board_id| {
-                firmware
-                    .map_err(|error| error.at("reading HydraSDR firmware version"))
-                    .map_ok(move |firmware| (board_id, firmware))
-            })
-            .and_then(move |(board_id, firmware)| {
-                part_serial
-                    .map_err(|error| error.at("reading HydraSDR part ID and serial number"))
-                    .map_ok(move |part_serial| (board_id, firmware, part_serial))
-            })
-            .map(move |result| {
-                let (board_id, firmware, part_serial) = result?;
-                Ok(build_device_info(board_id, firmware, part_serial))
-            })
-    }
-
-    pub(crate) fn configure<M: SampleMode>(
-        &mut self,
-        config: &Config<M>,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C, M> {
-        let operation = self.prepare_config(config);
-        operation.map(move |result| {
-            self.apply_config_state(result?);
-            Ok(())
-        })
-    }
-
-    pub(crate) fn into_configured<M: SampleMode>(
-        mut self,
-        config: Config<M>,
-    ) -> impl MaybeFuture<Output = Result<Self>> + use<C, M> {
-        let operation = self.prepare_config(&config);
-        operation.map(move |result| {
-            self.apply_config_state(result?);
-            Ok(self)
-        })
-    }
-
-    fn prepare_config<M: SampleMode>(
-        &self,
-        config: &Config<M>,
-    ) -> impl MaybeFuture<Output = Result<AppliedConfig>> + use<C, M> {
-        let frequency = config.frequency_hz();
-        let sample_rate = config.sample_rate_hz();
-        let sample_type = M::FORMAT.sample_type();
-        let decimation_policy = config.decimation_policy_internal();
-        let port = config.rf_port();
-        let gain = config.gain();
-        let bias_tee = config.bias_tee();
-        let packing = config.packing_internal();
-
-        let control = Arc::clone(&self.control);
-        let rate_config = sample_rate_config(sample_type, decimation_policy, sample_rate);
-        let gain_requests = gain_config_plan(gain);
-        let mut gain_requests = gain_requests.into_iter();
-        let [gain0, gain1, gain2, gain3, gain4] = [
-            gain_requests.next(),
-            gain_requests.next(),
-            gain_requests.next(),
-            gain_requests.next(),
-            gain_requests.next(),
-        ];
-        let set_frequency = Self::control_out_with(
-            Arc::clone(&control),
-            VendorControlRequest::set_frequency(frequency),
-        );
-
-        set_frequency
-            .and_then(move |()| ready(rate_config))
-            .and_then({
-                let control = Arc::clone(&control);
-                move |selected| {
-                    Self::control_in_exact_with(
-                        control,
-                        VendorControlRequest::set_samplerate(selected.param),
-                        1,
-                    )
-                    .map(move |result| {
-                        validate_samplerate_response(&result?)?;
-                        Ok(selected.decimation)
-                    })
-                }
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| {
-                    Self::control_in_exact_with(control, VendorControlRequest::set_rf_port(port), 1)
-                        .map(move |result| {
-                            let response = result?;
-                            if response.first().copied() != Some(1) {
-                                return Err(Error::protocol(
-                                    "set RF port",
-                                    "firmware rejected the requested RF port",
-                                ));
-                            }
-                            Ok(state)
-                        })
-                }
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| gain_step(control, gain0).map_ok(move |_| state)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| gain_step(control, gain1).map_ok(move |_| state)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| gain_step(control, gain2).map_ok(move |_| state)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| gain_step(control, gain3).map_ok(move |_| state)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| gain_step(control, gain4).map_ok(move |_| state)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |state| {
-                    Self::control_in_exact_with(
-                        control,
-                        VendorControlRequest::set_packing(u8::from(packing)),
-                        1,
-                    )
-                    .map_ok(move |_| state)
-                }
-            })
-            .and_then(move |state| {
-                Self::control_out_with(
-                    control,
-                    VendorControlRequest::set_rf_bias(u8::from(bias_tee)),
-                )
-                .map_ok(move |_| state)
-            })
-            .map(move |result| {
-                let decimation = result?;
-                Ok(AppliedConfig {
-                    sample_type,
-                    decimation_policy,
-                    decimation,
-                    packing,
-                })
-            })
-    }
-
-    fn apply_config_state(&mut self, state: AppliedConfig) {
-        self.sample_type = state.sample_type;
-        self.decimation_policy = state.decimation_policy;
-        self.streaming
-            .set_decimation(state.decimation as usize)
-            .expect("validated HydraSDR decimation factor");
-        self.packing_enabled = state.packing;
-        self.streaming.set_packing(state.packing);
-    }
-
-    /// Set a supported sample rate by its fixed firmware-table index.
-    pub(crate) fn set_samplerate(
-        &mut self,
-        samplerate: u32,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        self.set_samplerate_for_policy(samplerate, self.decimation_policy)
-    }
-
-    /// Set tuning frequency in Hz, matching `hydrasdr_set_freq` validation.
-    pub(crate) fn set_freq(
-        &mut self,
-        freq_hz: u64,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        let validation = if freq_hz == 0 || freq_hz > MAX_FREQ_HZ {
-            Err(Error::invalid_config(
-                "frequency_hz",
-                "must be nonzero and at most 10 GHz",
-            ))
-        } else {
-            Ok(())
-        };
-        let control = Arc::clone(&self.control);
-        ready(validation).and_then(move |()| {
-            Self::control_out_with(control, VendorControlRequest::set_frequency(freq_hz))
-        })
-    }
-
-    pub(crate) fn set_gain_config(
-        &mut self,
-        gain: crate::GainConfig,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let requests = gain_config_plan(gain);
-        self.apply_gain_plan(requests)
-    }
-
-    pub(crate) fn set_packing(
-        &mut self,
-        enabled: bool,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        self.control_in_exact(VendorControlRequest::set_packing(u8::from(enabled)), 1)
-            .map(move |result| {
-                result?;
-                self.packing_enabled = enabled;
-                self.streaming.set_packing(enabled);
-                Ok(())
-            })
-    }
-
-    pub(crate) fn set_decimation_policy(
+    /// Set only the requested sample rate.
+    ///
+    /// The value is a real ADC rate for [`SampleFormat::RawAdc`] and an
+    /// effective complex output rate for [`SampleFormat::F32Iq`]. The value must
+    /// be one of the fixed rates returned by [`Device::sample_rates`].
+    pub fn set_sample_rate_hz(
         &mut self,
         sample_rate_hz: u32,
-        policy: DecimationPolicy,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        self.set_samplerate_for_policy(sample_rate_hz, policy)
+    ) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_sample_rate_hz_internal(sample_rate_hz);
+        self.update_rate(config)
     }
 
-    /// Select an RF input port and require the firmware success byte used by the C API.
-    pub(crate) fn set_rf_port(
+    /// Set only the selected RF input port.
+    pub fn set_rf_port(&mut self, port: RfPort) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_rf_port_internal(port);
+        self.update(
+            config,
+            vec![InRequest::set_rf_port(port).into()],
+            None,
+            Ok(()),
+        )
+    }
+
+    /// Replace the complete gain configuration.
+    pub fn set_gain(&mut self, gain: GainConfig) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_gain_internal(gain);
+        let commands = protocol::gain_config_plan(gain)
+            .into_iter()
+            .map(Command::from)
+            .collect();
+        self.update(config, commands, None, validate_gain(gain))
+    }
+
+    /// Enable or disable RF input bias power.
+    pub fn set_bias_tee(&mut self, enabled: bool) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_bias_tee_internal(enabled);
+        self.update(
+            config,
+            vec![OutRequest::set_rf_bias(enabled).into()],
+            None,
+            Ok(()),
+        )
+    }
+
+    /// Turn off reception and RF input bias power.
+    ///
+    /// Returns [`crate::Error::Busy`] without sending shutdown commands while the
+    /// stream claim is held, including by dormant or stopped streams, close
+    /// operations, and background cleanup.
+    /// Call [`RxStream::close`] to release it. A Busy rejection leaves the device
+    /// usable. An unpolled operation has no lifecycle effects; once execution
+    /// begins without a claim, shutdown is terminal and retryable.
+    ///
+    /// Both shutdown commands are attempted even if turning off the receiver
+    /// fails. Await this operation in async code, or call [`MaybeFuture::wait`]
+    /// on native targets. Native drops perform the same sequence best-effort;
+    /// WebUSB drops schedule it as a background operation. Streams keep the
+    /// device alive, so dropping this handle does not interrupt reception or
+    /// prevent a stream from restarting. Final cleanup happens when the last
+    /// device or stream owner is dropped. Explicit shutdown is required when
+    /// the caller must observe completion or an error. A failed or canceled
+    /// shutdown can be retried and leaves the final owner's drop fallback armed.
+    #[must_use = "shutdown must be awaited or waited to send hardware cleanup commands"]
+    pub fn shutdown(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        self.session.shutdown()
+    }
+
+    /// Create the device's exclusively claimed typed receive stream.
+    ///
+    /// The device remains available for live frequency, sample-rate, RF-port,
+    /// and gain changes while reception is active. The stream starts lazily
+    /// when [`RxStream::start`] is waited or awaited. Only one stream may be
+    /// claimed at a time. A stream keeps the device alive even after this handle
+    /// is dropped, including while the stream is stopped. Dropping the stream
+    /// releases the claim after best-effort receiver cleanup; WebUSB performs
+    /// that cleanup in the background.
+    pub fn rx_stream(&self) -> Result<RxStream<M>> {
+        Ok(RxStream::new(RxStreamClaim::acquire(&self.session)?))
+    }
+}
+
+impl Device<RawAdc> {
+    /// Enable or disable packed raw-sample transfers.
+    ///
+    /// An active raw stream adopts the new transfer format on its next block.
+    pub fn set_packing(&mut self, enabled: bool) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_packing_internal(enabled);
+        let receive = ReceiveSettings {
+            packing: enabled,
+            ..self.session.receive_settings()
+        };
+        self.update(
+            config,
+            vec![InRequest::set_packing(enabled).into()],
+            Some(receive),
+            Ok(()),
+        )
+    }
+}
+
+impl Device<F32Iq> {
+    /// Change the firmware/host decimation policy and reapply the requested IQ rate.
+    ///
+    /// An active converted stream adopts the resulting host decimation factor
+    /// on its next read.
+    pub fn set_decimation_policy(
         &mut self,
-        port: RfPort,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        self.control_in_exact(VendorControlRequest::set_rf_port(port), 1)
-            .map(|result| {
-                let response = result?;
-                if response.first().copied() != Some(1) {
-                    return Err(Error::protocol(
-                        "set RF port",
-                        "firmware rejected the requested RF port",
-                    ));
-                }
-                Ok(())
-            })
+        policy: crate::DecimationPolicy,
+    ) -> impl MaybeFuture<Output = Result<()>> {
+        let mut config = self.config.clone();
+        config.set_decimation_policy_internal(policy);
+        self.update_rate(config)
     }
+}
 
-    /// Set receiver mode directly.
-    pub(crate) fn receiver_mode(
-        &self,
-        mode: ReceiverMode,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        self.control_out(VendorControlRequest::receiver_mode(mode))
-    }
-
-    /// Enable or disable RF input bias power directly.
-    pub(crate) fn set_rf_bias(
-        &self,
-        enabled: bool,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        self.control_out(VendorControlRequest::set_rf_bias(u8::from(enabled)))
-    }
-
-    fn set_samplerate_for_policy(
+impl<M: SampleMode> Device<M> {
+    fn update(
         &mut self,
-        samplerate: u32,
-        policy: DecimationPolicy,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let control = Arc::clone(&self.control);
-        let sample_type = self.sample_type;
-        let config = sample_rate_config(sample_type, policy, samplerate);
-        ready(config)
-            .and_then(move |selected| {
-                Self::control_in_exact_with(
-                    control,
-                    VendorControlRequest::set_samplerate(selected.param),
-                    1,
-                )
-                .map(move |result| {
-                    validate_samplerate_response(&result?)?;
-                    Ok(selected.decimation)
-                })
-            })
-            .map(move |result| {
-                let decimation = result?;
-                self.streaming.set_decimation(decimation as usize)?;
-                self.decimation_policy = policy;
-                Ok(())
-            })
+        proposed: Config<M>,
+        commands: Vec<Command>,
+        receive: Option<ReceiveSettings>,
+        validation: Result<()>,
+    ) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        apply_update(
+            &self.session,
+            &mut self.config,
+            proposed,
+            commands,
+            receive,
+            validation,
+        )
     }
 
-    fn apply_gain_plan(
-        &mut self,
-        requests: Vec<VendorControlRequest>,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<'_, C> {
-        let mut requests = requests.into_iter();
-        let [step0, step1, step2, step3, step4] = [
-            requests.next(),
-            requests.next(),
-            requests.next(),
-            requests.next(),
-            requests.next(),
-        ];
-        let control = Arc::clone(&self.control);
-        ready(Ok(()))
-            .and_then({
-                let control = Arc::clone(&control);
-                move |()| gain_step(control, step0)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |()| gain_step(control, step1)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |()| gain_step(control, step2)
-            })
-            .and_then({
-                let control = Arc::clone(&control);
-                move |()| gain_step(control, step3)
-            })
-            .and_then(move |()| gain_step(control, step4))
-    }
-
-    fn control_in_exact(
-        &self,
-        request: VendorControlRequest,
-        len: usize,
-    ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<C> {
-        Self::control_in_exact_with(Arc::clone(&self.control), request, len)
-    }
-
-    fn control_in_exact_with(
-        control: Arc<C>,
-        request: VendorControlRequest,
-        len: usize,
-    ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<C> {
-        control.control_in(request).map(move |result| {
-            let data = result?;
-            if data.len() < len {
-                return Err(Error::protocol(
-                    "control transfer",
-                    "response is shorter than requested",
-                ));
-            }
-            Ok(data)
+    fn update_rate(&mut self, proposed: Config<M>) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        let rate = protocol::sample_rate_config(
+            M::FORMAT,
+            proposed.decimation_policy_internal(),
+            proposed.sample_rate_hz(),
+        );
+        ready(rate).and_then(move |rate| {
+            let receive = ReceiveSettings {
+                decimation: rate.decimation as usize,
+                ..self.session.receive_settings()
+            };
+            self.update(
+                proposed,
+                vec![InRequest::set_samplerate(rate.param).into()],
+                Some(receive),
+                Ok(()),
+            )
         })
     }
-
-    fn control_out(
-        &self,
-        request: VendorControlRequest,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        Self::control_out_with(Arc::clone(&self.control), request)
-    }
-
-    fn control_out_with(
-        control: Arc<C>,
-        request: VendorControlRequest,
-    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-        control.control_out(request)
-    }
 }
 
-impl<C> HydraSdr<C> {
-    pub(crate) fn visible_sample_rates(&self) -> Vec<u32> {
-        if !self.sample_type_is_iq() {
-            return RFONE_RAW_ADC_SAMPLE_RATES.to_vec();
-        }
-        RFONE_F32_IQ_SAMPLE_RATES.to_vec()
-    }
-
-    fn sample_type_is_iq(&self) -> bool {
-        self.sample_type == SampleType::Float32Iq
-    }
+/// Builder that selects, opens, and initially configures a `nusb` device.
+///
+/// The generic mode defaults to [`F32Iq`].
+///
+/// Use [`DeviceBuilder::config`] to validate the same settings without
+/// opening hardware, or [`DeviceBuilder::open`] to apply them to a selected RFOne.
+///
+/// ```
+/// use hydrasdr_rs::{Device, GainPreset};
+///
+/// let config = Device::builder()
+///     .raw_adc()
+///     .frequency_hz(433_920_000)
+///     .sample_rate_hz(5_000_000)
+///     .gain(GainPreset::Sensitivity(8))
+///     .config()?;
+///
+/// assert_eq!(config.frequency_hz(), 433_920_000);
+/// # Ok::<(), hydrasdr_rs::Error>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct DeviceBuilder<M: SampleMode = F32Iq> {
+    selector: DeviceSelector,
+    config: ConfigBuilder<M>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl<C> HydraSdr<C>
-where
-    C: ControlBackend + StreamingBackend,
-{
-    /// Start a persistent synchronous pull RX stream for raw USB blocks.
-    pub(crate) fn start_raw_rx_stream(&self) -> Result<RawRxStream<C::BulkIn>> {
-        self.receiver_mode(ReceiverMode::Off).wait()?;
-        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).wait();
-                return Err(err);
-            }
-        };
-        let prepared = RawRxStream::prepare(bulk_in, self.streaming.config());
-        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).wait() {
-            let _ = self.receiver_mode(ReceiverMode::Off).wait();
-            return Err(err);
-        }
-
-        match prepared.start_raw() {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).wait();
-                Err(err)
-            }
-        }
-    }
-
-    pub(crate) fn close_raw_rx_stream(
-        &self,
-        mut stream: RawRxStream<C::BulkIn>,
-    ) -> (StreamingStats, Result<()>) {
-        let stats = stream.close();
-        (stats, self.receiver_mode(ReceiverMode::Off).wait())
-    }
-
-    /// Start a persistent synchronous pull RX stream for unpacked float32 IQ samples.
-    pub(crate) fn start_rx_stream(&self) -> Result<DirectRxStream<C::BulkIn>> {
-        if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
-            return Err(Error::Unsupported);
-        }
-
-        self.receiver_mode(ReceiverMode::Off).wait()?;
-        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).wait();
-                return Err(err);
-            }
-        };
-        let prepared = DirectRxStream::prepare(bulk_in, self.streaming.config());
-        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).wait() {
-            let _ = self.receiver_mode(ReceiverMode::Off).wait();
-            return Err(err);
-        }
-
-        match prepared.start_direct() {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).wait();
-                Err(err)
-            }
-        }
-    }
-
-    pub(crate) fn close_rx_stream(
-        &self,
-        mut stream: DirectRxStream<C::BulkIn>,
-    ) -> (StreamingStats, Result<()>) {
-        let stats = stream.close();
-        (stats, self.receiver_mode(ReceiverMode::Off).wait())
-    }
-}
-
-impl<C> HydraSdr<C>
-where
-    C: ControlBackend + AsyncStreamingBackend,
-{
-    /// Start a persistent async pull RX stream for raw USB blocks.
-    pub(crate) async fn start_raw_rx_stream_async(&self) -> Result<AsyncRawRxStream<C::BulkIn>> {
-        self.receiver_mode(ReceiverMode::Off).await?;
-        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).await;
-                return Err(err);
-            }
-        };
-        let prepared = AsyncRawRxStream::prepare(bulk_in, self.streaming.config());
-        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).await {
-            let _ = self.receiver_mode(ReceiverMode::Off).await;
-            return Err(err);
-        }
-
-        match prepared.start_async_raw().await {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).await;
-                Err(err)
-            }
-        }
-    }
-
-    /// Start a persistent async pull RX stream for unpacked float32 IQ samples.
-    pub(crate) async fn start_rx_stream_async(&self) -> Result<AsyncDirectRxStream<C::BulkIn>> {
-        if self.sample_type != SampleType::Float32Iq || self.packing_enabled {
-            return Err(Error::Unsupported);
-        }
-
-        self.receiver_mode(ReceiverMode::Off).await?;
-        let bulk_in = match self.control.as_ref().bulk_in(RFONE_RX_ENDPOINT) {
-            Ok(bulk_in) => bulk_in,
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).await;
-                return Err(err);
-            }
-        };
-        let prepared = AsyncDirectRxStream::prepare(bulk_in, self.streaming.config());
-        if let Err(err) = self.receiver_mode(ReceiverMode::Rx).await {
-            let _ = self.receiver_mode(ReceiverMode::Off).await;
-            return Err(err);
-        }
-
-        match prepared.start_async_direct().await {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                let _ = self.receiver_mode(ReceiverMode::Off).await;
-                Err(err)
-            }
+impl Default for DeviceBuilder<F32Iq> {
+    fn default() -> Self {
+        Self {
+            selector: DeviceSelector::First,
+            config: ConfigBuilder::default(),
         }
     }
 }
 
-impl HydraSdr<NusbControl> {
-    /// Open the first visible HydraSDR RFOne through `nusb`, matching `hydrasdr_open`.
-    pub(crate) fn open() -> impl MaybeFuture<Output = Result<Self>> {
-        Self::open_selected(None)
+impl<M: SampleMode> DeviceBuilder<M> {
+    /// Select a device by normalized 64-bit serial number.
+    ///
+    /// Zero selects any device whose USB serial is absent, invalid, or zero.
+    pub fn serial(mut self, serial: u64) -> Self {
+        self.selector = DeviceSelector::Serial(serial);
+        self
     }
 
-    /// Open a HydraSDR RFOne by parsed serial number, matching `hydrasdr_open_sn`.
-    pub(crate) fn open_sn(serial: u64) -> impl MaybeFuture<Output = Result<Self>> {
-        Self::open_selected(Some(serial))
+    /// Ask the browser to grant WebUSB access to the selected HydraSDR.
+    ///
+    /// This only performs the browser permission request; it does not open or
+    /// configure the device. Call it from a browser-window user gesture, then
+    /// use [`DeviceBuilder::open`] from either the window or a Web Worker.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_permission(&self) -> Result<()> {
+        let serial = match self.selector {
+            DeviceSelector::First => None,
+            DeviceSelector::Serial(serial) => Some(serial),
+        };
+        crate::discovery::request_device_permission(serial).await
     }
 
-    fn open_selected(serial: Option<u64>) -> impl MaybeFuture<Output = Result<Self>> {
-        discovery::select_nusb_device(serial)
-            .and_then(|info| {
-                info.open()
-                    .map_err(Error::from)
-                    .map_err(|error| error.at("opening USB device"))
+    /// Set the tuned center frequency in Hz.
+    ///
+    /// RFOne accepts center frequencies in the inclusive range
+    /// `24_000_000..=1_800_000_000` Hz.
+    pub fn frequency_hz(mut self, value: u64) -> Self {
+        self.config = self.config.frequency_hz(value);
+        self
+    }
+
+    /// Set the requested sample rate in Hz.
+    ///
+    /// For [`SampleFormat::RawAdc`] this is a real ADC rate; for
+    /// [`SampleFormat::F32Iq`] it is the effective complex output rate after any
+    /// host-side decimation. The builder accepts exactly the fixed rates
+    /// returned by [`Device::sample_rates`] for the selected format.
+    pub fn sample_rate_hz(mut self, value: u32) -> Self {
+        self.config = self.config.sample_rate_hz(value);
+        self
+    }
+
+    /// Select the RF input port.
+    pub fn rf_port(mut self, value: crate::RfPort) -> Self {
+        self.config = self.config.rf_port(value);
+        self
+    }
+
+    /// Set the gain configuration.
+    ///
+    /// Preset gain indexes must be in the inclusive range `0..=21`.
+    /// Stage gains use the ranges documented on [`crate::StageGain::Manual`].
+    pub fn gain(mut self, value: impl Into<crate::GainConfig>) -> Self {
+        self.config = self.config.gain(value);
+        self
+    }
+
+    /// Enable or disable the RF port bias tee.
+    pub fn bias_tee(mut self, enabled: bool) -> Self {
+        self.config = self.config.bias_tee(enabled);
+        self
+    }
+
+    /// Build the reusable configuration represented by this builder.
+    pub fn config(self) -> Result<Config<M>> {
+        self.config.build()
+    }
+
+    /// Open and configure the selected device.
+    ///
+    /// Await this operation in async code, or call [`MaybeFuture::wait`] on native targets.
+    /// After USB open succeeds, configuration failure or cancellation performs
+    /// receiver-off and bias-off cleanup. WebUSB cancellation schedules that
+    /// cleanup in the background.
+    pub fn open(self) -> impl MaybeFuture<Output = Result<Device<M>>> {
+        let serial = match self.selector {
+            DeviceSelector::First => None,
+            DeviceSelector::Serial(serial) => Some(serial),
+        };
+        ready(self.config.build()).and_then(move |config| {
+            NusbTransport::open(serial).and_then(move |control| {
+                Session::initialize(control, config.clone())
+                    .map_ok(move |session| Device { session, config })
             })
-            .and_then(|device| {
-                device.set_configuration(1).map(move |result| {
-                    match result {
-                        Ok(()) => {}
-                        Err(err) if err.kind() == nusb::ErrorKind::Unsupported => {}
-                        Err(err) => {
-                            return Err(Error::from(err).at("selecting USB configuration 1"));
-                        }
+        })
+    }
+}
+
+impl DeviceBuilder<RawAdc> {
+    /// Enable or disable packed raw-sample transfers.
+    pub fn packing(mut self, enabled: bool) -> Self {
+        self.config = self.config.packing(enabled);
+        self
+    }
+}
+
+impl DeviceBuilder<F32Iq> {
+    /// Select raw ADC samples instead of the default converted IQ mode.
+    pub fn raw_adc(self) -> DeviceBuilder<RawAdc> {
+        DeviceBuilder {
+            selector: self.selector,
+            config: self.config.raw_adc(),
+        }
+    }
+
+    /// Set the firmware/host decimation policy for float IQ samples.
+    pub fn decimation_policy(mut self, value: crate::DecimationPolicy) -> Self {
+        self.config = self.config.decimation_policy(value);
+        self
+    }
+}
+
+/// RF port metadata returned in [`DeviceInfo`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct RfPortInfo {
+    /// Protocol selector used to activate this port.
+    pub port: crate::RfPort,
+    /// Firmware-provided RF port name.
+    pub name: &'static str,
+    /// Minimum tunable frequency for this port, in Hz.
+    pub min_frequency: u64,
+    /// Maximum tunable frequency for this port, in Hz.
+    pub max_frequency: u64,
+    /// Whether this port exposes a bias tee.
+    pub has_bias_tee: bool,
+}
+
+/// Immutable device metadata reported while opening the device.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceInfo {
+    /// Board name detected from the firmware board ID.
+    pub board_name: &'static str,
+    /// Firmware version string.
+    pub firmware_version: String,
+    /// Parsed 64-bit serial number, if available.
+    pub serial: Option<u64>,
+    /// RF ports reported for this device.
+    pub rf_ports: Vec<RfPortInfo>,
+}
+
+/// Keep the public snapshot and receive settings committed by the same completed operation.
+fn apply_update<'a, C: ControlBackend + 'static, M: SampleMode>(
+    session: &Arc<Session<C>>,
+    active: &'a mut Config<M>,
+    proposed: Config<M>,
+    commands: Vec<Command>,
+    receive: Option<ReceiveSettings>,
+    validation: Result<()>,
+) -> impl MaybeFuture<Output = Result<()>> + use<'a, C, M> {
+    let operation = session.apply(commands, receive);
+    ready(validation)
+        .and_then(move |_| operation)
+        .map(move |result| {
+            result?;
+            active.apply_internal(&proposed);
+            Ok(())
+        })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{protocol::ReceiverMode, test_support::FakeTransport};
+    use futures_lite::future::{block_on, poll_once};
+    use std::{future::IntoFuture, sync::atomic::Ordering};
+
+    #[test]
+    fn configuration_commits_snapshot_and_receive_settings_only_on_success() {
+        block_on(async {
+            for wait in [false, true] {
+                let session = Session::new(FakeTransport::default());
+                let state = &session.control.state;
+                let mut active = Config::default();
+                let initial = active.clone();
+                let proposed = Config::builder()
+                    .frequency_hz(144_000_000)
+                    .sample_rate_hz(625_000)
+                    .build()
+                    .unwrap();
+                state.fail_packing.store(true, Ordering::SeqCst);
+                let (commands, receive) = protocol::configuration(&proposed);
+                let operation = apply_update(
+                    &session,
+                    &mut active,
+                    proposed.clone(),
+                    commands,
+                    Some(receive),
+                    Ok(()),
+                );
+                assert!(
+                    if wait {
+                        operation.wait()
+                    } else {
+                        operation.await
                     }
-                    Ok(device)
-                })
-            })
-            .and_then(|device| {
-                device
-                    .detach_and_claim_interface(0)
-                    .map_err(Error::from)
-                    .map_err(|error| error.at("claiming HydraSDR USB interface 0"))
-                    .map_ok(move |interface| (device, interface))
-            })
-            .and_then(|(device, interface)| {
-                let dev = Self::from_control(NusbControl::new(device, interface));
-                dev.version_string_read()
-                    .map_err(|error| error.at("validating HydraSDR firmware version"))
-                    .map(move |result| {
-                        let firmware = result?;
-                        if !firmware.starts_with(EXPECTED_FW_PREFIX) {
-                            return Err(Error::DeviceNotFound);
-                        }
-                        Ok(dev)
-                    })
-            })
-    }
-}
-
-fn build_device_info(
-    _board_id: BoardId,
-    firmware_version: String,
-    part_serial: PartIdSerialNo,
-) -> DeviceInfo {
-    DeviceInfo {
-        serial: serial_from_part_id(&part_serial),
-        board_name: "HydraSDR RFOne",
-        firmware_version,
-        rf_ports: rf_port_infos(),
-    }
-}
-
-fn gain_step<C: ControlBackend>(
-    control: Arc<C>,
-    request: Option<VendorControlRequest>,
-) -> impl MaybeFuture<Output = Result<()>> + use<C> {
-    match request {
-        Some(request) => {
-            Either::left(HydraSdr::<C>::control_in_exact_with(control, request, 1).map_ok(|_| ()))
-        }
-        None => Either::right(ready(Ok(()))),
-    }
-}
-
-fn gain_config_plan(gain: crate::GainConfig) -> Vec<VendorControlRequest> {
-    match gain {
-        crate::GainConfig::Preset(crate::GainPreset::Linearity(value)) => preset_gain_plan(
-            value,
-            &RFONE_LINEARITY_VGA_GAINS,
-            &RFONE_LINEARITY_MIXER_GAINS,
-            &RFONE_LINEARITY_LNA_GAINS,
-        ),
-        crate::GainConfig::Preset(crate::GainPreset::Sensitivity(value)) => preset_gain_plan(
-            value,
-            &RFONE_SENSITIVITY_VGA_GAINS,
-            &RFONE_SENSITIVITY_MIXER_GAINS,
-            &RFONE_SENSITIVITY_LNA_GAINS,
-        ),
-        crate::GainConfig::Stages { lna, mixer, vga } => legacy_stage_gain_plan(lna, mixer, vga),
-    }
-}
-
-fn legacy_stage_gain_plan(
-    lna: crate::StageGain,
-    mixer: crate::StageGain,
-    vga: u8,
-) -> Vec<VendorControlRequest> {
-    let mut requests = Vec::new();
-    let mut push = |request, value| {
-        requests.push(VendorControlRequest::legacy_gain(request, value));
-    };
-    match lna {
-        crate::StageGain::Manual(value) => {
-            push(VendorRequest::SetLnaAgc, 0);
-            push(VendorRequest::SetLnaGain, value);
-        }
-        crate::StageGain::Agc => push(VendorRequest::SetLnaAgc, 1),
-    }
-    match mixer {
-        crate::StageGain::Manual(value) => {
-            push(VendorRequest::SetMixerAgc, 0);
-            push(VendorRequest::SetMixerGain, value);
-        }
-        crate::StageGain::Agc => push(VendorRequest::SetMixerAgc, 1),
-    }
-    push(VendorRequest::SetVgaGain, vga);
-    requests
-}
-
-fn preset_gain_plan(
-    value: u8,
-    vga_gains: &[u8],
-    mixer_gains: &[u8],
-    lna_gains: &[u8],
-) -> Vec<VendorControlRequest> {
-    let index = reverse_gain_table_index(value);
-    vec![
-        VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
-        VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
-        VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, vga_gains[index]),
-        VendorControlRequest::legacy_gain(VendorRequest::SetMixerGain, mixer_gains[index]),
-        VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, lna_gains[index]),
-    ]
-}
-
-fn sample_rate_config(
-    sample_type: SampleType,
-    policy: DecimationPolicy,
-    samplerate: u32,
-) -> Result<SelectedSampleRate> {
-    if sample_type == SampleType::Raw {
-        let index = RFONE_RAW_ADC_SAMPLE_RATES
-            .iter()
-            .position(|rate| *rate == samplerate)
-            .ok_or_else(unsupported_sample_rate)?;
-        return Ok(SelectedSampleRate {
-            param: checked_vendor_param(index)?,
-            decimation: 1,
+                    .is_err()
+                );
+                assert_eq!(active, initial);
+                assert_eq!(session.receive_settings().decimation, 1);
+                state.fail_packing.store(false, Ordering::SeqCst);
+                let (commands, receive) = protocol::configuration(&proposed);
+                let operation = apply_update(
+                    &session,
+                    &mut active,
+                    proposed.clone(),
+                    commands,
+                    Some(receive),
+                    Ok(()),
+                );
+                if wait {
+                    operation.wait().unwrap();
+                } else {
+                    operation.await.unwrap();
+                }
+                assert_eq!(active, proposed);
+                assert_eq!(session.receive_settings().decimation, 4);
+            }
         });
     }
 
-    let (hardware_rate, decimation) =
-        sample_rate_hardware_config(policy, samplerate).ok_or_else(unsupported_sample_rate)?;
-    let index = RFONE_FIRMWARE_IQ_SAMPLE_RATES
-        .iter()
-        .position(|rate| *rate == hardware_rate)
-        .expect("selected rate comes from the fixed firmware table");
-    Ok(SelectedSampleRate {
-        param: checked_vendor_param(index)?,
-        decimation,
-    })
-}
-
-fn sample_rate_hardware_config(policy: DecimationPolicy, samplerate: u32) -> Option<(u32, u32)> {
-    let direct_rate = RFONE_FIRMWARE_IQ_SAMPLE_RATES
-        .iter()
-        .find(|rate| **rate == samplerate)
-        .copied();
-    if policy == DecimationPolicy::LowBandwidth
-        && let Some(rate) = direct_rate
-    {
-        return Some((rate, 1));
-    }
-
-    let mut best = None;
-    for hardware_rate in RFONE_FIRMWARE_IQ_SAMPLE_RATES {
-        for decimation in DECIMATION_FACTORS_DESC {
-            if hardware_rate % decimation == 0 && hardware_rate / decimation == samplerate {
-                best = match best {
-                    None => Some((hardware_rate, decimation)),
-                    Some((best_hw, best_decimation))
-                        if policy == DecimationPolicy::HighDefinition
-                            && (hardware_rate > best_hw
-                                || (hardware_rate == best_hw && decimation > best_decimation)) =>
-                    {
-                        Some((hardware_rate, decimation))
-                    }
-                    Some((best_hw, best_decimation))
-                        if policy == DecimationPolicy::LowBandwidth
-                            && (hardware_rate < best_hw
-                                || (hardware_rate == best_hw && decimation > best_decimation)) =>
-                    {
-                        Some((hardware_rate, decimation))
-                    }
-                    Some(existing) => Some(existing),
-                };
-            }
-        }
-    }
-    best
-}
-
-fn unsupported_sample_rate() -> Error {
-    Error::invalid_config(
-        "sample_rate_hz",
-        "is not supported by RFOne and the host decimator",
-    )
-}
-
-fn validate_samplerate_response(response: &[u8]) -> Result<()> {
-    if response.first().copied() != Some(1) {
-        return Err(Error::protocol(
-            "set sample rate",
-            "firmware rejected the selected sample rate",
-        ));
-    }
-    Ok(())
-}
-
-fn decode_c_string(bytes: &[u8]) -> String {
-    let len = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..len]).into_owned()
-}
-
-fn reverse_gain_table_index(value: u8) -> usize {
-    21usize.saturating_sub(value.min(21) as usize)
-}
-
-fn serial_from_part_id(part_serial: &PartIdSerialNo) -> Option<u64> {
-    let serial = ((part_serial.serial_no[2] as u64) << 32) | part_serial.serial_no[3] as u64;
-    (serial != 0).then_some(serial)
-}
-
-fn checked_vendor_param(value: impl TryInto<u16>) -> Result<u16> {
-    value
-        .try_into()
-        .map_err(|_| Error::protocol("encode vendor request", "parameter exceeds 16 bits"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Clone, Copy, Debug)]
-    struct FailingControl(nusb::transfer::TransferError);
-
-    impl ControlBackend for FailingControl {
-        fn control_in(
-            &self,
-            _request: VendorControlRequest,
-        ) -> impl MaybeFuture<Output = Result<Vec<u8>>> + use<> {
-            ready(Err(Error::from(self.0)))
-        }
-
-        fn control_out(
-            &self,
-            _request: VendorControlRequest,
-        ) -> impl MaybeFuture<Output = Result<()>> + use<> {
-            ready(Ok(()))
-        }
-    }
-
-    fn selection(param: u16, decimation: u32) -> SelectedSampleRate {
-        SelectedSampleRate { param, decimation }
-    }
-
     #[test]
-    fn visible_samplerates_come_from_the_fixed_tables() {
-        let mut device =
-            HydraSdr::from_control(FailingControl(nusb::transfer::TransferError::Fault));
-        assert_eq!(device.visible_sample_rates(), RFONE_F32_IQ_SAMPLE_RATES);
-
-        device.sample_type = SampleType::Raw;
-        assert_eq!(device.visible_sample_rates(), RFONE_RAW_ADC_SAMPLE_RATES);
-    }
-
-    #[test]
-    fn fixed_iq_table_contains_exact_decimator_outputs() {
-        let mut derived = Vec::new();
-        for hardware_rate in RFONE_FIRMWARE_IQ_SAMPLE_RATES {
-            for decimation in DECIMATION_FACTORS_DESC {
-                if hardware_rate % decimation == 0 {
-                    derived.push(hardware_rate / decimation);
+    fn canceled_and_unpolled_configuration_leave_snapshot_and_receive_settings_unchanged() {
+        block_on(async {
+            for polled in [false, true] {
+                let session = Session::new(FakeTransport::default());
+                let state = &session.control.state;
+                let mut active = Config::default();
+                let proposed = Config::builder().sample_rate_hz(625_000).build().unwrap();
+                state.pause_control_in_at.store(2, Ordering::SeqCst);
+                let (commands, receive) = protocol::configuration(&proposed);
+                let mut operation = Box::pin(
+                    apply_update(
+                        &session,
+                        &mut active,
+                        proposed,
+                        commands,
+                        Some(receive),
+                        Ok(()),
+                    )
+                    .into_future(),
+                );
+                if polled {
+                    assert!(poll_once(&mut operation).await.is_none());
+                }
+                drop(operation);
+                assert_eq!(active, Config::default());
+                assert_eq!(session.receive_settings().decimation, 1);
+                if !polled {
+                    assert!(state.control_in_requests.lock().unwrap().is_empty());
+                    assert!(state.control_out_requests.lock().unwrap().is_empty());
                 }
             }
-        }
-        derived.sort_unstable_by(|a, b| b.cmp(a));
-        derived.dedup();
-
-        assert_eq!(derived, RFONE_F32_IQ_SAMPLE_RATES);
-        assert_eq!(
-            sample_rate_hardware_config(DecimationPolicy::HighDefinition, 39_062),
-            None
-        );
-        assert_eq!(
-            sample_rate_hardware_config(DecimationPolicy::HighDefinition, 78_125),
-            Some((5_000_000, 64))
-        );
-        let selected = sample_rate_config(
-            SampleType::Float32Iq,
-            DecimationPolicy::HighDefinition,
-            78_125,
-        )
-        .unwrap();
-        assert_eq!(selected, selection(1, 64));
+        });
     }
 
     #[test]
-    fn raw_samplerates_map_back_to_firmware_iq_rate_indices() {
-        assert_eq!(
-            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 20_000_000,)
-                .unwrap(),
-            selection(0, 1)
-        );
-        assert_eq!(
-            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 10_000_000,)
-                .unwrap(),
-            selection(1, 1)
-        );
-        assert_eq!(
-            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 5_000_000,)
-                .unwrap(),
-            selection(2, 1)
-        );
-    }
-
-    #[test]
-    fn decimation_policy_selects_among_fixed_firmware_rates() {
-        assert_eq!(
-            sample_rate_config(
-                SampleType::Float32Iq,
-                DecimationPolicy::LowBandwidth,
-                2_500_000,
+    fn invalid_configuration_change_sends_no_commands() {
+        let session = Session::new(FakeTransport::default());
+        let mut config = Config::default();
+        let proposed = config.clone();
+        assert!(
+            apply_update(
+                &session,
+                &mut config,
+                proposed,
+                vec![OutRequest::set_frequency(0).into()],
+                None,
+                validate_frequency(0)
             )
-            .unwrap(),
-            selection(2, 1)
+            .wait()
+            .is_err()
+        );
+        assert!(
+            session
+                .control
+                .state
+                .control_out_requests
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn opening_reads_firmware_once_and_uses_its_metadata() {
+        let control = FakeTransport::default();
+        let state = Arc::clone(&control.state);
+        let session = Session::initialize(control, Config::default())
+            .wait()
+            .unwrap();
+        assert_eq!(
+            session.info.get().unwrap().firmware_version,
+            "HydraSDR RF test"
         );
         assert_eq!(
-            sample_rate_config(
-                SampleType::Float32Iq,
-                DecimationPolicy::HighDefinition,
-                2_500_000,
-            )
-            .unwrap(),
-            selection(0, 4)
+            state
+                .control_in_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.request == protocol::VendorRequest::VersionStringRead)
+                .count(),
+            1
         );
+        session.shutdown().wait().unwrap();
     }
 
     #[test]
-    fn non_table_samplerates_are_rejected() {
-        assert!(matches!(
-            sample_rate_config(SampleType::Raw, DecimationPolicy::LowBandwidth, 12_000_000,),
-            Err(Error::InvalidConfig { .. })
-        ));
-        assert!(matches!(
-            sample_rate_config(
-                SampleType::Float32Iq,
-                DecimationPolicy::LowBandwidth,
-                10_000_500,
-            ),
-            Err(Error::InvalidConfig { .. })
-        ));
-    }
-
-    #[test]
-    fn samplerate_response_must_accept_the_fixed_index() {
-        assert!(validate_samplerate_response(&[1]).is_ok());
-        assert!(validate_samplerate_response(&[0]).is_err());
-    }
-
-    #[test]
-    fn stage_gain_config_produces_a_complete_legacy_plan() {
-        let gain = crate::GainConfig::Stages {
-            lna: crate::StageGain::Manual(3),
-            mixer: crate::StageGain::Agc,
-            vga: 4,
-        };
-
-        assert_eq!(
-            gain_config_plan(gain),
-            [
-                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
-                VendorControlRequest::legacy_gain(VendorRequest::SetLnaGain, 3),
-                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 1),
-                VendorControlRequest::legacy_gain(VendorRequest::SetVgaGain, 4),
-            ]
-        );
-    }
-
-    #[test]
-    fn preset_gain_config_uses_the_fixed_rfone_table() {
-        let value = 12;
-        let index = reverse_gain_table_index(value);
-
-        assert_eq!(
-            gain_config_plan(crate::GainConfig::Preset(crate::GainPreset::Linearity(
-                value,
-            ))),
-            [
-                VendorControlRequest::legacy_gain(VendorRequest::SetMixerAgc, 0),
-                VendorControlRequest::legacy_gain(VendorRequest::SetLnaAgc, 0),
-                VendorControlRequest::legacy_gain(
-                    VendorRequest::SetVgaGain,
-                    RFONE_LINEARITY_VGA_GAINS[index],
-                ),
-                VendorControlRequest::legacy_gain(
-                    VendorRequest::SetMixerGain,
-                    RFONE_LINEARITY_MIXER_GAINS[index],
-                ),
-                VendorControlRequest::legacy_gain(
-                    VendorRequest::SetLnaGain,
-                    RFONE_LINEARITY_LNA_GAINS[index],
-                ),
-            ]
-        );
+    fn metadata_failure_or_cancellation_shuts_down_claimed_hardware() {
+        block_on(async {
+            for cancel in [false, true] {
+                for stage in 1..=3 {
+                    let control = FakeTransport::default();
+                    let state = Arc::clone(&control.state);
+                    if cancel {
+                        state.pause_control_in_at.store(stage, Ordering::SeqCst);
+                    } else {
+                        let mut replies = state.responses.lock().unwrap();
+                        if stage > 1 {
+                            replies.push_back(Ok(vec![1]));
+                        }
+                        if stage > 2 {
+                            replies.push_back(Ok(b"HydraSDR RF test".to_vec()));
+                        }
+                        replies.push_back(Err(nusb::transfer::TransferError::Disconnected.into()));
+                    }
+                    let mut operation =
+                        Box::pin(Session::initialize(control, Config::default()).into_future());
+                    if cancel {
+                        assert!(poll_once(&mut operation).await.is_none());
+                        drop(operation);
+                    } else {
+                        assert!(operation.await.is_err());
+                    }
+                    assert_eq!(
+                        *state.control_out_requests.lock().unwrap(),
+                        [
+                            OutRequest::receiver_mode(ReceiverMode::Off),
+                            OutRequest::set_rf_bias(false)
+                        ]
+                    );
+                }
+            }
+        });
     }
 }

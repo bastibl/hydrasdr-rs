@@ -49,7 +49,7 @@ pub enum Error {
     },
 }
 
-/// Stable high-level error category.
+/// Stable error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorKind {

@@ -5,12 +5,22 @@ use crate::rfone::{
     RFONE_F32_IQ_SAMPLE_RATES, RFONE_LNA_MAX_GAIN, RFONE_MAX_FREQ_HZ, RFONE_MIN_FREQ_HZ,
     RFONE_MIXER_MAX_GAIN, RFONE_RAW_ADC_SAMPLE_RATES, RFONE_VGA_MAX_GAIN,
 };
-use crate::types::{DecimationPolicy, SampleType};
 use core::marker::PhantomData;
 
 const DEFAULT_FREQUENCY_HZ: u64 = 100_000_000;
 const DEFAULT_SAMPLE_RATE_HZ: u32 = 10_000_000;
 const MAX_PRESET_GAIN: u8 = 21;
+
+/// Policy for selecting a firmware rate and host-side IQ decimation factor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecimationPolicy {
+    /// Prefer the lowest firmware rate that can produce the requested effective
+    /// IQ rate, reducing USB and host processing bandwidth.
+    LowBandwidth,
+    /// Prefer the highest firmware rate that can produce the requested
+    /// effective IQ rate, then decimate on the host for greater oversampling.
+    HighDefinition,
+}
 
 /// Device selection used by [`crate::DeviceBuilder`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +45,7 @@ pub enum RfPort {
     Rx2 = 2,
 }
 
-/// Runtime view of the high-level sample format.
+/// Runtime view of the sample format.
 ///
 /// Configuration uses the [`RawAdc`] and [`F32Iq`] marker types instead. This
 /// enum is derived from that marker and is exposed for runtime state reporting.
@@ -54,14 +64,16 @@ pub enum SampleFormat {
 }
 
 mod private {
-    pub trait Sealed {}
+    pub trait Sealed {
+        type Processor: crate::rx::processing::Processor;
+    }
 }
 
 /// Compile-time receiver sample mode.
 ///
-/// This trait is sealed because the RFOne high-level API currently supports
+/// This trait is sealed because the RFOne API currently supports
 /// only [`RawAdc`] and [`F32Iq`].
-pub trait SampleMode: private::Sealed + Copy + core::fmt::Debug + Eq {
+pub trait SampleMode: private::Sealed + Copy + core::fmt::Debug + Eq + 'static {
     /// Runtime format corresponding to this compile-time mode.
     const FORMAT: SampleFormat;
 }
@@ -74,8 +86,12 @@ pub struct RawAdc;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct F32Iq;
 
-impl private::Sealed for RawAdc {}
-impl private::Sealed for F32Iq {}
+impl private::Sealed for RawAdc {
+    type Processor = crate::rx::processing::RawProcessor;
+}
+impl private::Sealed for F32Iq {
+    type Processor = crate::rx::processing::IqProcessor;
+}
 
 impl SampleMode for RawAdc {
     const FORMAT: SampleFormat = SampleFormat::RawAdc;
@@ -83,15 +99,6 @@ impl SampleMode for RawAdc {
 
 impl SampleMode for F32Iq {
     const FORMAT: SampleFormat = SampleFormat::F32Iq;
-}
-
-impl SampleFormat {
-    pub(crate) const fn sample_type(self) -> SampleType {
-        match self {
-            Self::RawAdc => SampleType::Raw,
-            Self::F32Iq => SampleType::Float32Iq,
-        }
-    }
 }
 
 /// Preset gain plans for common RFOne operation.
@@ -153,7 +160,7 @@ impl From<GainPreset> for GainConfig {
     }
 }
 
-/// Reusable high-level receiver configuration for sample mode `M`.
+/// Reusable receiver configuration for sample mode `M`.
 ///
 /// The generic mode defaults to [`F32Iq`]. Select [`RawAdc`] with
 /// [`ConfigBuilder::raw_adc`].
@@ -225,7 +232,7 @@ impl Default for Config<F32Iq> {
 }
 
 impl Config<F32Iq> {
-    /// Start building a high-level receiver configuration.
+    /// Start building a receiver configuration.
     ///
     /// ```
     /// use hydrasdr_rs::{Config, GainPreset};

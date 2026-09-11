@@ -1,3 +1,5 @@
+//! Operations usable through native blocking waits or asynchronous polling.
+
 use std::{
     future::{Future, IntoFuture},
     marker::PhantomData,
@@ -11,7 +13,7 @@ use nusb::MaybeFuture;
 pub(crate) use std::marker::Send as NonWasmSend;
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) trait NonWasmSend {}
+pub trait NonWasmSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T> NonWasmSend for T {}
 
@@ -284,6 +286,53 @@ where
         match &mut *self {
             Self::Left(future) => future.as_mut().poll(cx),
             Self::Right(future) => future.as_mut().poll(cx),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type OperationFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type OperationFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+
+/// Delay construction of an operation that may submit IO eagerly.
+pub(crate) fn defer<F, M>(operation: F) -> impl MaybeFuture<Output = M::Output>
+where
+    F: FnOnce() -> M + NonWasmSend,
+    M: MaybeFuture,
+{
+    ready(()).continue_with(move |_| operation())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn eager_operations_are_constructed_only_when_waited_or_polled() {
+        for mode in 0..4 {
+            let count = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&count);
+            let operation = defer(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                ready(42)
+            });
+            assert_eq!(count.load(Ordering::SeqCst), 0);
+            match mode {
+                0 => drop(operation),
+                1 => {
+                    let future = operation.into_future();
+                    assert_eq!(count.load(Ordering::SeqCst), 0);
+                    drop(future);
+                }
+                2 => assert_eq!(operation.wait(), 42),
+                _ => assert_eq!(futures_lite::future::block_on(operation.into_future()), 42),
+            }
+            assert_eq!(count.load(Ordering::SeqCst), usize::from(mode >= 2));
         }
     }
 }

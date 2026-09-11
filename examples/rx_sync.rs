@@ -32,13 +32,14 @@ fn main() -> hydrasdr_rs::Result<()> {
     let mut rx = dev.rx_stream()?;
     rx.start().wait()?;
     let mut samples = [Complex32::default(); 32];
+    // Reads may be partial; only samples[..count] contains received data.
     let count = rx
         .read(&mut samples, Some(std::time::Duration::from_secs(1)))
         .wait()?;
     // Close consumes rx and releases its stream claim.
     let stats = rx.close().wait()?;
     dev.shutdown().wait()?;
-    println!("rx samples: {count}, first={:?}", samples.first());
+    println!("rx samples: {count}, first={:?}", samples[..count].first());
     println!("short RX complete: {stats:?}");
 
     Ok(())

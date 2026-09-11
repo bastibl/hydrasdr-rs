@@ -1,4 +1,4 @@
-//! Minimal RFOne ADC-to-IQ conversion used by direct streaming.
+//! Minimal RFOne ADC-to-IQ conversion used by receive streaming.
 //!
 //! This ports the unpacked 12-bit `float32_opt` path from `hydrasdr-host`:
 //! LUT scaling, DC removal, Fs/4 polyphase DDC, and Q delay compensation.

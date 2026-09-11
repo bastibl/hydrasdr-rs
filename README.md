@@ -8,7 +8,28 @@ Also `nusb`'s main interface is async, which fits well with [FutureSDR](https://
 
 Rust HydraSDR RFOne driver built on [`nusb`](https://crates.io/crates/nusb). The public API uses the same typed device and receive stream for blocking and asynchronous operation: call `.wait()` on native targets or `.await` the operation. WebUSB supports the asynchronous path.
 
-Use [`Device`](src/high_level.rs), [`DeviceBuilder`](src/high_level.rs), and [`Config`](src/config.rs) for applications.
+Use [`Device`](src/device.rs), [`DeviceBuilder`](src/device.rs), and [`Config`](src/config.rs) for applications.
+
+## Code organization
+
+The driver is organized by responsibility rather than mirroring the C API:
+
+| Component | Responsibility |
+| --- | --- |
+| `device` and `config` | Public typed API, validated configuration, and the last successfully applied configuration snapshot |
+| `session` | Shared hardware ownership, exclusive stream claims, and shutdown/drop cleanup |
+| `protocol` | Firmware requests, command sequencing, response decoding, and rate/gain selection |
+| `usb` | Device opening and the nusb control/endpoint transport |
+| `rx` | One persistent queue, receive lifecycle, raw block borrowing, and IQ processing |
+| `converter` | Stateful RFOne ADC-to-IQ conversion and decimation |
+
+The device and stream share one hardware session. Blocking waits and async polling consume the same endpoint queue; raw and IQ modes share queue management and use their own processing state. Firmware wire values and DSP reference tests remain independent of this organization.
+
+## Migrating to 0.5
+
+Blocking IQ `read()` now has the same partial-read behavior as an awaited read: it returns buffered samples or processes at most one new usable USB completion. Use only `samples[..count]` after a read, and loop when you need to fill a larger slice. Blocking timeouts still return the available count (zero when nothing arrived); awaited reads still use external cancellation/timeouts.
+
+Native applications may now alternate `.wait()` and `.await()` operations on the same stream. Neither operation changes the queue's identity. Both execution modes retain the queue across ordinary stop/start cycles; packing changes recreate it. Existing public method signatures remain available.
 
 ## Status
 
@@ -19,7 +40,7 @@ Implemented:
 - Internal USB control implementation for board/version/serial queries, sample-rate configuration, gain control, RF port selection, packing, receiver mode, and short RX streaming.
 - Executor-agnostic async API counterparts.
 - Complex float 32-bit sample conversion with the fixed RFOne rates and host-side decimation factors from 1x through 64x.
-- Low-level raw ADC block streaming for applications that need raw USB blocks.
+- Typed raw ADC block streaming for applications that need raw USB blocks.
 
 TODO:
 
@@ -145,7 +166,7 @@ fn main() -> hydrasdr_rs::Result<()> {
 
 The device remains available while its stream is active, so frequency, sample-rate, RF-port, gain, bias-tee, raw-packing, and IQ-decimation controls do not require the caller to manage a stop/start cycle. Call `stop().await` to pause the receiver while retaining its transfer queue for restart. If start or stop fails or is canceled after beginning, stop the stream successfully before reading or restarting.
 
-Call `close()` to consume the stream, stop reception permanently, release its queue and exclusive claim, and return accumulated statistics. Native close supports both `.wait()` and `.await()` regardless of read mode. The close operation owns the stream immediately; creating it or converting it into a future performs no USB commands. Dropping the operation, even before polling, invokes stream drop cleanup. A failed close returns its original error, and failure or cancellation invokes best-effort drop cleanup; the consumed stream cannot be used again.
+Call `close()` to consume the stream, stop reception permanently, release its queue and exclusive claim, and return accumulated statistics. Native close supports both `.wait()` and `.await()` regardless of how earlier operations were executed. The close operation owns the stream immediately; creating it or converting it into a future performs no USB commands. Dropping the operation, even before polling, invokes stream drop cleanup. A failed close returns its original error, and failure or cancellation invokes best-effort drop cleanup; the consumed stream cannot be used again.
 
 Shutdown returns `Busy` while a stream or close operation holds the claim, including during background cleanup. After close succeeds, shutdown can run. Unpolled shutdown operations have no lifecycle effects. Once shutdown begins without a held claim, it is terminal and retryable.
 

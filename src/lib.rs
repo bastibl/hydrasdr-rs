@@ -57,29 +57,32 @@
 
 #![deny(missing_docs)]
 
-mod commands;
 mod config;
-mod constants;
 mod converter;
 mod device;
 mod discovery;
 mod errors;
-mod high_level;
 mod maybe_future;
+mod protocol;
 mod rfone;
-mod streaming;
-mod types;
+mod rx;
+mod session;
 mod usb;
 
+pub use config::DecimationPolicy;
 pub use config::{
     Config, ConfigBuilder, F32Iq, GainConfig, GainPreset, RawAdc, RfPort, SampleFormat, SampleMode,
     StageGain,
 };
-pub use constants::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
+pub use device::{Device, DeviceBuilder};
+pub use device::{DeviceInfo, RfPortInfo};
 pub use discovery::DeviceDescriptor;
 pub use errors::{Error, ErrorKind, Result};
-pub use high_level::{Device, DeviceBuilder, RxStream, SampleBlock};
 pub use num_complex::Complex32;
 pub use nusb::MaybeFuture;
-pub use streaming::StreamingStats;
-pub use types::{DecimationPolicy, DeviceInfo, RfPortInfo};
+pub use rx::MAX_F32_IQ_SAMPLES_PER_TRANSFER;
+pub use rx::StreamingStats;
+pub use rx::{RxStream, SampleBlock};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test_support;

@@ -12,7 +12,7 @@ pub(crate) struct UsbDeviceId {
     pub description: &'static str,
 }
 
-/// Known HydraSDR RFOne USB IDs accepted by the direct open/list helpers.
+/// Known HydraSDR RFOne USB IDs accepted by the device open/list helpers.
 pub(crate) const USB_DEVICE_IDS: &[UsbDeviceId] = &[
     UsbDeviceId {
         vid: 0x1d50,
@@ -45,7 +45,7 @@ pub struct DeviceDescriptor {
 }
 
 impl DeviceDescriptor {
-    /// Convert a `nusb` descriptor into direct HydraSDR metadata if the VID/PID matches.
+    /// Convert a `nusb` descriptor into HydraSDR metadata if the VID/PID matches.
     pub(crate) fn from_nusb(info: &nusb::DeviceInfo) -> Option<Self> {
         let device_id = find_usb_device_id(info.vendor_id(), info.product_id())?;
         Some(Self {

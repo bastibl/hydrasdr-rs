@@ -1,8 +1,8 @@
-//! RFOne constants and descriptor helpers used by the high-level driver.
+//! RFOne constants and descriptor helpers used by the driver.
 
-use crate::types::RfPortInfo;
+use crate::device::RfPortInfo;
 
-/// Number of queued streaming transfers used by the C RFOne path.
+/// Default number of queued RFOne receive transfers.
 pub(crate) const RFONE_TRANSFER_COUNT: u32 = 16;
 /// Bulk-IN endpoint used for RX samples.
 pub(crate) const RFONE_RX_ENDPOINT: u8 = 0x81;
